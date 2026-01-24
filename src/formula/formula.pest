@@ -1,0 +1,92 @@
+// Excel Formula Grammar for pest parser
+// Supports: numbers, strings, booleans, cell references, ranges, functions, operators
+
+WHITESPACE = _{ " " | "\t" }
+
+// Entry point
+formula = { "=" ~ expr }
+
+// Expression with operator precedence (handled by PrattParser)
+expr = { prefix* ~ primary ~ (infix ~ prefix* ~ primary)* }
+
+// Primary expressions
+primary = _{
+    "(" ~ expr ~ ")"
+    | function_call
+    | range_ref
+    | cell_ref
+    | literal
+}
+
+// Literals
+literal = _{ boolean | number | string | error_literal }
+
+boolean = { ^"TRUE" | ^"FALSE" }
+
+number = @{
+    "-"? ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) ~ ("." ~ ASCII_DIGIT+)? ~ (^"E" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+}
+
+string = @{ "\"" ~ (!"\"" ~ ANY | "\"\"")* ~ "\"" }
+
+error_literal = {
+    "#NULL!" | "#DIV/0!" | "#VALUE!" | "#REF!" | "#NAME?" | "#NUM!" | "#N/A" | "#CALC!" | "#SPILL!"
+}
+
+// Cell references
+// Supports: A1, $A1, A$1, $A$1, Sheet1!A1, 'Sheet Name'!A1
+cell_ref = {
+    (sheet_prefix ~ "!")? ~ cell_address
+}
+
+sheet_prefix = {
+    quoted_sheet_name | sheet_name
+}
+
+quoted_sheet_name = @{ "'" ~ (!"'" ~ ANY | "''")* ~ "'" }
+sheet_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ".")* }
+
+cell_address = @{
+    "$"? ~ ASCII_ALPHA+ ~ "$"? ~ ASCII_DIGIT+
+}
+
+// Range references (A1:B2)
+range_ref = {
+    cell_ref ~ ":" ~ cell_ref
+}
+
+// Function calls
+function_call = {
+    function_name ~ "(" ~ arg_list? ~ ")"
+}
+
+function_name = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | ".")* }
+
+arg_list = {
+    expr ~ ("," ~ expr)*
+}
+
+// Operators (precedence handled by PrattParser)
+prefix = _{ neg | pos }
+neg = { "-" }
+pos = { "+" }
+
+infix = _{ add | sub | mul | div | pow | concat | eq | neq | lt | lte | gt | gte }
+
+// Arithmetic (standard precedence)
+add = { "+" }
+sub = { "-" }
+mul = { "*" }
+div = { "/" }
+pow = { "^" }
+
+// String concatenation
+concat = { "&" }
+
+// Comparison
+eq  = { "=" }
+neq = { "<>" }
+lt  = { "<" }
+lte = { "<=" }
+gt  = { ">" }
+gte = { ">=" }

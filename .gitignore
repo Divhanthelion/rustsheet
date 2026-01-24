@@ -1,0 +1,9 @@
+/target
+
+# Ignore markdown files except README
+*.md
+!README.md
+
+# Generated files
+test_output.xlsx
+contextprompt.md
