@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 [features]
 default = ["xlsx", "gui"]
 xlsx = ["dep:calamine", "dep:rust_xlsxwriter"]
-gui = ["dep:eframe", "dep:egui_extras", "dep:image", "dep:rfd"]
+gui = ["dep:eframe", "dep:egui_extras", "dep:egui_plot", "dep:image", "dep:rfd"]
 gpu = ["dep:wgpu", "dep:glyphon", "dep:cosmic-text", "dep:bytemuck", "dep:raw-window-handle"]
 wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:console_error_panic_hook", "wgpu?/webgpu", "wgpu?/webgl"]
 
@@ -43,6 +43,7 @@ tokio = { version = "1.0", features = ["rt-multi-thread", "sync"], optional = tr
 # GUI (optional)
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "persistence"], optional = true }
 egui_extras = { version = "0.31", features = ["all_loaders"], optional = true }
+egui_plot = { version = "0.31", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 rfd = { version = "0.15", optional = true }
 

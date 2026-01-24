@@ -1,6 +1,9 @@
 use crate::cell::{CellCoord, CellValue};
+use crate::chart::{ChartDefinition, ChartKind, ChartSeries, LegendPosition};
 use crate::grid::Sheet;
-use rust_xlsxwriter::{Workbook, Worksheet, XlsxError};
+use rust_xlsxwriter::{
+    Chart, ChartLegendPosition, ChartType, Workbook, Worksheet, XlsxError,
+};
 use std::path::Path;
 use thiserror::Error;
 
@@ -15,6 +18,8 @@ pub enum XlsxWriteError {
 /// Excel file writer using rust_xlsxwriter
 pub struct XlsxWriter {
     workbook: Workbook,
+    /// Charts to add to sheets
+    pending_charts: Vec<(u32, ChartDefinition)>,
 }
 
 impl XlsxWriter {
@@ -22,6 +27,7 @@ impl XlsxWriter {
     pub fn new() -> Self {
         Self {
             workbook: Workbook::new(),
+            pending_charts: Vec::new(),
         }
     }
 
@@ -33,6 +39,131 @@ impl XlsxWriter {
         // Write cell data
         for (coord, value) in sheet.iter() {
             Self::write_cell(worksheet, sheet, coord, value)?;
+        }
+
+        Ok(())
+    }
+
+    /// Add a chart to be inserted into a worksheet
+    pub fn add_chart(&mut self, sheet_index: u32, chart: ChartDefinition) {
+        self.pending_charts.push((sheet_index, chart));
+    }
+
+    /// Add a sheet with charts
+    pub fn add_sheet_with_charts(
+        &mut self,
+        sheet: &Sheet,
+        sheet_index: u32,
+        charts: &[ChartDefinition],
+    ) -> Result<(), XlsxWriteError> {
+        let worksheet = self.workbook.add_worksheet();
+        worksheet.set_name(sheet.name())?;
+
+        // Write cell data
+        for (coord, value) in sheet.iter() {
+            Self::write_cell(worksheet, sheet, coord, value)?;
+        }
+
+        // Add charts to this worksheet
+        for chart_def in charts {
+            if chart_def.sheet_index == sheet_index {
+                let chart = Self::create_chart(chart_def, sheet.name())?;
+                let (row, col) = chart_def.overlay_area.anchor_cell;
+                worksheet.insert_chart(row, col as u16, &chart)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Create a rust_xlsxwriter Chart from our ChartDefinition
+    fn create_chart(
+        chart_def: &ChartDefinition,
+        sheet_name: &str,
+    ) -> Result<Chart, XlsxWriteError> {
+        // Map our ChartKind to rust_xlsxwriter ChartType
+        let chart_type = Self::map_chart_type(chart_def.chart_kind);
+        let mut chart = Chart::new(chart_type);
+
+        // Set chart title
+        if let Some(title) = &chart_def.title {
+            chart.title().set_name(title);
+        }
+
+        // Add series
+        for series in &chart_def.series {
+            Self::add_series_to_chart(&mut chart, series, sheet_name)?;
+        }
+
+        // Set axis labels
+        if let Some(label) = &chart_def.x_axis.title {
+            chart.x_axis().set_name(label);
+        }
+        if let Some(label) = &chart_def.y_axis.title {
+            chart.y_axis().set_name(label);
+        }
+
+        // Set legend
+        if chart_def.legend.visible {
+            let position = Self::map_legend_position(chart_def.legend.position);
+            chart.legend().set_position(position);
+        } else {
+            chart.legend().set_hidden();
+        }
+
+        // Set size
+        let (width, height) = chart_def.overlay_area.size;
+        chart.set_width(width as u32);
+        chart.set_height(height as u32);
+
+        Ok(chart)
+    }
+
+    /// Map our ChartKind to rust_xlsxwriter ChartType
+    fn map_chart_type(kind: ChartKind) -> ChartType {
+        match kind {
+            ChartKind::Line => ChartType::Line,
+            ChartKind::Bar => ChartType::Column,
+            ChartKind::Scatter => ChartType::Scatter,
+            ChartKind::Area => ChartType::Area,
+            ChartKind::Pie => ChartType::Pie,
+            ChartKind::Doughnut => ChartType::Doughnut,
+            ChartKind::Combo => ChartType::Line, // Combo defaults to line
+        }
+    }
+
+    /// Map our LegendPosition to rust_xlsxwriter ChartLegendPosition
+    fn map_legend_position(pos: LegendPosition) -> ChartLegendPosition {
+        match pos {
+            LegendPosition::Right => ChartLegendPosition::Right,
+            LegendPosition::Left => ChartLegendPosition::Left,
+            LegendPosition::Top => ChartLegendPosition::Top,
+            LegendPosition::Bottom => ChartLegendPosition::Bottom,
+            LegendPosition::None => ChartLegendPosition::Right, // Default to Right when hidden
+        }
+    }
+
+    /// Add a series to a chart
+    fn add_series_to_chart(
+        chart: &mut Chart,
+        series: &ChartSeries,
+        sheet_name: &str,
+    ) -> Result<(), XlsxWriteError> {
+        let chart_series = chart.add_series();
+
+        // Set series name
+        if let Some(name) = &series.name {
+            chart_series.set_name(name);
+        }
+
+        // Set values range
+        let y_range = format_range_reference(sheet_name, &series.y_range);
+        chart_series.set_values(&y_range);
+
+        // Set categories/X values if present
+        if let Some(x_range) = &series.x_range {
+            let x_formula = format_range_reference(sheet_name, x_range);
+            chart_series.set_categories(&x_formula);
         }
 
         Ok(())
@@ -107,13 +238,80 @@ impl Default for XlsxWriter {
     }
 }
 
+/// Format a CellRange as an Excel formula reference
+fn format_range_reference(sheet_name: &str, range: &crate::cell::CellRange) -> String {
+    // Handle sheet names with spaces
+    let quoted_sheet = if sheet_name.contains(' ') || sheet_name.contains('\'') {
+        format!("'{}'", sheet_name.replace('\'', "''"))
+    } else {
+        sheet_name.to_string()
+    };
+
+    format!(
+        "{}!${}${}:${}${}",
+        quoted_sheet,
+        col_to_letters(range.start.col),
+        range.start.row + 1,
+        col_to_letters(range.end.col),
+        range.end.row + 1
+    )
+}
+
+/// Convert 0-based column index to letters (A, B, ..., Z, AA, AB, ...)
+fn col_to_letters(mut col: u32) -> String {
+    let mut result = String::new();
+    col += 1; // Convert to 1-based
+    while col > 0 {
+        col -= 1;
+        result.insert(0, (b'A' + (col % 26) as u8) as char);
+        col /= 26;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cell::CellRange;
 
     #[test]
     fn test_create_workbook() {
         let _writer = XlsxWriter::new();
         // Just verify it creates without error
+    }
+
+    #[test]
+    fn test_format_range_reference() {
+        let range = CellRange::from_a1("A1:A10").unwrap();
+        let ref_str = format_range_reference("Sheet1", &range);
+        assert_eq!(ref_str, "Sheet1!$A$1:$A$10");
+
+        let range2 = CellRange::from_a1("B2:D5").unwrap();
+        let ref_str2 = format_range_reference("Data Sheet", &range2);
+        assert_eq!(ref_str2, "'Data Sheet'!$B$2:$D$5");
+    }
+
+    #[test]
+    fn test_col_to_letters() {
+        assert_eq!(col_to_letters(0), "A");
+        assert_eq!(col_to_letters(25), "Z");
+        assert_eq!(col_to_letters(26), "AA");
+        assert_eq!(col_to_letters(27), "AB");
+    }
+
+    #[test]
+    fn test_map_chart_type() {
+        assert!(matches!(
+            XlsxWriter::map_chart_type(ChartKind::Line),
+            ChartType::Line
+        ));
+        assert!(matches!(
+            XlsxWriter::map_chart_type(ChartKind::Bar),
+            ChartType::Column
+        ));
+        assert!(matches!(
+            XlsxWriter::map_chart_type(ChartKind::Pie),
+            ChartType::Pie
+        ));
     }
 }

@@ -3,6 +3,7 @@
 use eframe::egui::{self, CentralPanel, TopBottomPanel, Key, Vec2};
 use crate::cell::{CellCoord, StringPool};
 use crate::calc::{CalcEngine, CellValueInput, CellResult};
+use crate::chart::{ChartDataResolver, ChartDefinition, ChartId};
 use std::path::PathBuf;
 
 use super::formula_bar::FormulaBar;
@@ -11,6 +12,8 @@ use super::help_panel::HelpPanel;
 use super::selection::Selection;
 use super::sheet_tabs::SheetTabs;
 use super::theme::Theme;
+use super::chart_widget::ChartWindowManager;
+use super::chart_editor::ChartEditor;
 
 /// Input mode FSM - decouples input handling from render order
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +173,12 @@ pub struct SpreadsheetApp {
     status_message: Option<(String, std::time::Instant)>,
     /// Undo/redo history
     undo_history: UndoHistory,
+    /// Chart window manager
+    chart_windows: ChartWindowManager,
+    /// Chart editor dialog
+    chart_editor: ChartEditor,
+    /// Chart data resolver for caching
+    chart_data_resolver: ChartDataResolver,
 }
 
 impl Default for SpreadsheetApp {
@@ -205,6 +214,9 @@ impl SpreadsheetApp {
             modified: false,
             status_message: None,
             undo_history: UndoHistory::default(),
+            chart_windows: ChartWindowManager::new(),
+            chart_editor: ChartEditor::new(),
+            chart_data_resolver: ChartDataResolver::new(),
         };
 
         // Add some demo data
@@ -330,6 +342,9 @@ impl SpreadsheetApp {
             self.engine.set_value(self.current_sheet, coord, CellValueInput::Text(content.to_string()));
         }
         self.modified = true;
+
+        // Refresh charts that may depend on this cell
+        self.refresh_all_charts();
     }
 
     /// Apply a cell content string (used by undo/redo)
@@ -355,6 +370,9 @@ impl SpreadsheetApp {
             }
         }
         self.modified = true;
+
+        // Refresh charts that may depend on this cell
+        self.refresh_all_charts();
     }
 
     /// Undo the last action
@@ -859,6 +877,77 @@ impl SpreadsheetApp {
     fn save_file_as(&mut self) {
         self.set_status("Excel support not enabled. Rebuild with --features xlsx");
     }
+
+    /// Add a new chart
+    fn add_chart(&mut self, chart: ChartDefinition) {
+        let id = chart.id;
+        self.chart_windows.add_chart(chart.clone());
+        self.update_chart_data(id);
+        self.modified = true;
+        self.set_status("Chart added");
+    }
+
+    /// Update a chart
+    fn update_chart(&mut self, chart: ChartDefinition) {
+        let id = chart.id;
+        if let Some(window) = self.chart_windows.get_chart_mut(id) {
+            window.chart = chart;
+            self.update_chart_data(id);
+        }
+        self.modified = true;
+        self.set_status("Chart updated");
+    }
+
+    /// Remove a chart
+    fn remove_chart(&mut self, id: ChartId) {
+        self.chart_windows.remove_chart(id);
+        self.chart_data_resolver.invalidate_all();
+        self.modified = true;
+        self.set_status("Chart removed");
+    }
+
+    /// Update chart data from spreadsheet cells
+    fn update_chart_data(&mut self, id: ChartId) {
+        if let Some(window) = self.chart_windows.get_chart(id) {
+            let chart = window.chart.clone();
+            let data = self.chart_data_resolver.get_chart_data(&chart, &self.engine);
+            if let Some(window) = self.chart_windows.get_chart_mut(id) {
+                window.set_data(data);
+            }
+        }
+    }
+
+    /// Refresh all chart data (called after cell edits)
+    fn refresh_all_charts(&mut self) {
+        // Mark resolver as needing refresh
+        self.chart_data_resolver.invalidate_all();
+
+        // Update all charts
+        let ids: Vec<ChartId> = self.chart_windows.chart_ids();
+        for id in ids {
+            self.update_chart_data(id);
+        }
+    }
+
+    /// Open the chart editor for a new chart
+    fn open_new_chart_editor(&mut self) {
+        // Use current selection as the default data range
+        let selection_range = self.selection.primary_range();
+        if selection_range.width() > 1 || selection_range.height() > 1 {
+            // Multi-cell selection - use it as the data range
+            self.chart_editor.open_new_with_selection(self.current_sheet, &selection_range);
+        } else {
+            // Single cell - open without pre-filled range
+            self.chart_editor.open_new(self.current_sheet);
+        }
+    }
+
+    /// Open the chart editor to edit an existing chart
+    fn open_edit_chart_editor(&mut self, id: ChartId) {
+        if let Some(window) = self.chart_windows.get_chart(id) {
+            self.chart_editor.open_edit(&window.chart);
+        }
+    }
 }
 
 impl eframe::App for SpreadsheetApp {
@@ -930,6 +1019,13 @@ impl eframe::App for SpreadsheetApp {
                     }
                     if ui.add_enabled(can_redo, egui::Button::new("Redo (Cmd+Shift+Z)")).clicked() {
                         self.redo();
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("Insert", |ui| {
+                    if ui.button("Chart...").clicked() {
+                        self.open_new_chart_editor();
                         ui.close_menu();
                     }
                 });
@@ -1009,6 +1105,24 @@ impl eframe::App for SpreadsheetApp {
 
         // Help panel
         self.help_panel.show(ctx);
+
+        // Chart windows
+        let chart_response = self.chart_windows.show(ctx);
+
+        // Handle chart window actions
+        if let Some(edit_id) = chart_response.edit_requested {
+            self.open_edit_chart_editor(edit_id);
+        }
+
+        // Chart editor dialog
+        let editor_response = self.chart_editor.show(ctx);
+        if let Some(chart) = editor_response.chart {
+            if editor_response.is_edit {
+                self.update_chart(chart);
+            } else {
+                self.add_chart(chart);
+            }
+        }
 
         // Status bar at bottom
         TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
@@ -1118,12 +1232,30 @@ impl eframe::App for SpreadsheetApp {
                 &self.grid_config,
                 &self.scroll,
                 &self.theme,
-                self.is_editing(), // Pass editing state to prevent focus fighting
             );
 
             let grid_response = grid.show(ui);
 
-            // Handle grid clicks
+            // Handle drag for multi-cell selection
+            if let Some(coord) = grid_response.drag_started {
+                if self.is_editing() {
+                    // Confirm current edit before starting drag selection
+                    self.edit_buffer = self.formula_bar.content.clone();
+                    self.confirm_edit(false, false);
+                }
+                self.selection.move_to(coord);
+                // Request focus on drag start
+                let grid_id = egui::Id::new("spreadsheet_grid");
+                ctx.memory_mut(|m| m.request_focus(grid_id));
+            }
+
+            if let Some(coord) = grid_response.drag_to {
+                // Extend selection while dragging
+                self.selection.extend_to(coord);
+                self.scroll.scroll_to_cell(coord, &self.grid_config, viewport_size);
+            }
+
+            // Handle grid clicks (non-drag single click)
             if let Some(coord) = grid_response.clicked_cell {
                 if self.is_editing() {
                     // Confirm current edit before moving
@@ -1132,6 +1264,9 @@ impl eframe::App for SpreadsheetApp {
                 }
                 self.selection.move_to(coord);
                 self.scroll.scroll_to_cell(coord, &self.grid_config, viewport_size);
+                // Request focus on click
+                let grid_id = egui::Id::new("spreadsheet_grid");
+                ctx.memory_mut(|m| m.request_focus(grid_id));
             }
 
             // Handle double-click for editing

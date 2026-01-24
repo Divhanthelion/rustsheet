@@ -133,6 +133,12 @@ pub struct GridResponse {
     pub text_input_char: Option<char>,
     /// Navigation key pressed
     pub navigation: Option<NavigationKey>,
+    /// Drag started at this cell (for multi-cell selection)
+    pub drag_started: Option<CellCoord>,
+    /// Dragging over this cell (extend selection)
+    pub drag_to: Option<CellCoord>,
+    /// Drag ended
+    pub drag_ended: bool,
 }
 
 /// Navigation keys
@@ -162,8 +168,6 @@ pub struct SpreadsheetGrid<'a> {
     config: &'a GridConfig,
     scroll: &'a ScrollState,
     theme: &'a Theme,
-    /// Whether the app is currently in editing mode (formula bar has focus)
-    editing: bool,
 }
 
 impl<'a> SpreadsheetGrid<'a> {
@@ -174,7 +178,6 @@ impl<'a> SpreadsheetGrid<'a> {
         config: &'a GridConfig,
         scroll: &'a ScrollState,
         theme: &'a Theme,
-        editing: bool,
     ) -> Self {
         Self {
             sheet_index,
@@ -183,7 +186,6 @@ impl<'a> SpreadsheetGrid<'a> {
             config,
             scroll,
             theme,
-            editing,
         }
     }
 
@@ -201,14 +203,9 @@ impl<'a> SpreadsheetGrid<'a> {
         let (grid_rect, _) = ui.allocate_exact_size(viewport_size, Sense::hover());
         let grid_response = ui.interact(grid_rect, grid_id, Sense::click_and_drag());
 
-        // When NOT in editing mode, the grid should always have focus
-        // This prevents egui's default focus navigation from stealing focus on arrow keys
-        // CRITICAL: Don't fight for focus when the formula bar should have it
-        if !self.editing {
-            ui.ctx().memory_mut(|m| {
-                m.request_focus(grid_id);
-            });
-        }
+        // NOTE: We do NOT request focus every frame - this breaks TextEdit in dialogs
+        // Focus is only requested on specific events (click, navigation key)
+        // See egui bug #5187 - repeated request_focus() breaks text input
 
         if ui.is_rect_visible(grid_rect) {
             let painter = ui.painter_at(grid_rect);
@@ -250,25 +247,52 @@ impl<'a> SpreadsheetGrid<'a> {
             // Draw selection
             self.draw_selection(&painter, data_rect);
 
-            // Handle clicks
+            // Helper to convert screen position to cell coordinate
+            let pos_to_cell = |pos: Pos2| -> Option<CellCoord> {
+                if data_rect.contains(pos) {
+                    let local_pos = pos - data_rect.min + Vec2::new(self.scroll.offset_x, self.scroll.offset_y);
+                    let col = self.config.column_at_x(local_pos.x);
+                    let row = self.config.row_at_y(local_pos.y);
+                    Some(CellCoord::new(row, col))
+                } else {
+                    None
+                }
+            };
+
+            // Handle drag for multi-cell selection
+            if grid_response.drag_started() {
+                if let Some(pos) = grid_response.interact_pointer_pos() {
+                    if let Some(coord) = pos_to_cell(pos) {
+                        response.drag_started = Some(coord);
+                    }
+                }
+            }
+
+            if grid_response.dragged() {
+                if let Some(pos) = grid_response.interact_pointer_pos() {
+                    if let Some(coord) = pos_to_cell(pos) {
+                        response.drag_to = Some(coord);
+                    }
+                }
+            }
+
+            if grid_response.drag_stopped() {
+                response.drag_ended = true;
+            }
+
+            // Handle clicks (single click when not dragging)
             if grid_response.clicked() {
                 if let Some(pos) = grid_response.interact_pointer_pos() {
-                    if data_rect.contains(pos) {
-                        let local_pos = pos - data_rect.min + Vec2::new(self.scroll.offset_x, self.scroll.offset_y);
-                        let col = self.config.column_at_x(local_pos.x);
-                        let row = self.config.row_at_y(local_pos.y);
-                        response.clicked_cell = Some(CellCoord::new(row, col));
+                    if let Some(coord) = pos_to_cell(pos) {
+                        response.clicked_cell = Some(coord);
                     }
                 }
             }
 
             if grid_response.double_clicked() {
                 if let Some(pos) = grid_response.interact_pointer_pos() {
-                    if data_rect.contains(pos) {
-                        let local_pos = pos - data_rect.min + Vec2::new(self.scroll.offset_x, self.scroll.offset_y);
-                        let col = self.config.column_at_x(local_pos.x);
-                        let row = self.config.row_at_y(local_pos.y);
-                        response.double_clicked_cell = Some(CellCoord::new(row, col));
+                    if let Some(coord) = pos_to_cell(pos) {
+                        response.double_clicked_cell = Some(coord);
                     }
                 }
             }

@@ -124,6 +124,15 @@ impl CellRange {
         (start_row..=end_row)
             .flat_map(move |row| (start_col..=end_col).map(move |col| CellCoord::new(row, col)))
     }
+
+    /// Convert to A1-style string representation
+    pub fn to_a1(&self) -> String {
+        if self.start == self.end {
+            self.start.to_a1()
+        } else {
+            format!("{}:{}", self.start.to_a1(), self.end.to_a1())
+        }
+    }
 }
 
 impl fmt::Display for CellRange {

@@ -36,6 +36,7 @@ pub mod cell;
 pub mod grid;
 pub mod formula;
 pub mod calc;
+pub mod chart;
 
 #[cfg(feature = "xlsx")]
 pub mod xlsx;
@@ -55,6 +56,10 @@ pub mod prelude {
     pub use crate::grid::{Sheet, SparseGrid};
     pub use crate::formula::{Expr, BinaryOp, UnaryOp, FunctionCall, FormulaParser};
     pub use crate::calc::{CalcEngine, CellResult, CellValueInput};
+    pub use crate::chart::{
+        ChartId, ChartKind, ChartDefinition, ChartSeries, ChartStyle,
+        ChartOverlayArea, ChartDataResolver, SheetObject, SheetObjectManager,
+    };
 
     #[cfg(feature = "xlsx")]
     pub use crate::xlsx::{XlsxReader, XlsxWriter};
