@@ -41,11 +41,14 @@ pub mod chart;
 #[cfg(feature = "xlsx")]
 pub mod xlsx;
 
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 pub mod gui;
 
 #[cfg(feature = "gpu")]
 pub mod render;
+
+#[cfg(feature = "web")]
+use wasm_bindgen::JsCast;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -70,3 +73,41 @@ pub mod prelude {
 
 pub use calc::CellValueInput;
 pub use calc::CellResult;
+
+/// WASM entry point for web builds
+#[cfg(feature = "web")]
+#[wasm_bindgen::prelude::wasm_bindgen(start)]
+pub fn wasm_main() {
+    console_error_panic_hook::set_once();
+
+    let web_options = eframe::WebOptions::default();
+
+    wasm_bindgen_futures::spawn_local(async {
+        // Get the canvas element
+        let canvas = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("canvas"))
+            .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+            .expect("Failed to find canvas element");
+
+        let start_result = eframe::WebRunner::new()
+            .start(
+                canvas,
+                web_options,
+                Box::new(|_cc| Ok(Box::new(gui::app::SpreadsheetApp::new()))),
+            )
+            .await;
+
+        // Remove loading screen
+        if let Some(loading) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id("loading"))
+        {
+            loading.remove();
+        }
+
+        if let Err(e) = start_result {
+            web_sys::console::error_1(&format!("Failed to start: {:?}", e).into());
+        }
+    });
+}

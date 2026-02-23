@@ -4,32 +4,32 @@
 //! - Cartesian charts (Line, Bar, Scatter, Area) use egui_plot
 //! - Polar charts (Pie, Doughnut) use custom egui::Mesh rendering
 
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 mod cartesian;
 
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 mod polar;
 
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 pub use cartesian::*;
 
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 pub use polar::*;
 
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 use eframe::egui::{Ui, Rect, Color32};
 
 use super::{ChartDefinition, ChartKind, ResolvedChartData};
 
 /// Trait for chart renderers
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 pub trait ChartRenderer {
     /// Render the chart into the given UI area
     fn render(&self, ui: &mut Ui, chart: &ChartDefinition, data: &ResolvedChartData, rect: Rect);
 }
 
 /// Render a chart based on its type
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 pub fn render_chart(
     ui: &mut Ui,
     chart: &ChartDefinition,
@@ -49,7 +49,7 @@ pub fn render_chart(
 }
 
 /// Convert RGBA color array to egui Color32
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 pub fn to_color32(rgba: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3])
 }

@@ -35,7 +35,7 @@ mod objects;
 mod database;
 mod downsample;
 
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 pub mod render;
 
 pub use definition::*;
@@ -43,5 +43,5 @@ pub use objects::*;
 pub use database::*;
 pub use downsample::*;
 
-#[cfg(feature = "gui")]
+#[cfg(any(feature = "gui", feature = "web"))]
 pub use render::{render_chart, CartesianRenderer, PolarRenderer, ChartRenderer};

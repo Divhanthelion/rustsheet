@@ -1318,7 +1318,8 @@ impl eframe::App for SpreadsheetApp {
     }
 }
 
-/// Run the application
+/// Run the application (native only)
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run() -> Result<(), eframe::Error> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
