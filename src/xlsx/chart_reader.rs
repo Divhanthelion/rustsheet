@@ -44,11 +44,36 @@ impl ChartReader {
     pub fn read_charts_from_reader<R: Read + Seek>(
         reader: R,
     ) -> Result<Vec<(u32, ChartDefinition)>, ChartReadError> {
-        // Use zip crate through calamine's re-export or handle manually
-        // For now, return empty list as chart import is complex
-        // Full implementation would parse xl/charts/*.xml files
-        let _ = reader;
-        Ok(Vec::new())
+        let mut archive = zip::ZipArchive::new(reader).map_err(|e| ChartReadError::Zip(e.to_string()))?;
+
+        if let Ok(mut file) = archive.by_name("xl/rustsheet/charts.json") {
+            let mut json = String::new();
+            file.read_to_string(&mut json)?;
+            drop(file);
+            let charts: Vec<ChartDefinition> = serde_json::from_str(&json)
+                .map_err(|e| ChartReadError::Xml(e.to_string()))?;
+            return Ok(charts.into_iter().map(|c| (c.sheet_index, c)).collect());
+        }
+
+        let names: Vec<String> = archive
+            .file_names()
+            .filter(|n| n.starts_with("xl/charts/") && n.ends_with(".xml"))
+            .map(|s| s.to_string())
+            .collect();
+
+        let mut charts = Vec::new();
+        for name in names {
+            let mut file = archive
+                .by_name(&name)
+                .map_err(|e| ChartReadError::Zip(e.to_string()))?;
+            let mut xml = String::new();
+            file.read_to_string(&mut xml)?;
+            drop(file);
+            if let Ok(chart) = parse_chart_xml(&xml, 0) {
+                charts.push((0, chart));
+            }
+        }
+        Ok(charts)
     }
 }
 

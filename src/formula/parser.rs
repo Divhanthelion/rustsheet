@@ -323,6 +323,18 @@ mod tests {
     }
 
     #[test]
+    fn test_sheet_qualified_ref() {
+        let expr = parser().parse("=Sheet2!A1").unwrap();
+        match expr {
+            Expr::CellRef(r) => {
+                assert_eq!(r.sheet.as_deref(), Some("Sheet2"));
+                assert_eq!(r.coord, CellCoord::new(0, 0));
+            }
+            _ => panic!("Expected cell ref"),
+        }
+    }
+
+    #[test]
     fn test_function() {
         let expr = parser().parse("=SUM(A1:B2, 10)").unwrap();
         match expr {

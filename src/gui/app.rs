@@ -130,8 +130,6 @@ impl UndoHistory {
 
 #[cfg(feature = "xlsx")]
 use crate::xlsx::{XlsxReader, XlsxWriter};
-#[cfg(feature = "xlsx")]
-use crate::prelude::Sheet;
 
 /// Main application state
 pub struct SpreadsheetApp {
@@ -272,20 +270,17 @@ impl SpreadsheetApp {
 
     /// Get the formula or value for the formula bar
     fn get_cell_formula_or_value(&self, coord: CellCoord) -> String {
-        // Try to get the formula first
         if let Some(formula) = self.engine.get_formula(self.current_sheet, coord) {
-            return format!("={}", formula);
+            return formula_bar_text(&formula);
         }
 
-        // Otherwise return the display value
         self.get_cell_display(coord)
     }
 
     /// Get cell content as a string for undo/redo snapshots
     fn get_cell_content_string(&self, coord: CellCoord) -> Option<String> {
-        // Check for formula first
         if let Some(formula) = self.engine.get_formula(self.current_sheet, coord) {
-            return Some(format!("={}", formula));
+            return Some(formula_bar_text(&formula));
         }
 
         // Otherwise get the value
@@ -608,6 +603,7 @@ impl SpreadsheetApp {
             selection: Selection::default(),
             scroll: ScrollState::default(),
         });
+        self.engine.set_sheet_names(self.sheet_names.clone());
 
         // Switch to the new sheet
         let new_index = (self.sheet_names.len() - 1) as u32;
@@ -630,12 +626,11 @@ impl SpreadsheetApp {
 
         let name = self.sheet_names[index].clone();
 
-        // Clear engine data for this sheet
-        // Note: CalcEngine doesn't have a clear_sheet method, but data is keyed by (sheet, coord)
-        // For now, we just remove from our tracking. Engine data becomes orphaned but harmless.
-
+        self.engine.remove_sheet_and_shift(sheet_index);
+        self.chart_windows.remove_sheet_and_shift(sheet_index);
         self.sheet_names.remove(index);
         self.sheet_states.remove(index);
+        self.engine.set_sheet_names(self.sheet_names.clone());
 
         // Adjust current sheet index if needed
         if self.current_sheet as usize >= self.sheet_names.len() {
@@ -667,7 +662,10 @@ impl SpreadsheetApp {
                 return;
             }
         }
+        let old_name = self.sheet_names[index].clone();
+        self.engine.rewrite_sheet_name(&old_name, &new_name);
         self.sheet_names[index] = new_name;
+        self.engine.set_sheet_names(self.sheet_names.clone());
         self.modified = true;
     }
 
@@ -677,6 +675,9 @@ impl SpreadsheetApp {
         self.string_pool = StringPool::new();
         self.current_sheet = 0;
         self.sheet_names = vec!["Sheet1".to_string()];
+        self.engine.set_sheet_names(self.sheet_names.clone());
+        self.chart_windows.clear();
+        self.chart_data_resolver.invalidate_all();
         self.sheet_states = vec![SheetState {
             selection: Selection::default(),
             scroll: ScrollState::default(),
@@ -692,190 +693,242 @@ impl SpreadsheetApp {
         self.set_status("New workbook created");
     }
 
+    fn extension_is(path: &PathBuf, ext: &str) -> bool {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+    }
+
     /// Open file dialog and load workbook
-    #[cfg(feature = "xlsx")]
     fn open_file(&mut self) {
         use rfd::FileDialog;
 
-        let file = FileDialog::new()
-            .add_filter("Excel Files", &["xlsx", "xls"])
-            .add_filter("All Files", &["*"])
-            .pick_file();
+        let mut dialog = FileDialog::new();
+        #[cfg(feature = "csv")]
+        {
+            dialog = dialog.add_filter("CSV", &["csv"]);
+        }
+        #[cfg(feature = "xlsx")]
+        {
+            dialog = dialog.add_filter("Excel Files", &["xlsx", "xls"]);
+        }
+        let file = dialog.add_filter("All Files", &["*"]).pick_file();
 
         if let Some(path) = file {
             self.load_file(&path);
         }
     }
 
-    /// Load a workbook from file
-    #[cfg(feature = "xlsx")]
     fn load_file(&mut self, path: &PathBuf) {
+        #[cfg(feature = "csv")]
+        if Self::extension_is(path, "csv") {
+            self.load_csv(path);
+            return;
+        }
+        #[cfg(feature = "xlsx")]
+        {
+            self.load_xlsx(path);
+            return;
+        }
+        #[cfg(not(feature = "xlsx"))]
+        self.set_status("Excel support not enabled. Rebuild with --features xlsx");
+    }
+
+    fn finish_open(&mut self, path: &PathBuf) {
+        self.current_sheet = 0;
+        self.current_file = Some(path.clone());
+        self.modified = false;
+        self.selection = Selection::default();
+        self.scroll = ScrollState::default();
+        self.input_mode = InputMode::Navigation;
+        self.formula_bar.editing = false;
+        self.undo_history.clear();
+        let sheet_count = self.sheet_names.len();
+        self.set_status(&format!(
+            "Opened: {} ({} sheet{})",
+            path.display(),
+            sheet_count,
+            if sheet_count == 1 { "" } else { "s" }
+        ));
+    }
+
+    #[cfg(feature = "csv")]
+    fn load_csv(&mut self, path: &PathBuf) {
+        let mut loaded = CalcEngine::new();
+        match crate::csv_io::read_path(&mut loaded, 0, path) {
+            Ok(()) => {
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Sheet1")
+                    .to_string();
+                self.engine = loaded;
+                self.string_pool = StringPool::new();
+                self.sheet_names = vec![name];
+                self.engine.set_sheet_names(self.sheet_names.clone());
+                self.chart_windows.clear();
+                self.chart_data_resolver.invalidate_all();
+                self.sheet_states = vec![SheetState {
+                    selection: Selection::default(),
+                    scroll: ScrollState::default(),
+                }];
+                self.finish_open(path);
+            }
+            Err(e) => self.set_status(&format!("Failed to open CSV: {e}")),
+        }
+    }
+
+    #[cfg(feature = "xlsx")]
+    fn load_xlsx(&mut self, path: &PathBuf) {
         match XlsxReader::open(path) {
             Ok(mut reader) => {
-                // Create new engine
-                self.engine = CalcEngine::new();
-                self.string_pool = StringPool::new();
-
-                // Get all sheet names
                 let sheet_names = reader.sheet_names();
                 if sheet_names.is_empty() {
                     self.set_status("Workbook has no sheets");
                     return;
                 }
 
-                // Reset sheet management
-                self.sheet_names = Vec::new();
-                self.sheet_states = Vec::new();
+                self.engine = CalcEngine::new();
+                self.string_pool = StringPool::new();
+                self.sheet_names = sheet_names.clone();
+                self.engine.set_sheet_names(self.sheet_names.clone());
+                self.sheet_states = self
+                    .sheet_names
+                    .iter()
+                    .map(|_| SheetState {
+                        selection: Selection::default(),
+                        scroll: ScrollState::default(),
+                    })
+                    .collect();
 
-                // Read all sheets
                 for (sheet_index, sheet_name) in sheet_names.iter().enumerate() {
-                    match reader.read_sheet(sheet_name) {
-                        Ok(sheet) => {
-                            // Copy sheet data to engine
-                            for (coord, value) in sheet.iter() {
-                                match value {
-                                    crate::cell::CellValue::Number(n) => {
-                                        self.engine.set_value(sheet_index as u32, coord, CellValueInput::Number(*n));
-                                    }
-                                    crate::cell::CellValue::Text(_) => {
-                                        if let Some(text) = sheet.resolve_text(value) {
-                                            self.engine.set_value(sheet_index as u32, coord, CellValueInput::Text(text.to_string()));
-                                        }
-                                    }
-                                    crate::cell::CellValue::Bool(b) => {
-                                        self.engine.set_value(sheet_index as u32, coord, CellValueInput::Bool(*b));
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            // Add sheet name and state
-                            self.sheet_names.push(sheet_name.clone());
-                            self.sheet_states.push(SheetState {
-                                selection: Selection::default(),
-                                scroll: ScrollState::default(),
-                            });
-                        }
-                        Err(e) => {
-                            self.set_status(&format!("Error reading sheet '{}': {:?}", sheet_name, e));
-                            // Continue with other sheets
-                        }
+                    if let Err(e) =
+                        reader.read_into_engine(sheet_name, &mut self.engine, sheet_index as u32)
+                    {
+                        self.set_status(&format!("Error reading sheet '{sheet_name}': {e:?}"));
                     }
                 }
 
-                // Ensure we have at least one sheet
                 if self.sheet_names.is_empty() {
                     self.sheet_names.push("Sheet1".to_string());
+                    self.engine.set_sheet_names(self.sheet_names.clone());
                     self.sheet_states.push(SheetState {
                         selection: Selection::default(),
                         scroll: ScrollState::default(),
                     });
                 }
 
-                self.current_sheet = 0;
-                self.current_file = Some(path.clone());
-                self.modified = false;
-                self.selection = Selection::default();
-                self.scroll = ScrollState::default();
-                self.input_mode = InputMode::Navigation;
-                self.formula_bar.editing = false;
-                self.undo_history.clear();
-                let sheet_count = self.sheet_names.len();
-                self.set_status(&format!("Opened: {} ({} sheet{})", path.display(), sheet_count, if sheet_count == 1 { "" } else { "s" }));
+                self.chart_windows.clear();
+                self.chart_data_resolver.invalidate_all();
+                if let Ok(charts) = crate::xlsx::ChartReader::read_charts(path) {
+                    for (_sheet, chart) in charts {
+                        let id = chart.id;
+                        self.chart_windows.add_chart(chart);
+                        self.update_chart_data(id);
+                    }
+                }
+
+                self.finish_open(path);
             }
-            Err(e) => {
-                self.set_status(&format!("Failed to open file: {:?}", e));
-            }
+            Err(e) => self.set_status(&format!("Failed to open file: {e:?}")),
         }
     }
 
-    /// Save file dialog and save workbook
-    #[cfg(feature = "xlsx")]
     fn save_file(&mut self) {
-        if let Some(path) = &self.current_file.clone() {
-            self.save_to_path(path);
+        if let Some(path) = self.current_file.clone() {
+            self.save_to_path(&path);
         } else {
             self.save_file_as();
         }
     }
 
-    /// Save As dialog
-    #[cfg(feature = "xlsx")]
     fn save_file_as(&mut self) {
         use rfd::FileDialog;
 
-        let file = FileDialog::new()
-            .add_filter("Excel Files", &["xlsx"])
-            .set_file_name("workbook.xlsx")
-            .save_file();
+        let mut dialog = FileDialog::new();
+        #[cfg(feature = "csv")]
+        {
+            dialog = dialog.add_filter("CSV", &["csv"]);
+        }
+        #[cfg(feature = "xlsx")]
+        {
+            dialog = dialog.add_filter("Excel Files", &["xlsx"]);
+        }
+        let default_name = if cfg!(feature = "xlsx") {
+            "workbook.xlsx"
+        } else {
+            "workbook.csv"
+        };
+        let file = dialog.set_file_name(default_name).save_file();
 
         if let Some(path) = file {
             self.save_to_path(&path);
         }
     }
 
-    /// Save workbook to path
-    #[cfg(feature = "xlsx")]
     fn save_to_path(&mut self, path: &PathBuf) {
+        #[cfg(feature = "csv")]
+        if Self::extension_is(path, "csv") {
+            self.save_csv(path);
+            return;
+        }
+        #[cfg(feature = "xlsx")]
+        {
+            self.save_xlsx(path);
+            return;
+        }
+        #[cfg(not(feature = "xlsx"))]
+        self.set_status("Excel support not enabled. Rebuild with --features xlsx");
+    }
+
+    #[cfg(feature = "csv")]
+    fn save_csv(&mut self, path: &PathBuf) {
+        match crate::csv_io::write_path(&self.engine, self.current_sheet, path) {
+            Ok(()) => {
+                self.current_file = Some(path.clone());
+                self.modified = false;
+                let extra = if self.sheet_names.len() > 1 {
+                    " (current sheet only)"
+                } else {
+                    ""
+                };
+                self.set_status(&format!("Saved: {}{extra}", path.display()));
+            }
+            Err(e) => self.set_status(&format!("Failed to save CSV: {e}")),
+        }
+    }
+
+    #[cfg(feature = "xlsx")]
+    fn save_xlsx(&mut self, path: &PathBuf) {
         let mut writer = XlsxWriter::new();
 
-        // Save all sheets
+        let charts = self.chart_windows.all_charts();
         for (sheet_index, sheet_name) in self.sheet_names.iter().enumerate() {
-            let mut sheet = Sheet::new(sheet_name);
-
-            // Copy all data from engine to sheet
-            // For now, scan the visible range
-            for row in 0..=self.max_row {
-                for col in 0..=self.max_col {
-                    let coord = CellCoord::new(row, col);
-                    let value = self.engine.get_value(sheet_index as u32, coord);
-                    match value {
-                        crate::calc::CellResult::Value(n) => {
-                            sheet.set_number(coord, n);
-                        }
-                        crate::calc::CellResult::Text(s) => {
-                            sheet.set_text(coord, &s);
-                        }
-                        crate::calc::CellResult::Bool(b) => {
-                            sheet.set_bool(coord, b);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            if let Err(e) = writer.add_sheet(&sheet) {
-                self.set_status(&format!("Error creating sheet '{}': {:?}", sheet_name, e));
+            if let Err(e) = writer.add_engine_sheet_with_charts(
+                sheet_name,
+                &self.engine,
+                sheet_index as u32,
+                &charts,
+            ) {
+                self.set_status(&format!("Error creating sheet '{sheet_name}': {e:?}"));
                 return;
             }
         }
 
-        match writer.save(path) {
-            Ok(_) => {
+        match writer.save_with_charts(path, &charts) {
+            Ok(()) => {
                 self.current_file = Some(path.clone());
                 self.modified = false;
                 let sheet_count = self.sheet_names.len();
-                self.set_status(&format!("Saved: {} ({} sheet{})", path.display(), sheet_count, if sheet_count == 1 { "" } else { "s" }));
+                self.set_status(&format!(
+                    "Saved: {} ({} sheet{})",
+                    path.display(),
+                    sheet_count,
+                    if sheet_count == 1 { "" } else { "s" }
+                ));
             }
-            Err(e) => {
-                self.set_status(&format!("Failed to save: {:?}", e));
-            }
+            Err(e) => self.set_status(&format!("Failed to save: {e:?}")),
         }
-    }
-
-    #[cfg(not(feature = "xlsx"))]
-    fn open_file(&mut self) {
-        self.set_status("Excel support not enabled. Rebuild with --features xlsx");
-    }
-
-    #[cfg(not(feature = "xlsx"))]
-    fn save_file(&mut self) {
-        self.set_status("Excel support not enabled. Rebuild with --features xlsx");
-    }
-
-    #[cfg(not(feature = "xlsx"))]
-    fn save_file_as(&mut self) {
-        self.set_status("Excel support not enabled. Rebuild with --features xlsx");
     }
 
     /// Add a new chart
@@ -1318,6 +1371,15 @@ impl eframe::App for SpreadsheetApp {
     }
 }
 
+/// Stored formulas already include `=`. Do not prefix another one.
+fn formula_bar_text(stored: &str) -> String {
+    if stored.starts_with('=') {
+        stored.to_string()
+    } else {
+        format!("={stored}")
+    }
+}
+
 /// Run the application (native only)
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run() -> Result<(), eframe::Error> {
@@ -1334,4 +1396,119 @@ pub fn run() -> Result<(), eframe::Error> {
         options,
         Box::new(|_cc| Ok(Box::new(SpreadsheetApp::new()))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::calc::CellValueInput;
+    use crate::formula::FormulaParser;
+
+    #[test]
+    fn displayed_formula_reparses() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        let coord = CellCoord::from_a1("A3").unwrap();
+        app.set_cell_content(coord, "=SUM(A1:A2)");
+
+        let displayed = app.get_cell_formula_or_value(coord);
+        assert_eq!(displayed, "=SUM(A1:A2)");
+        FormulaParser::new()
+            .parse(&displayed)
+            .expect("formula bar text must re-parse");
+
+        let snapshot = app.get_cell_content_string(coord).expect("formula snapshot");
+        assert_eq!(snapshot, "=SUM(A1:A2)");
+        FormulaParser::new()
+            .parse(&snapshot)
+            .expect("undo snapshot must re-parse");
+    }
+
+    #[test]
+    fn formula_bar_text_does_not_double_equals() {
+        assert_eq!(formula_bar_text("=SUM(A1:A2)"), "=SUM(A1:A2)");
+        assert_eq!(formula_bar_text("SUM(A1:A2)"), "=SUM(A1:A2)");
+        FormulaParser::new()
+            .parse(&formula_bar_text("=A1*2"))
+            .unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "xlsx")]
+    fn save_load_preserves_formula_string() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        let a1 = CellCoord::from_a1("A1").unwrap();
+        let a2 = CellCoord::from_a1("A2").unwrap();
+        let a3 = CellCoord::from_a1("A3").unwrap();
+        app.engine.set_value(0, a1, CellValueInput::Number(1.0));
+        app.engine.set_value(0, a2, CellValueInput::Number(2.0));
+        app.engine.set_formula(0, a3, "=SUM(A1:A2)").unwrap();
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "rustsheet_gui_f1_{}_{}.xlsx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        app.save_to_path(&path);
+        app.load_file(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(app.engine.get_formula(0, a3).as_deref(), Some("=SUM(A1:A2)"));
+        assert_eq!(app.engine.get_value(0, a3), CellResult::Value(3.0));
+    }
+
+    #[test]
+    #[cfg(feature = "csv")]
+    fn save_load_csv_preserves_formula_string() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        let a1 = CellCoord::from_a1("A1").unwrap();
+        let a2 = CellCoord::from_a1("A2").unwrap();
+        let a3 = CellCoord::from_a1("A3").unwrap();
+        app.engine.set_value(0, a1, CellValueInput::Number(1.0));
+        app.engine.set_value(0, a2, CellValueInput::Number(2.0));
+        app.engine.set_formula(0, a3, "=SUM(A1:A2)").unwrap();
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "rustsheet_gui_csv_{}_{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        app.save_to_path(&path);
+        app.load_file(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(app.engine.get_formula(0, a3).as_deref(), Some("=SUM(A1:A2)"));
+        assert_eq!(app.engine.get_value(0, a3), CellResult::Value(3.0));
+    }
+
+    /// F2: deleting sheet 0 must not leave the remaining tab pointing at sheet 0's cells.
+    #[test]
+    fn delete_sheet_zero_preserves_remaining_sheet_cells() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        let a1 = CellCoord::new(0, 0);
+        app.engine
+            .set_value(0, a1, CellValueInput::Number(1.0));
+        app.add_sheet();
+        app.engine
+            .set_value(1, a1, CellValueInput::Number(2.0));
+        app.delete_sheet(0);
+
+        assert_eq!(app.sheet_names.len(), 1);
+        assert_eq!(
+            app.engine.get_value(app.current_sheet, a1),
+            CellResult::Value(2.0),
+            "remaining tab must still show the surviving sheet's A1"
+        );
+    }
 }

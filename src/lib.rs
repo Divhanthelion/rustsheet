@@ -1,10 +1,11 @@
 //! RustSheet - A high-performance spreadsheet engine in Rust
 //!
-//! This library provides a complete spreadsheet engine with:
+//! This library provides a spreadsheet engine with:
 //! - Sparse cell storage optimized for large grids
 //! - Excel-compatible formula parsing and evaluation
 //! - Incremental computation with dependency tracking
-//! - Excel file I/O (xlsx format)
+//! - Cross-sheet references and sheet identity remapping
+//! - Excel (`.xlsx`) and CSV file I/O
 //!
 //! # Example
 //!
@@ -40,6 +41,9 @@ pub mod chart;
 
 #[cfg(feature = "xlsx")]
 pub mod xlsx;
+
+#[cfg(feature = "csv")]
+pub mod csv_io;
 
 #[cfg(any(feature = "gui", feature = "web"))]
 pub mod gui;

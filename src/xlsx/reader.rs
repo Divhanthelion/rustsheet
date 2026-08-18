@@ -1,4 +1,6 @@
+use crate::calc::{CalcEngine, CellValueInput};
 use crate::cell::{CellCoord, CellValue};
+use crate::formula::normalize_formula;
 use crate::grid::Sheet;
 use calamine::{open_workbook, Data, Range, Reader, Xlsx, XlsxError};
 use std::path::Path;
@@ -41,6 +43,38 @@ impl XlsxReader {
         let mut sheet = Sheet::new(name);
         self.populate_sheet(&mut sheet, &range);
         Ok(sheet)
+    }
+
+    /// Read values and formulas into the calculation engine.
+    pub fn read_into_engine(
+        &mut self,
+        name: &str,
+        engine: &mut CalcEngine,
+        sheet_index: u32,
+    ) -> Result<(), XlsxReadError> {
+        let range = self
+            .workbook
+            .worksheet_range(name)
+            .map_err(|e| XlsxReadError::SheetRead(e.to_string()))?;
+
+        let start = range.start().unwrap_or((0, 0));
+        for (rel_row, rel_col, cell) in range.used_cells() {
+            let coord = CellCoord::new(start.0 + rel_row as u32, start.1 + rel_col as u32);
+            apply_data_to_engine(engine, sheet_index, coord, cell);
+        }
+
+        if let Ok(formulas) = self.workbook.worksheet_formula(name) {
+            let fstart = formulas.start().unwrap_or((0, 0));
+            for (rel_row, rel_col, formula) in formulas.used_cells() {
+                if formula.is_empty() {
+                    continue;
+                }
+                let coord = CellCoord::new(fstart.0 + rel_row as u32, fstart.1 + rel_col as u32);
+                let _ = engine.set_formula(sheet_index, coord, &normalize_formula(formula));
+            }
+        }
+
+        Ok(())
     }
 
     /// Read a sheet by index
@@ -112,7 +146,28 @@ impl XlsxReader {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    // Tests would require actual Excel files
+fn apply_data_to_engine(engine: &mut CalcEngine, sheet: u32, coord: CellCoord, cell: &Data) {
+    match cell {
+        Data::Empty => {}
+        Data::Int(i) => engine.set_value(sheet, coord, CellValueInput::Number(*i as f64)),
+        Data::Float(f) => engine.set_value(sheet, coord, CellValueInput::Number(*f)),
+        Data::String(s) => engine.set_value(sheet, coord, CellValueInput::Text(s.clone())),
+        Data::Bool(b) => engine.set_value(sheet, coord, CellValueInput::Bool(*b)),
+        Data::DateTime(dt) => engine.set_value(sheet, coord, CellValueInput::Number(dt.as_f64())),
+        Data::DateTimeIso(s) => engine.set_value(sheet, coord, CellValueInput::Text(s.clone())),
+        Data::DurationIso(s) => engine.set_value(sheet, coord, CellValueInput::Text(s.clone())),
+        Data::Error(e) => {
+            let cell_error = match e {
+                calamine::CellErrorType::Div0 => crate::cell::CellError::DivZero,
+                calamine::CellErrorType::NA => crate::cell::CellError::NA,
+                calamine::CellErrorType::Name => crate::cell::CellError::Name,
+                calamine::CellErrorType::Null => crate::cell::CellError::Null,
+                calamine::CellErrorType::Num => crate::cell::CellError::Num,
+                calamine::CellErrorType::Ref => crate::cell::CellError::Ref,
+                calamine::CellErrorType::Value => crate::cell::CellError::Value,
+                calamine::CellErrorType::GettingData => crate::cell::CellError::GettingData,
+            };
+            engine.set_value(sheet, coord, CellValueInput::Error(cell_error));
+        }
+    }
 }

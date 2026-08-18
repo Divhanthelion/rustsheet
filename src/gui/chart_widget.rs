@@ -89,6 +89,23 @@ impl ChartWindowManager {
         self.windows.iter().map(|w| w.chart.id).collect()
     }
 
+    pub fn all_charts(&self) -> Vec<ChartDefinition> {
+        self.windows.iter().map(|w| w.chart.clone()).collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.windows.clear();
+    }
+
+    pub fn remove_sheet_and_shift(&mut self, index: u32) {
+        self.windows.retain(|w| w.chart.sheet_index != index);
+        for window in &mut self.windows {
+            if window.chart.sheet_index > index {
+                window.chart.sheet_index -= 1;
+            }
+        }
+    }
+
     /// Get number of charts
     pub fn len(&self) -> usize {
         self.windows.len()

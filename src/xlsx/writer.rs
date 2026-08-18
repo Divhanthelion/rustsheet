@@ -1,3 +1,4 @@
+use crate::calc::{CalcEngine, CellInput, CellValueInput};
 use crate::cell::{CellCoord, CellValue};
 use crate::chart::{ChartDefinition, ChartKind, ChartSeries, LegendPosition};
 use crate::grid::Sheet;
@@ -13,6 +14,12 @@ pub enum XlsxWriteError {
     Write(#[from] XlsxError),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Column {0} exceeds Excel column limit")]
+    ColumnLimit(u32),
+    #[error("Zip error: {0}")]
+    Zip(String),
+    #[error("JSON error: {0}")]
+    Json(String),
 }
 
 /// Excel file writer using rust_xlsxwriter
@@ -29,6 +36,71 @@ impl XlsxWriter {
             workbook: Workbook::new(),
             pending_charts: Vec::new(),
         }
+    }
+
+    /// Write one engine sheet: stored values and formula strings, used cells only.
+    pub fn add_engine_sheet(
+        &mut self,
+        name: &str,
+        engine: &CalcEngine,
+        sheet_index: u32,
+    ) -> Result<(), XlsxWriteError> {
+        self.add_engine_sheet_with_charts(name, engine, sheet_index, &[])
+    }
+
+    /// Write one engine sheet and embed Excel charts for that sheet.
+    pub fn add_engine_sheet_with_charts(
+        &mut self,
+        name: &str,
+        engine: &CalcEngine,
+        sheet_index: u32,
+        charts: &[ChartDefinition],
+    ) -> Result<(), XlsxWriteError> {
+        let worksheet = self.workbook.add_worksheet();
+        worksheet.set_name(name)?;
+
+        for (coord, input) in engine.iter_sheet_inputs(sheet_index) {
+            Self::write_engine_cell(worksheet, coord, input)?;
+        }
+
+        for chart_def in charts.iter().filter(|c| c.sheet_index == sheet_index) {
+            let chart = Self::create_chart(chart_def, name)?;
+            let (row, col) = chart_def.overlay_area.anchor_cell;
+            let col = u16::try_from(col).map_err(|_| XlsxWriteError::ColumnLimit(col))?;
+            worksheet.insert_chart(row, col, &chart)?;
+        }
+
+        Ok(())
+    }
+
+    fn write_engine_cell(
+        worksheet: &mut Worksheet,
+        coord: CellCoord,
+        input: &CellInput,
+    ) -> Result<(), XlsxWriteError> {
+        let row = coord.row;
+        let col = u16::try_from(coord.col).map_err(|_| XlsxWriteError::ColumnLimit(coord.col))?;
+
+        match input {
+            CellInput::Empty => {}
+            CellInput::Value(CellValueInput::Number(n)) => {
+                worksheet.write_number(row, col, *n)?;
+            }
+            CellInput::Value(CellValueInput::Text(s)) => {
+                worksheet.write_string(row, col, s)?;
+            }
+            CellInput::Value(CellValueInput::Bool(b)) => {
+                worksheet.write_boolean(row, col, *b)?;
+            }
+            CellInput::Value(CellValueInput::Error(e)) => {
+                worksheet.write_string(row, col, e.as_str())?;
+            }
+            CellInput::Formula(formula) => {
+                worksheet.write_formula(row, col, formula.as_str())?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Add a sheet to the workbook
@@ -225,11 +297,58 @@ impl XlsxWriter {
         Ok(())
     }
 
+    /// Save cells plus a rustsheet chart manifest inside the xlsx zip.
+    pub fn save_with_charts<P: AsRef<Path>>(
+        mut self,
+        path: P,
+        charts: &[ChartDefinition],
+    ) -> Result<(), XlsxWriteError> {
+        let bytes = self.workbook.save_to_buffer()?;
+        embed_chart_manifest(bytes, charts, path.as_ref())
+    }
+
     /// Save to a Vec<u8> for in-memory use
     pub fn save_to_buffer(mut self) -> Result<Vec<u8>, XlsxWriteError> {
         let buffer = self.workbook.save_to_buffer()?;
         Ok(buffer)
     }
+}
+
+fn embed_chart_manifest(
+    xlsx: Vec<u8>,
+    charts: &[ChartDefinition],
+    path: &Path,
+) -> Result<(), XlsxWriteError> {
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+    use zip::{ZipArchive, ZipWriter};
+
+    let mut archive =
+        ZipArchive::new(Cursor::new(xlsx)).map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+    let mut out = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut out);
+        for i in 0..archive.len() {
+            let mut file = archive
+                .by_index(i)
+                .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+            let name = file.name().to_string();
+            if name == "xl/rustsheet/charts.json" {
+                continue;
+            }
+            zip.start_file(&name, SimpleFileOptions::default())
+                .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+            std::io::copy(&mut file, &mut zip).map_err(XlsxWriteError::Io)?;
+        }
+        zip.start_file("xl/rustsheet/charts.json", SimpleFileOptions::default())
+            .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+        let json = serde_json::to_vec(charts).map_err(|e| XlsxWriteError::Json(e.to_string()))?;
+        zip.write_all(&json).map_err(XlsxWriteError::Io)?;
+        zip.finish()
+            .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+    }
+    std::fs::write(path, out.into_inner())?;
+    Ok(())
 }
 
 impl Default for XlsxWriter {

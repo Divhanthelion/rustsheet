@@ -34,6 +34,7 @@ impl BuiltinFunctions {
             "POWER" => self.eval_power(&func.args, sheet, engine),
             "MOD" => self.eval_mod(&func.args, sheet, engine),
             "INT" => self.eval_int(&func.args, sheet, engine),
+            "TRUNC" => self.eval_trunc(&func.args, sheet, engine),
             "CEILING" => self.eval_ceiling(&func.args, sheet, engine),
             "FLOOR" => self.eval_floor(&func.args, sheet, engine),
             "SIGN" => self.eval_sign(&func.args, sheet, engine),
@@ -51,7 +52,14 @@ impl BuiltinFunctions {
             "RAND" => CellResult::Value(rand_simple()),
             "RANDBETWEEN" => self.eval_randbetween(&func.args, sheet, engine),
             "PRODUCT" => self.eval_product(&func.args, sheet, engine),
+            "SUMPRODUCT" => self.eval_sumproduct(&func.args, sheet, engine),
             "MEDIAN" => self.eval_median(&func.args, sheet, engine),
+            "STDEV" | "STDEV.S" => self.eval_stdev(&func.args, sheet, engine, false),
+            "STDEVP" | "STDEV.P" => self.eval_stdev(&func.args, sheet, engine, true),
+            "VAR" | "VAR.S" => self.eval_var(&func.args, sheet, engine, false),
+            "VARP" | "VAR.P" => self.eval_var(&func.args, sheet, engine, true),
+            "LARGE" => self.eval_nth(&func.args, sheet, engine, true),
+            "SMALL" => self.eval_nth(&func.args, sheet, engine, false),
 
             // ===== Logical functions =====
             "IF" => self.eval_if(&func.args, sheet, engine),
@@ -102,6 +110,9 @@ impl BuiltinFunctions {
             "SUMIF" => self.eval_sumif(&func.args, sheet, engine),
             "COUNTIF" => self.eval_countif(&func.args, sheet, engine),
             "AVERAGEIF" => self.eval_averageif(&func.args, sheet, engine),
+            "SUMIFS" => self.eval_sumifs(&func.args, sheet, engine),
+            "COUNTIFS" => self.eval_countifs(&func.args, sheet, engine),
+            "AVERAGEIFS" => self.eval_averageifs(&func.args, sheet, engine),
             "COUNTBLANK" => self.eval_countblank(&func.args, sheet, engine),
 
             // ===== Info functions =====
@@ -260,7 +271,7 @@ impl BuiltinFunctions {
 
         match (num.as_number(), divisor.as_number()) {
             (Some(_), Some(d)) if d == 0.0 => CellResult::Error(CellError::DivZero),
-            (Some(n), Some(d)) => CellResult::Value(n % d),
+            (Some(n), Some(d)) => CellResult::Value(n - d * (n / d).floor()),
             _ => CellResult::Error(CellError::Value),
         }
     }
@@ -276,19 +287,43 @@ impl BuiltinFunctions {
         }
     }
 
+    fn eval_trunc(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
+        if args.is_empty() || args.len() > 2 {
+            return CellResult::Error(CellError::Value);
+        }
+        let val = self.eval_arg(&args[0], sheet, engine);
+        let digits = if args.len() == 2 {
+            self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as i32
+        } else {
+            0
+        };
+        match val.as_number() {
+            Some(n) => {
+                let multiplier = 10f64.powi(digits);
+                CellResult::Value((n * multiplier).trunc() / multiplier)
+            }
+            None => CellResult::Error(CellError::Value),
+        }
+    }
+
     fn eval_ceiling(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
         if args.is_empty() || args.len() > 2 {
             return CellResult::Error(CellError::Value);
         }
         let val = self.eval_arg(&args[0], sheet, engine);
         let significance = if args.len() == 2 {
-            self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(1.0)
+            match self.eval_arg(&args[1], sheet, engine).as_number() {
+                Some(s) => s,
+                None => return CellResult::Error(CellError::Value),
+            }
         } else {
             1.0
         };
 
         match val.as_number() {
-            Some(n) if significance == 0.0 => CellResult::Value(0.0),
+            Some(_) if significance == 0.0 => CellResult::Value(0.0),
+            Some(0.0) => CellResult::Value(0.0),
+            Some(n) if n * significance < 0.0 => CellResult::Error(CellError::Num),
             Some(n) => CellResult::Value((n / significance).ceil() * significance),
             None => CellResult::Error(CellError::Value),
         }
@@ -300,13 +335,18 @@ impl BuiltinFunctions {
         }
         let val = self.eval_arg(&args[0], sheet, engine);
         let significance = if args.len() == 2 {
-            self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(1.0)
+            match self.eval_arg(&args[1], sheet, engine).as_number() {
+                Some(s) => s,
+                None => return CellResult::Error(CellError::Value),
+            }
         } else {
             1.0
         };
 
         match val.as_number() {
-            Some(n) if significance == 0.0 => CellResult::Value(0.0),
+            Some(_) if significance == 0.0 => CellResult::Error(CellError::DivZero),
+            Some(0.0) => CellResult::Value(0.0),
+            Some(n) if n * significance < 0.0 => CellResult::Error(CellError::Num),
             Some(n) => CellResult::Value((n / significance).floor() * significance),
             None => CellResult::Error(CellError::Value),
         }
@@ -453,8 +493,11 @@ impl BuiltinFunctions {
         if values.iter().any(|v| v.is_err()) {
             return CellResult::Error(CellError::Value);
         }
-        let product: f64 = values.into_iter().filter_map(|v| v.ok()).product();
-        CellResult::Value(product)
+        let nums: Vec<f64> = values.into_iter().filter_map(|v| v.ok()).collect();
+        if nums.is_empty() {
+            return CellResult::Value(0.0);
+        }
+        CellResult::Value(nums.into_iter().product())
     }
 
     fn eval_median(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
@@ -475,6 +518,112 @@ impl BuiltinFunctions {
         } else {
             CellResult::Value(values[mid])
         }
+    }
+
+    fn eval_sumproduct(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
+        if args.is_empty() {
+            return CellResult::Error(CellError::Value);
+        }
+
+        let mut arrays: Vec<Vec<CellResult>> = Vec::new();
+        let mut width = 0u32;
+        let mut height = 0u32;
+
+        for (i, arg) in args.iter().enumerate() {
+            let (range, data_sheet) = match self.bind_range(arg, sheet, engine) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            if i == 0 {
+                width = range.width();
+                height = range.height();
+            } else if range.width() != width || range.height() != height {
+                return CellResult::Error(CellError::Value);
+            }
+            arrays.push(
+                range
+                    .iter()
+                    .map(|coord| engine.get_value(data_sheet, coord))
+                    .collect(),
+            );
+        }
+
+        let len = arrays[0].len();
+        let mut sum = 0.0;
+        for i in 0..len {
+            let mut product = 1.0;
+            for array in &arrays {
+                match &array[i] {
+                    CellResult::Error(e) => return CellResult::Error(*e),
+                    CellResult::Value(n) => product *= n,
+                    CellResult::Bool(true) => product *= 1.0,
+                    CellResult::Bool(false) => product *= 0.0,
+                    _ => product *= 0.0,
+                }
+            }
+            sum += product;
+        }
+        CellResult::Value(sum)
+    }
+
+    fn eval_stdev(&self, args: &[Expr], sheet: u32, engine: &CalcEngine, population: bool) -> CellResult {
+        match self.variance(args, sheet, engine, population) {
+            Ok(v) => CellResult::Value(v.sqrt()),
+            Err(e) => e,
+        }
+    }
+
+    fn eval_var(&self, args: &[Expr], sheet: u32, engine: &CalcEngine, population: bool) -> CellResult {
+        match self.variance(args, sheet, engine, population) {
+            Ok(v) => CellResult::Value(v),
+            Err(e) => e,
+        }
+    }
+
+    fn variance(
+        &self,
+        args: &[Expr],
+        sheet: u32,
+        engine: &CalcEngine,
+        population: bool,
+    ) -> Result<f64, CellResult> {
+        let collected = self.collect_numeric_values(args, sheet, engine);
+        if collected.iter().any(|v| v.is_err()) {
+            return Err(CellResult::Error(CellError::Value));
+        }
+        let values: Vec<f64> = collected.into_iter().filter_map(|v| v.ok()).collect();
+        let n = values.len();
+        let denom = if population { n } else { n.saturating_sub(1) };
+        if denom == 0 {
+            return Err(CellResult::Error(CellError::DivZero));
+        }
+        let mean = values.iter().sum::<f64>() / n as f64;
+        let sumsq = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>();
+        Ok(sumsq / denom as f64)
+    }
+
+    fn eval_nth(&self, args: &[Expr], sheet: u32, engine: &CalcEngine, large: bool) -> CellResult {
+        if args.len() != 2 {
+            return CellResult::Error(CellError::Value);
+        }
+        let collected = match &args[0] {
+            Expr::RangeRef(_) => self.collect_numeric_values(&args[..1], sheet, engine),
+            _ => return CellResult::Error(CellError::Value),
+        };
+        if collected.iter().any(|v| v.is_err()) {
+            return CellResult::Error(CellError::Value);
+        }
+        let mut values: Vec<f64> = collected.into_iter().filter_map(|v| v.ok()).collect();
+        let k = match self.eval_arg(&args[1], sheet, engine).as_number() {
+            Some(n) if n >= 1.0 => n.floor() as usize,
+            _ => return CellResult::Error(CellError::Num),
+        };
+        if k == 0 || k > values.len() {
+            return CellResult::Error(CellError::Num);
+        }
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = if large { values.len() - k } else { k - 1 };
+        CellResult::Value(values[idx])
     }
 
     // ========== Logical Functions ==========
@@ -932,14 +1081,19 @@ impl BuiltinFunctions {
         }
 
         let val = self.eval_arg(&args[0], sheet, engine);
-        let _format = self.to_string_val(&self.eval_arg(&args[1], sheet, engine));
+        let format = match self.to_string_val(&self.eval_arg(&args[1], sheet, engine)) {
+            Some(s) => s,
+            None => return CellResult::Error(CellError::Value),
+        };
 
-        // Simplified TEXT - just convert to string (full format support would be complex)
         match val {
-            CellResult::Value(n) => CellResult::Text(n.to_string()),
+            CellResult::Value(n) => CellResult::Text(apply_text_format(n, &format)),
             CellResult::Text(s) => CellResult::Text(s),
-            CellResult::Bool(b) => CellResult::Text(if b { "TRUE" } else { "FALSE" }.to_string()),
-            _ => CellResult::Error(CellError::Value),
+            CellResult::Bool(b) => {
+                CellResult::Text(if b { "TRUE".into() } else { "FALSE".into() })
+            }
+            CellResult::Empty => CellResult::Text(String::new()),
+            CellResult::Error(e) => CellResult::Error(e),
         }
     }
 
@@ -1007,11 +1161,11 @@ impl BuiltinFunctions {
 
         let lookup_value = self.eval_arg(&args[0], sheet, engine);
 
-        // Get range
-        let range = match &args[1] {
-            Expr::RangeRef(r) => r.range,
-            _ => return CellResult::Error(CellError::Value),
+        let (range, data_sheet) = match self.bind_range(&args[1], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
         };
+        let range = *range;
 
         let col_index = match self.eval_arg(&args[2], sheet, engine).as_number() {
             Some(n) => n as u32,
@@ -1031,7 +1185,7 @@ impl BuiltinFunctions {
         // Search first column
         for row in range.start.row..=range.end.row {
             let cell_coord = crate::cell::CellCoord::new(row, range.start.col);
-            let cell_val = engine.get_value(sheet, cell_coord);
+            let cell_val = engine.get_value(data_sheet, cell_coord);
 
             let matches = if exact_match {
                 self.values_equal(&lookup_value, &cell_val)
@@ -1045,7 +1199,7 @@ impl BuiltinFunctions {
 
             if matches {
                 let result_coord = crate::cell::CellCoord::new(row, range.start.col + col_index - 1);
-                return engine.get_value(sheet, result_coord);
+                return engine.get_value(data_sheet, result_coord);
             }
         }
 
@@ -1059,10 +1213,11 @@ impl BuiltinFunctions {
 
         let lookup_value = self.eval_arg(&args[0], sheet, engine);
 
-        let range = match &args[1] {
-            Expr::RangeRef(r) => r.range,
-            _ => return CellResult::Error(CellError::Value),
+        let (range, data_sheet) = match self.bind_range(&args[1], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
         };
+        let range = *range;
 
         let row_index = match self.eval_arg(&args[2], sheet, engine).as_number() {
             Some(n) => n as u32,
@@ -1082,7 +1237,7 @@ impl BuiltinFunctions {
         // Search first row
         for col in range.start.col..=range.end.col {
             let cell_coord = crate::cell::CellCoord::new(range.start.row, col);
-            let cell_val = engine.get_value(sheet, cell_coord);
+            let cell_val = engine.get_value(data_sheet, cell_coord);
 
             let matches = if exact_match {
                 self.values_equal(&lookup_value, &cell_val)
@@ -1095,7 +1250,7 @@ impl BuiltinFunctions {
 
             if matches {
                 let result_coord = crate::cell::CellCoord::new(range.start.row + row_index - 1, col);
-                return engine.get_value(sheet, result_coord);
+                return engine.get_value(data_sheet, result_coord);
             }
         }
 
@@ -1107,10 +1262,11 @@ impl BuiltinFunctions {
             return CellResult::Error(CellError::Value);
         }
 
-        let range = match &args[0] {
-            Expr::RangeRef(r) => r.range,
-            _ => return CellResult::Error(CellError::Value),
+        let (range, data_sheet) = match self.bind_range(&args[0], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
         };
+        let range = *range;
 
         let row_num = self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as u32;
         let col_num = if args.len() == 3 {
@@ -1127,7 +1283,7 @@ impl BuiltinFunctions {
             range.start.row + row_num - 1,
             range.start.col + col_num - 1,
         );
-        engine.get_value(sheet, coord)
+        engine.get_value(data_sheet, coord)
     }
 
     fn eval_match(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
@@ -1137,10 +1293,11 @@ impl BuiltinFunctions {
 
         let lookup_value = self.eval_arg(&args[0], sheet, engine);
 
-        let range = match &args[1] {
-            Expr::RangeRef(r) => r.range,
-            _ => return CellResult::Error(CellError::Value),
+        let (range, data_sheet) = match self.bind_range(&args[1], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
         };
+        let range = *range;
 
         let match_type = if args.len() == 3 {
             self.eval_arg(&args[2], sheet, engine).as_number().unwrap_or(1.0) as i32
@@ -1159,7 +1316,7 @@ impl BuiltinFunctions {
                 crate::cell::CellCoord::new(range.start.row + i, range.start.col)
             };
 
-            let cell_val = engine.get_value(sheet, coord);
+            let cell_val = engine.get_value(data_sheet, coord);
 
             let matches = match match_type {
                 0 => self.values_equal(&lookup_value, &cell_val), // Exact match
@@ -1195,7 +1352,7 @@ impl BuiltinFunctions {
                     crate::cell::CellCoord::new(range.start.row + i, range.start.col)
                 };
 
-                let cell_val = engine.get_value(sheet, coord);
+                let cell_val = engine.get_value(data_sheet, coord);
                 if match_type == 1 {
                     if let (Some(l), Some(c)) = (lookup_value.as_number(), cell_val.as_number()) {
                         if c <= l {
@@ -1274,31 +1431,33 @@ impl BuiltinFunctions {
             return CellResult::Error(CellError::Value);
         }
 
-        let range = match &args[0] {
-            Expr::RangeRef(r) => r.range,
-            _ => return CellResult::Error(CellError::Value),
+        let (range, criteria_sheet) = match self.bind_range(&args[0], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
         };
+        let range = *range;
 
         let criteria = self.eval_arg(&args[1], sheet, engine);
 
-        let sum_range = if args.len() == 3 {
-            match &args[2] {
-                Expr::RangeRef(r) => r.range,
-                _ => return CellResult::Error(CellError::Value),
+        let (sum_range, sum_sheet) = if args.len() == 3 {
+            match self.bind_range(&args[2], sheet, engine) {
+                Ok(v) => v,
+                Err(e) => return e,
             }
         } else {
-            range
+            (&range, criteria_sheet)
         };
+        let sum_range = *sum_range;
 
         let mut sum = 0.0;
         let coords: Vec<_> = range.iter().collect();
         let sum_coords: Vec<_> = sum_range.iter().collect();
 
         for (i, coord) in coords.iter().enumerate() {
-            let cell_val = engine.get_value(sheet, *coord);
+            let cell_val = engine.get_value(criteria_sheet, *coord);
             if self.matches_criteria(&cell_val, &criteria) {
                 if let Some(sum_coord) = sum_coords.get(i) {
-                    if let Some(n) = engine.get_value(sheet, *sum_coord).as_number() {
+                    if let Some(n) = engine.get_value(sum_sheet, *sum_coord).as_number() {
                         sum += n;
                     }
                 }
@@ -1313,16 +1472,16 @@ impl BuiltinFunctions {
             return CellResult::Error(CellError::Value);
         }
 
-        let range = match &args[0] {
-            Expr::RangeRef(r) => r.range,
-            _ => return CellResult::Error(CellError::Value),
+        let (range, data_sheet) = match self.bind_range(&args[0], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
         };
 
         let criteria = self.eval_arg(&args[1], sheet, engine);
 
         let mut count = 0;
         for coord in range.iter() {
-            let cell_val = engine.get_value(sheet, coord);
+            let cell_val = engine.get_value(data_sheet, coord);
             if self.matches_criteria(&cell_val, &criteria) {
                 count += 1;
             }
@@ -1336,21 +1495,23 @@ impl BuiltinFunctions {
             return CellResult::Error(CellError::Value);
         }
 
-        let range = match &args[0] {
-            Expr::RangeRef(r) => r.range,
-            _ => return CellResult::Error(CellError::Value),
+        let (range, criteria_sheet) = match self.bind_range(&args[0], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
         };
+        let range = *range;
 
         let criteria = self.eval_arg(&args[1], sheet, engine);
 
-        let avg_range = if args.len() == 3 {
-            match &args[2] {
-                Expr::RangeRef(r) => r.range,
-                _ => return CellResult::Error(CellError::Value),
+        let (avg_range, avg_sheet) = if args.len() == 3 {
+            match self.bind_range(&args[2], sheet, engine) {
+                Ok(v) => v,
+                Err(e) => return e,
             }
         } else {
-            range
+            (&range, criteria_sheet)
         };
+        let avg_range = *avg_range;
 
         let mut sum = 0.0;
         let mut count = 0;
@@ -1358,10 +1519,10 @@ impl BuiltinFunctions {
         let avg_coords: Vec<_> = avg_range.iter().collect();
 
         for (i, coord) in coords.iter().enumerate() {
-            let cell_val = engine.get_value(sheet, *coord);
+            let cell_val = engine.get_value(criteria_sheet, *coord);
             if self.matches_criteria(&cell_val, &criteria) {
                 if let Some(avg_coord) = avg_coords.get(i) {
-                    if let Some(n) = engine.get_value(sheet, *avg_coord).as_number() {
+                    if let Some(n) = engine.get_value(avg_sheet, *avg_coord).as_number() {
                         sum += n;
                         count += 1;
                     }
@@ -1381,20 +1542,153 @@ impl BuiltinFunctions {
             return CellResult::Error(CellError::Value);
         }
 
-        let range = match &args[0] {
-            Expr::RangeRef(r) => r.range,
-            _ => return CellResult::Error(CellError::Value),
+        let (range, data_sheet) = match self.bind_range(&args[0], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
         };
 
         let mut count = 0;
         for coord in range.iter() {
-            let cell_val = engine.get_value(sheet, coord);
+            let cell_val = engine.get_value(data_sheet, coord);
             if matches!(cell_val, CellResult::Empty) {
                 count += 1;
             }
         }
 
         CellResult::Value(count as f64)
+    }
+
+    fn eval_sumifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
+        if args.len() < 3 || args.len() % 2 == 0 {
+            return CellResult::Error(CellError::Value);
+        }
+        let (sum_range, sum_sheet) = match self.bind_range(&args[0], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let sum_coords: Vec<_> = sum_range.iter().collect();
+        let mask = match self.ifs_match_mask(
+            &args[1..],
+            sheet,
+            engine,
+            sum_coords.len(),
+            sum_range.width(),
+            sum_range.height(),
+        ) {
+            Ok(m) => m,
+            Err(e) => return e,
+        };
+
+        let mut sum = 0.0;
+        for (i, coord) in sum_coords.iter().enumerate() {
+            if !mask[i] {
+                continue;
+            }
+            match engine.get_value(sum_sheet, *coord) {
+                CellResult::Value(n) => sum += n,
+                CellResult::Error(e) => return CellResult::Error(e),
+                _ => {}
+            }
+        }
+        CellResult::Value(sum)
+    }
+
+    fn eval_countifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
+        if args.len() < 2 || args.len() % 2 != 0 {
+            return CellResult::Error(CellError::Value);
+        }
+        let (first_range, _) = match self.bind_range(&args[0], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let mask = match self.ifs_match_mask(
+            args,
+            sheet,
+            engine,
+            first_range.cell_count() as usize,
+            first_range.width(),
+            first_range.height(),
+        ) {
+            Ok(m) => m,
+            Err(e) => return e,
+        };
+        CellResult::Value(mask.iter().filter(|m| **m).count() as f64)
+    }
+
+    fn eval_averageifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
+        if args.len() < 3 || args.len() % 2 == 0 {
+            return CellResult::Error(CellError::Value);
+        }
+        let (avg_range, avg_sheet) = match self.bind_range(&args[0], sheet, engine) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let avg_coords: Vec<_> = avg_range.iter().collect();
+        let mask = match self.ifs_match_mask(
+            &args[1..],
+            sheet,
+            engine,
+            avg_coords.len(),
+            avg_range.width(),
+            avg_range.height(),
+        ) {
+            Ok(m) => m,
+            Err(e) => return e,
+        };
+
+        let mut sum = 0.0;
+        let mut count = 0;
+        for (i, coord) in avg_coords.iter().enumerate() {
+            if !mask[i] {
+                continue;
+            }
+            match engine.get_value(avg_sheet, *coord) {
+                CellResult::Value(n) => {
+                    sum += n;
+                    count += 1;
+                }
+                CellResult::Error(e) => return CellResult::Error(e),
+                _ => {}
+            }
+        }
+        if count == 0 {
+            CellResult::Error(CellError::DivZero)
+        } else {
+            CellResult::Value(sum / count as f64)
+        }
+    }
+
+    fn ifs_match_mask(
+        &self,
+        pairs: &[Expr],
+        sheet: u32,
+        engine: &CalcEngine,
+        expected_len: usize,
+        expected_w: u32,
+        expected_h: u32,
+    ) -> Result<Vec<bool>, CellResult> {
+        if pairs.len() < 2 || pairs.len() % 2 != 0 {
+            return Err(CellResult::Error(CellError::Value));
+        }
+        let mut mask = vec![true; expected_len];
+        for pair in pairs.chunks(2) {
+            let (range, data_sheet) = match self.bind_range(&pair[0], sheet, engine) {
+                Ok(v) => v,
+                Err(e) => return Err(e),
+            };
+            if range.width() != expected_w || range.height() != expected_h {
+                return Err(CellResult::Error(CellError::Value));
+            }
+            let criteria = self.eval_arg(&pair[1], sheet, engine);
+            for (i, coord) in range.iter().enumerate() {
+                if mask[i]
+                    && !self.matches_criteria(&engine.get_value(data_sheet, coord), &criteria)
+                {
+                    mask[i] = false;
+                }
+            }
+        }
+        Ok(mask)
     }
 
     // ========== Info Functions ==========
@@ -1564,6 +1858,23 @@ impl BuiltinFunctions {
 
     // ========== Helpers ==========
 
+    fn bind_range<'a>(
+        &self,
+        expr: &'a Expr,
+        current: u32,
+        engine: &CalcEngine,
+    ) -> Result<(&'a crate::cell::CellRange, u32), CellResult> {
+        match expr {
+            Expr::RangeRef(r) => {
+                let sheet = engine
+                    .resolve_sheet(r.sheet.as_deref(), current)
+                    .map_err(CellResult::Error)?;
+                Ok((&r.range, sheet))
+            }
+            _ => Err(CellResult::Error(CellError::Value)),
+        }
+    }
+
     fn eval_arg(&self, expr: &Expr, sheet: u32, engine: &CalcEngine) -> CellResult {
         // Delegate to the engine's expression evaluator to handle all expression types
         // including binary operations, unary operations, and nested function calls
@@ -1575,22 +1886,25 @@ impl BuiltinFunctions {
         for arg in args {
             match arg {
                 Expr::RangeRef(r) => {
-                    for coord in r.range.iter() {
-                        let val = engine.get_value(sheet, coord);
-                        if let Some(n) = val.as_number() {
-                            values.push(Ok(n));
-                        } else if val.is_error() {
+                    let data_sheet = match engine.resolve_sheet(r.sheet.as_deref(), sheet) {
+                        Ok(s) => s,
+                        Err(_) => {
                             values.push(Err(()));
+                            continue;
                         }
-                        // Skip non-numeric, non-error values in ranges
+                    };
+                    for coord in r.range.iter() {
+                        if let Some(v) =
+                            numeric_for_aggregate(&engine.get_value(data_sheet, coord), true)
+                        {
+                            values.push(v);
+                        }
                     }
                 }
                 _ => {
                     let val = self.eval_arg(arg, sheet, engine);
-                    if let Some(n) = val.as_number() {
-                        values.push(Ok(n));
-                    } else if val.is_error() {
-                        values.push(Err(()));
+                    if let Some(v) = numeric_for_aggregate(&val, false) {
+                        values.push(v);
                     }
                 }
             }
@@ -1603,8 +1917,15 @@ impl BuiltinFunctions {
         for arg in args {
             match arg {
                 Expr::RangeRef(r) => {
+                    let data_sheet = match engine.resolve_sheet(r.sheet.as_deref(), sheet) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            values.push(CellResult::Error(e));
+                            continue;
+                        }
+                    };
                     for coord in r.range.iter() {
-                        values.push(engine.get_value(sheet, coord));
+                        values.push(engine.get_value(data_sheet, coord));
                     }
                 }
                 _ => {
@@ -1645,15 +1966,15 @@ impl BuiltinFunctions {
             // Check for comparison operators
             if let Some(rest) = crit_str.strip_prefix(">=") {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return cell_val.as_number().map_or(false, |n| n >= crit_num);
+                    return criteria_number(cell_val).map_or(false, |n| n >= crit_num);
                 }
             } else if let Some(rest) = crit_str.strip_prefix("<=") {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return cell_val.as_number().map_or(false, |n| n <= crit_num);
+                    return criteria_number(cell_val).map_or(false, |n| n <= crit_num);
                 }
             } else if let Some(rest) = crit_str.strip_prefix("<>") {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return cell_val.as_number().map_or(true, |n| (n - crit_num).abs() > f64::EPSILON);
+                    return criteria_number(cell_val).map_or(true, |n| (n - crit_num).abs() > f64::EPSILON);
                 } else {
                     // String comparison
                     return !self.to_string_val(cell_val)
@@ -1661,16 +1982,16 @@ impl BuiltinFunctions {
                 }
             } else if let Some(rest) = crit_str.strip_prefix('>') {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return cell_val.as_number().map_or(false, |n| n > crit_num);
+                    return criteria_number(cell_val).map_or(false, |n| n > crit_num);
                 }
             } else if let Some(rest) = crit_str.strip_prefix('<') {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return cell_val.as_number().map_or(false, |n| n < crit_num);
+                    return criteria_number(cell_val).map_or(false, |n| n < crit_num);
                 }
             } else if let Some(rest) = crit_str.strip_prefix('=') {
                 // Explicit equality
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return cell_val.as_number().map_or(false, |n| (n - crit_num).abs() < f64::EPSILON);
+                    return criteria_number(cell_val).map_or(false, |n| (n - crit_num).abs() < f64::EPSILON);
                 } else {
                     return self.to_string_val(cell_val)
                         .map_or(false, |s| s.eq_ignore_ascii_case(rest.trim()));
@@ -1679,7 +2000,7 @@ impl BuiltinFunctions {
 
             // No operator - try numeric comparison first, then string
             if let Ok(crit_num) = crit_str.parse::<f64>() {
-                return cell_val.as_number().map_or(false, |n| (n - crit_num).abs() < f64::EPSILON);
+                return criteria_number(cell_val).map_or(false, |n| (n - crit_num).abs() < f64::EPSILON);
             }
 
             // Wildcard matching (* and ?)
@@ -1697,6 +2018,262 @@ impl BuiltinFunctions {
 
         // Non-text criteria: direct value comparison
         self.values_equal(cell_val, criteria)
+    }
+}
+
+/// Numbers used by SUM/AVERAGE/COUNT/etc. Blanks and text are skipped.
+/// Empty is 0 in operators (`as_number`), not here.
+fn numeric_for_aggregate(val: &CellResult, in_range: bool) -> Option<Result<f64, ()>> {
+    match val {
+        CellResult::Value(n) => Some(Ok(*n)),
+        CellResult::Error(_) => Some(Err(())),
+        CellResult::Empty | CellResult::Text(_) => None,
+        CellResult::Bool(b) => {
+            if in_range {
+                None
+            } else {
+                Some(Ok(if *b { 1.0 } else { 0.0 }))
+            }
+        }
+    }
+}
+
+/// Numeric criteria must not treat a blank as 0.
+fn criteria_number(val: &CellResult) -> Option<f64> {
+    match val {
+        CellResult::Value(n) => Some(*n),
+        CellResult::Bool(true) => Some(1.0),
+        CellResult::Bool(false) => Some(0.0),
+        _ => None,
+    }
+}
+
+fn apply_text_format(n: f64, format: &str) -> String {
+    if is_date_format(format) {
+        return format_date_serial(n, format);
+    }
+
+    let (prefix, body, suffix) = split_format_literals(format);
+    let percent = body.contains('%');
+    let scientific = body.to_ascii_uppercase().contains('E');
+    let thousands = body.contains(',');
+    let decimals = decimal_places(&body);
+    let mut value = n;
+    if percent {
+        value *= 100.0;
+    }
+
+    let mut number = if scientific {
+        format_scientific(value, decimals)
+    } else {
+        format_fixed(value, decimals, thousands)
+    };
+    if percent {
+        number.push('%');
+    }
+    format!("{prefix}{number}{suffix}")
+}
+
+fn is_date_format(format: &str) -> bool {
+    let body = strip_quoted(format).to_ascii_lowercase();
+    body.contains("yy") || body.contains("dd") || body.contains("mmm") || body.contains("mm/dd")
+}
+
+fn strip_quoted(format: &str) -> String {
+    let mut out = String::new();
+    let mut in_quote = false;
+    for c in format.chars() {
+        if c == '"' {
+            in_quote = !in_quote;
+            continue;
+        }
+        if !in_quote {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn split_format_literals(format: &str) -> (String, String, String) {
+    let mut prefix = String::new();
+    let mut body = String::new();
+    let mut suffix = String::new();
+    let mut in_quote = false;
+    let mut seen_num = false;
+    let mut literal = String::new();
+
+    for c in format.chars() {
+        if c == '"' {
+            in_quote = !in_quote;
+            continue;
+        }
+        if in_quote {
+            literal.push(c);
+            continue;
+        }
+        if matches!(c, '0' | '#' | '.' | ',' | '%' | 'E' | 'e' | '+' | '-') {
+            if !literal.is_empty() {
+                if seen_num {
+                    suffix.push_str(&literal);
+                } else {
+                    prefix.push_str(&literal);
+                }
+                literal.clear();
+            }
+            seen_num = true;
+            body.push(c);
+        } else {
+            literal.push(c);
+        }
+    }
+    if !literal.is_empty() {
+        if seen_num {
+            suffix.push_str(&literal);
+        } else {
+            prefix.push_str(&literal);
+        }
+    }
+    (prefix, body, suffix)
+}
+
+fn decimal_places(body: &str) -> usize {
+    let upper = body.to_ascii_uppercase();
+    let number_part = upper.split('E').next().unwrap_or(&upper);
+    match number_part.split_once('.') {
+        Some((_, frac)) => frac.chars().filter(|c| *c == '0' || *c == '#').count(),
+        None => 0,
+    }
+}
+
+fn format_fixed(n: f64, decimals: usize, thousands: bool) -> String {
+    let rounded = if decimals == 0 {
+        n.round()
+    } else {
+        let m = 10f64.powi(decimals as i32);
+        (n * m).round() / m
+    };
+    let negative = rounded.is_sign_negative() && rounded != 0.0;
+    let formatted = format!("{:.*}", decimals, rounded.abs());
+    let (int_part, frac) = match formatted.split_once('.') {
+        Some((i, f)) => (i.to_string(), Some(f.to_string())),
+        None => (formatted, None),
+    };
+    let int_part = if thousands {
+        add_thousands(&int_part)
+    } else {
+        int_part
+    };
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    out.push_str(&int_part);
+    if let Some(frac) = frac {
+        out.push('.');
+        out.push_str(&frac);
+    }
+    out
+}
+
+fn add_thousands(int_part: &str) -> String {
+    let mut digits: Vec<char> = int_part.chars().collect();
+    if digits.is_empty() {
+        return "0".into();
+    }
+    let mut out = String::new();
+    let mut count = 0;
+    while let Some(c) = digits.pop() {
+        if count > 0 && count % 3 == 0 {
+            out.insert(0, ',');
+        }
+        out.insert(0, c);
+        count += 1;
+    }
+    out
+}
+
+fn format_scientific(n: f64, decimals: usize) -> String {
+    if n == 0.0 {
+        let zeros = "0".repeat(decimals);
+        return if decimals == 0 {
+            "0E+00".into()
+        } else {
+            format!("0.{zeros}E+00")
+        };
+    }
+    let sign = if n < 0.0 { "-" } else { "" };
+    let abs = n.abs();
+    let exp = abs.log10().floor() as i32;
+    let mantissa = abs / 10f64.powi(exp);
+    format!("{sign}{:.*}E{exp:+03}", decimals, mantissa)
+}
+
+fn format_date_serial(serial: f64, format: &str) -> String {
+    let (year, month, day) = serial_to_date(serial);
+    let mut out = String::new();
+    let mut in_quote = false;
+    let chars: Vec<char> = format.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '"' {
+            in_quote = !in_quote;
+            i += 1;
+            continue;
+        }
+        if in_quote {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let rest: String = chars[i..].iter().collect();
+        let lower = rest.to_ascii_lowercase();
+        if lower.starts_with("yyyy") {
+            out.push_str(&format!("{year:04}"));
+            i += 4;
+        } else if lower.starts_with("yy") {
+            out.push_str(&format!("{:02}", year % 100));
+            i += 2;
+        } else if lower.starts_with("mmmm") {
+            out.push_str(month_name(month));
+            i += 4;
+        } else if lower.starts_with("mmm") {
+            out.push_str(&month_name(month)[..3]);
+            i += 3;
+        } else if lower.starts_with("mm") {
+            out.push_str(&format!("{month:02}"));
+            i += 2;
+        } else if lower.starts_with('m') {
+            out.push_str(&month.to_string());
+            i += 1;
+        } else if lower.starts_with("dd") {
+            out.push_str(&format!("{day:02}"));
+            i += 2;
+        } else if lower.starts_with('d') {
+            out.push_str(&day.to_string());
+            i += 1;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+fn month_name(month: i32) -> &'static str {
+    match month {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => "",
     }
 }
 
@@ -1865,7 +2442,7 @@ impl Default for BuiltinFunctions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cell::CellCoord;
+    use crate::cell::{CellCoord, CellError};
     use crate::calc::engine::CellValueInput;
 
     #[test]
@@ -1896,5 +2473,148 @@ mod tests {
         engine.set_formula(0, CellCoord::new(2, 0), "=AVERAGE(A1:A2)").unwrap();
 
         assert_eq!(engine.get_value(0, CellCoord::new(2, 0)), CellResult::Value(15.0));
+    }
+
+    #[test]
+    fn test_sum_cross_sheet_range() {
+        let mut engine = CalcEngine::new();
+        engine.set_sheet_names(vec!["Sheet1".into(), "Sheet2".into()]);
+        engine.set_value(1, CellCoord::new(0, 0), CellValueInput::Number(4.0));
+        engine.set_value(1, CellCoord::new(1, 0), CellValueInput::Number(6.0));
+        engine
+            .set_formula(0, CellCoord::new(0, 0), "=SUM(Sheet2!A1:A2)")
+            .unwrap();
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(10.0));
+    }
+
+    #[test]
+    fn blanks_are_skipped_in_aggregates() {
+        let mut engine = CalcEngine::new();
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(10.0));
+        engine.set_value(0, CellCoord::new(2, 0), CellValueInput::Number(20.0));
+        engine.set_formula(0, CellCoord::new(0, 1), "=AVERAGE(A1:A3)").unwrap();
+        engine.set_formula(0, CellCoord::new(1, 1), "=COUNT(A1:A3)").unwrap();
+        engine.set_formula(0, CellCoord::new(2, 1), "=PRODUCT(A1:A3)").unwrap();
+        engine.set_formula(0, CellCoord::new(3, 1), "=MIN(A1:A3)").unwrap();
+        engine.set_formula(0, CellCoord::new(4, 1), "=COUNTIF(A1:A3,\">=0\")").unwrap();
+
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 1)), CellResult::Value(15.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(1, 1)), CellResult::Value(2.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(2, 1)), CellResult::Value(200.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(3, 1)), CellResult::Value(10.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(4, 1)), CellResult::Value(2.0));
+    }
+
+    #[test]
+    fn excel_mod_follows_divisor_sign() {
+        let mut engine = CalcEngine::new();
+        engine.set_formula(0, CellCoord::new(0, 0), "=MOD(-3,2)").unwrap();
+        engine.set_formula(0, CellCoord::new(1, 0), "=MOD(3,-2)").unwrap();
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(1.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(1, 0)), CellResult::Value(-1.0));
+    }
+
+    #[test]
+    fn ceiling_floor_reject_mixed_signs() {
+        let mut engine = CalcEngine::new();
+        engine.set_formula(0, CellCoord::new(0, 0), "=CEILING(2.5,1)").unwrap();
+        engine.set_formula(0, CellCoord::new(1, 0), "=CEILING(-2.5,-1)").unwrap();
+        engine.set_formula(0, CellCoord::new(2, 0), "=CEILING(-2.5,1)").unwrap();
+        engine.set_formula(0, CellCoord::new(3, 0), "=FLOOR(-2.5,-1)").unwrap();
+        engine.set_formula(0, CellCoord::new(4, 0), "=FLOOR(2.5,0)").unwrap();
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(3.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(1, 0)), CellResult::Value(-3.0));
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 0)),
+            CellResult::Error(CellError::Num)
+        );
+        assert_eq!(engine.get_value(0, CellCoord::new(3, 0)), CellResult::Value(-2.0));
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(4, 0)),
+            CellResult::Error(CellError::DivZero)
+        );
+    }
+
+    #[test]
+    fn text_applies_number_and_date_formats() {
+        let mut engine = CalcEngine::new();
+        engine.set_formula(0, CellCoord::new(0, 0), "=TEXT(1234.5,\"0.00\")").unwrap();
+        engine.set_formula(0, CellCoord::new(1, 0), "=TEXT(1234.5,\"#,##0.00\")").unwrap();
+        engine.set_formula(0, CellCoord::new(2, 0), "=TEXT(0.5,\"0%\")").unwrap();
+        engine.set_formula(0, CellCoord::new(3, 0), "=TEXT(DATE(2024,8,18),\"yyyy-mm-dd\")").unwrap();
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 0)),
+            CellResult::Text("1234.50".into())
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 0)),
+            CellResult::Text("1,234.50".into())
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 0)),
+            CellResult::Text("50%".into())
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(3, 0)),
+            CellResult::Text("2024-08-18".into())
+        );
+    }
+
+    #[test]
+    fn trunc_toward_zero() {
+        let mut engine = CalcEngine::new();
+        engine.set_formula(0, CellCoord::new(0, 0), "=TRUNC(-2.9)").unwrap();
+        engine.set_formula(0, CellCoord::new(1, 0), "=INT(-2.9)").unwrap();
+        engine.set_formula(0, CellCoord::new(2, 0), "=TRUNC(2.99,1)").unwrap();
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(-2.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(1, 0)), CellResult::Value(-3.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(2, 0)), CellResult::Value(2.9));
+    }
+
+    #[test]
+    fn sumifs_countifs_averageifs() {
+        let mut engine = CalcEngine::new();
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Text("a".into()));
+        engine.set_value(0, CellCoord::new(1, 0), CellValueInput::Text("b".into()));
+        engine.set_value(0, CellCoord::new(2, 0), CellValueInput::Text("a".into()));
+        engine.set_value(0, CellCoord::new(0, 1), CellValueInput::Number(10.0));
+        engine.set_value(0, CellCoord::new(1, 1), CellValueInput::Number(20.0));
+        engine.set_value(0, CellCoord::new(2, 1), CellValueInput::Number(30.0));
+        engine.set_value(0, CellCoord::new(0, 2), CellValueInput::Number(1.0));
+        engine.set_value(0, CellCoord::new(1, 2), CellValueInput::Number(1.0));
+        engine.set_value(0, CellCoord::new(2, 2), CellValueInput::Number(2.0));
+        engine
+            .set_formula(0, CellCoord::new(0, 3), "=SUMIFS(B1:B3,A1:A3,\"a\",C1:C3,1)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 3), "=COUNTIFS(A1:A3,\"a\",C1:C3,1)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 3), "=AVERAGEIFS(B1:B3,A1:A3,\"a\")")
+            .unwrap();
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 3)), CellResult::Value(10.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(1, 3)), CellResult::Value(1.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(2, 3)), CellResult::Value(20.0));
+    }
+
+    #[test]
+    fn sumproduct_stdev_large_small() {
+        let mut engine = CalcEngine::new();
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(1.0));
+        engine.set_value(0, CellCoord::new(1, 0), CellValueInput::Number(2.0));
+        engine.set_value(0, CellCoord::new(2, 0), CellValueInput::Number(3.0));
+        engine.set_value(0, CellCoord::new(0, 1), CellValueInput::Number(4.0));
+        engine.set_value(0, CellCoord::new(1, 1), CellValueInput::Number(5.0));
+        engine.set_value(0, CellCoord::new(2, 1), CellValueInput::Number(6.0));
+        engine.set_formula(0, CellCoord::new(0, 2), "=SUMPRODUCT(A1:A3,B1:B3)").unwrap();
+        engine.set_formula(0, CellCoord::new(1, 2), "=STDEV(A1:A3)").unwrap();
+        engine.set_formula(0, CellCoord::new(2, 2), "=VAR.S(A1:A3)").unwrap();
+        engine.set_formula(0, CellCoord::new(3, 2), "=LARGE(A1:A3,2)").unwrap();
+        engine.set_formula(0, CellCoord::new(4, 2), "=SMALL(A1:A3,2)").unwrap();
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 2)), CellResult::Value(32.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(1, 2)), CellResult::Value(1.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(2, 2)), CellResult::Value(1.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(3, 2)), CellResult::Value(2.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(4, 2)), CellResult::Value(2.0));
     }
 }

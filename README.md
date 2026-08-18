@@ -1,34 +1,46 @@
 # RustSheet
 
-A high-performance, Excel-compatible spreadsheet engine written in Rust with a native GUI.
+A native spreadsheet with an Excel-compatible formula engine.
 
 ## Features
 
-- **Formula Engine**: 70+ Excel functions (SUM, VLOOKUP, IF, AVERAGE, etc.)
-- **Dependency Tracking**: Automatic recalculation with cycle detection
-- **Excel I/O**: Read and write .xlsx files via calamine/rust_xlsxwriter
-- **Multi-Sheet Support**: Workbook with multiple sheets and tab navigation
-- **Native GUI**: egui-based interface with cell grid, formula bar with autocomplete
-- **Charting**: Line, Bar, Scatter, Area, Pie, and Doughnut charts with drag-to-select
-- **Undo/Redo**: Full edit history support
+- **Formulas**: 100+ Excel functions, dependency tracking, and cycle detection
+- **Cross-sheet**: `Sheet2!A1` and `SUM(Sheet2!A1:A2)`; rename rewrites qualifiers; delete remaps sheet keys
+- **xlsx**: Read and write values, formulas, used cells, and charts
+- **CSV**: Read and write the current sheet, including formulas
+- **Charts**: Line, bar, scatter, area, pie, and doughnut
+- **GUI**: egui grid, formula bar with autocomplete, undo/redo
+
+Aggregates (`AVERAGE`, `COUNT`, `PRODUCT`, `MIN`, `MAX`, `SUMIF`/`COUNTIF`) skip blanks. `TEXT` supports number, percent, scientific, and date formats. `MOD`, `CEILING`, and `FLOOR` follow Excel sign rules.
+
+## Formats
+
+| Format | Open | Save |
+|--------|------|------|
+| `.xlsx` | Workbook, formulas, charts | Workbook, formulas, charts |
+| `.csv` | One sheet | Current sheet only |
+
+`.xls` / `.ods` are not supported.
 
 ## Build
 
+Default features are `gui`, `xlsx`, and `csv`.
+
 ```bash
-cargo build --features gui      # Build with GUI
-cargo run --features gui        # Run the application
-cargo test                      # Run tests
+cargo run          # native GUI
+cargo test         # library tests
 ```
 
 ## Architecture
 
-- `cell/` - Core types (CellValue, CellCoord, StringPool)
-- `grid/` - Sparse storage using HashMap + RoaringBitmap
-- `formula/` - pest grammar + Pratt parser for Excel-compatible formulas
-- `calc/` - CalcEngine with dependency tracking and caching
-- `chart/` - Chart definitions, rendering (egui_plot + custom mesh), and LTTB downsampling
-- `xlsx/` - Excel file I/O
-- `gui/` - egui-based spreadsheet UI
+- `cell/` — coordinates, values, string pool
+- `grid/` — sparse sheet storage
+- `formula/` — pest grammar + Pratt parser
+- `calc/` — CalcEngine, functions, dependency graph
+- `chart/` — definitions, rendering, LTTB downsampling
+- `xlsx/` — Excel read/write
+- `csv_io/` — CSV read/write
+- `gui/` — egui UI
 
 ## License
 

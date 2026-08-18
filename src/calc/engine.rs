@@ -114,6 +114,8 @@ pub struct CalcEngine {
     evaluating: RefCell<HashSet<(u32, CellCoord)>>,
     /// Built-in functions
     functions: BuiltinFunctions,
+    /// Tab names, index-aligned with sheet keys
+    sheet_names: Vec<String>,
 }
 
 impl CalcEngine {
@@ -127,6 +129,7 @@ impl CalcEngine {
             dependencies: HashMap::new(),
             evaluating: RefCell::new(HashSet::new()),
             functions: BuiltinFunctions::new(),
+            sheet_names: vec!["Sheet1".to_string()],
         }
     }
 
@@ -140,7 +143,8 @@ impl CalcEngine {
     /// Set a cell's formula
     pub fn set_formula(&mut self, sheet: u32, coord: CellCoord, formula: &str) -> Result<(), String> {
         // Parse and validate formula
-        let expr = self.parser.parse(formula).map_err(|e| e.to_string())?;
+        let formula = crate::formula::normalize_formula(formula);
+        let expr = self.parser.parse(&formula).map_err(|e| e.to_string())?;
 
         // Clear old dependencies
         self.clear_cell_deps(sheet, coord);
@@ -153,8 +157,10 @@ impl CalcEngine {
         let mut deps = Vec::new();
         expr.collect_dependencies(&mut deps);
         for dep in deps {
+            let Ok(dep_sheet) = self.resolve_sheet(dep.sheet.as_deref(), sheet) else {
+                continue;
+            };
             let dep_coord = dep.coord;
-            let dep_sheet = 0u32; // TODO: resolve sheet name
             self.dependencies
                 .entry((sheet, coord))
                 .or_default()
@@ -200,6 +206,20 @@ impl CalcEngine {
         }
     }
 
+    /// Iterate stored inputs for one sheet.
+    pub fn iter_sheet_inputs(&self, sheet: u32) -> impl Iterator<Item = (CellCoord, &CellInput)> + '_ {
+        self.inputs.iter().filter_map(move |(&(s, coord), input)| {
+            (s == sheet).then_some((coord, input))
+        })
+    }
+
+    /// Greatest row and column that have input on this sheet.
+    pub fn sheet_max_coord(&self, sheet: u32) -> Option<CellCoord> {
+        self.iter_sheet_inputs(sheet).map(|(coord, _)| coord).reduce(|a, b| {
+            CellCoord::new(a.row.max(b.row), a.col.max(b.col))
+        })
+    }
+
     /// Compute a cell's value
     fn compute(&self, sheet: u32, coord: CellCoord) -> CellResult {
         // Cycle detection - check if this cell is already being evaluated
@@ -241,9 +261,9 @@ impl CalcEngine {
             Expr::Bool(b) => CellResult::Bool(*b),
             Expr::Error(e) => CellResult::Error(*e),
 
-            Expr::CellRef(r) => {
-                let ref_sheet = 0u32; // TODO: resolve sheet name
-                self.get_value(ref_sheet, r.coord)
+            Expr::CellRef(r) => match self.resolve_sheet(r.sheet.as_deref(), sheet) {
+                Ok(ref_sheet) => self.get_value(ref_sheet, r.coord),
+                Err(e) => CellResult::Error(e),
             }
 
             Expr::RangeRef(_) => {
@@ -409,6 +429,88 @@ impl CalcEngine {
     pub fn collect_range_values(&self, sheet: u32, range: &crate::cell::CellRange) -> Vec<CellResult> {
         range.iter().map(|coord| self.get_value(sheet, coord)).collect()
     }
+
+    /// Resolve a sheet qualifier to an index. Unqualified refs use `current`.
+    pub fn resolve_sheet(&self, qualifier: Option<&str>, current: u32) -> Result<u32, CellError> {
+        let Some(name) = qualifier else {
+            return Ok(current);
+        };
+        let name = name.trim_matches('\'');
+        self.sheet_names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(name))
+            .map(|i| i as u32)
+            .ok_or(CellError::Ref)
+    }
+
+    pub fn set_sheet_names(&mut self, names: Vec<String>) {
+        if self.sheet_names == names {
+            return;
+        }
+        self.sheet_names = names;
+        self.rebind_formulas();
+    }
+
+    pub fn sheet_names(&self) -> &[String] {
+        &self.sheet_names
+    }
+
+    /// Rewrite formula text after a tab rename, then rebind.
+    pub fn rewrite_sheet_name(&mut self, old: &str, new: &str) {
+        let items: Vec<(u32, CellCoord, String)> = self
+            .inputs
+            .iter()
+            .filter_map(|(&(sheet, coord), input)| match input {
+                CellInput::Formula(f) => Some((sheet, coord, f.clone())),
+                _ => None,
+            })
+            .collect();
+
+        for (sheet, coord, formula) in items {
+            if let Ok(mut expr) = self.parser.parse(&formula) {
+                expr.rename_sheet(old, new);
+                let _ = self.set_formula(sheet, coord, &format!("={expr}"));
+            }
+        }
+    }
+
+    /// Drop one sheet's cells and shift higher sheet keys down by one.
+    pub fn remove_sheet_and_shift(&mut self, index: u32) {
+        let snapshot: Vec<((u32, CellCoord), CellInput)> = std::mem::take(&mut self.inputs).into_iter().collect();
+        self.formulas.clear();
+        self.dependents.clear();
+        self.dependencies.clear();
+        self.cache.borrow_mut().clear();
+        self.evaluating.borrow_mut().clear();
+
+        for ((sheet, coord), input) in snapshot {
+            if sheet == index {
+                continue;
+            }
+            let new_sheet = if sheet > index { sheet - 1 } else { sheet };
+            match input {
+                CellInput::Empty => {}
+                CellInput::Value(v) => self.set_value(new_sheet, coord, v),
+                CellInput::Formula(f) => {
+                    let _ = self.set_formula(new_sheet, coord, &f);
+                }
+            }
+        }
+    }
+
+    fn rebind_formulas(&mut self) {
+        let items: Vec<(u32, CellCoord, String)> = self
+            .inputs
+            .iter()
+            .filter_map(|(&(sheet, coord), input)| match input {
+                CellInput::Formula(f) => Some((sheet, coord, f.clone())),
+                _ => None,
+            })
+            .collect();
+        for (sheet, coord, formula) in items {
+            let _ = self.set_formula(sheet, coord, &formula);
+        }
+    }
 }
 
 impl Default for CalcEngine {
@@ -463,5 +565,53 @@ mod tests {
         let mut engine = CalcEngine::new();
         engine.set_formula(0, CellCoord::new(0, 0), "=1/0").unwrap();
         assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Error(CellError::DivZero));
+    }
+
+    #[test]
+    fn test_cross_sheet_ref() {
+        let mut engine = CalcEngine::new();
+        engine.set_sheet_names(vec!["Sheet1".into(), "Sheet2".into()]);
+        engine.set_value(1, CellCoord::new(0, 0), CellValueInput::Number(5.0));
+        engine.set_formula(0, CellCoord::new(0, 0), "=Sheet2!A1").unwrap();
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(5.0));
+
+        engine.set_value(1, CellCoord::new(0, 0), CellValueInput::Number(9.0));
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(9.0));
+    }
+
+    #[test]
+    fn test_missing_sheet_is_ref() {
+        let mut engine = CalcEngine::new();
+        engine.set_formula(0, CellCoord::new(0, 0), "=Nope!A1").unwrap();
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 0)),
+            CellResult::Error(CellError::Ref)
+        );
+    }
+
+    #[test]
+    fn test_remove_sheet_and_shift() {
+        let mut engine = CalcEngine::new();
+        engine.set_sheet_names(vec!["S1".into(), "S2".into()]);
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(1.0));
+        engine.set_value(1, CellCoord::new(0, 0), CellValueInput::Number(2.0));
+        engine.remove_sheet_and_shift(0);
+        engine.set_sheet_names(vec!["S2".into()]);
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(2.0));
+    }
+
+    #[test]
+    fn test_rename_sheet_rewrites_formula() {
+        let mut engine = CalcEngine::new();
+        engine.set_sheet_names(vec!["Sheet1".into(), "Data".into()]);
+        engine.set_value(1, CellCoord::new(0, 0), CellValueInput::Number(3.0));
+        engine.set_formula(0, CellCoord::new(0, 0), "=Data!A1").unwrap();
+        engine.rewrite_sheet_name("Data", "Numbers");
+        engine.set_sheet_names(vec!["Sheet1".into(), "Numbers".into()]);
+        assert_eq!(
+            engine.get_formula(0, CellCoord::new(0, 0)).as_deref(),
+            Some("=Numbers!A1")
+        );
+        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(3.0));
     }
 }

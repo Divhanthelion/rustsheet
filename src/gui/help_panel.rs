@@ -222,14 +222,18 @@ impl HelpPanel {
             ui.add_space(20.0);
             ui.separator();
             ui.add_space(10.0);
-            ui.label("Built with Rust, egui, and wgpu");
+            ui.label("Built with Rust and egui");
             ui.add_space(20.0);
 
             ui.heading("Features");
-            ui.label("• 70+ Excel-compatible functions");
-            ui.label("• Formula parsing with dependency tracking");
-            ui.label("• Cycle detection");
-            ui.label("• Excel file import/export (.xlsx)");
+            ui.label(format!(
+                "• {} Excel-compatible functions",
+                functions_help::get_all_functions().len()
+            ));
+            ui.label("• Formula parsing with dependency tracking and cycle detection");
+            ui.label("• Cross-sheet references; sheet delete remaps cells");
+            ui.label("• Excel (.xlsx) formulas, used range, and charts");
+            ui.label("• CSV import/export of the current sheet");
             ui.label("• Cross-platform (Windows, macOS, Linux)");
             ui.add_space(20.0);
 

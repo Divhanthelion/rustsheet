@@ -51,7 +51,18 @@ impl CellCoord {
 
     /// Convert to A1-style reference
     pub fn to_a1(&self) -> String {
-        format!("{}{}", col_to_letters(self.col), self.row + 1)
+        self.to_a1_abs(false, false)
+    }
+
+    /// Convert to A1-style reference with absolute markers
+    pub fn to_a1_abs(&self, row_absolute: bool, col_absolute: bool) -> String {
+        format!(
+            "{}{}{}{}",
+            if col_absolute { "$" } else { "" },
+            col_to_letters(self.col),
+            if row_absolute { "$" } else { "" },
+            self.row + 1
+        )
     }
 }
 
