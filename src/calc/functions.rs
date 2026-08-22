@@ -1,5 +1,5 @@
-use crate::cell::CellError;
 use crate::calc::engine::{CalcEngine, CellResult};
+use crate::cell::CellError;
 use crate::formula::{Expr, FunctionCall};
 
 /// Built-in spreadsheet functions
@@ -150,7 +150,8 @@ impl BuiltinFunctions {
     }
 
     fn eval_average(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        let values: Vec<f64> = self.collect_numeric_values(args, sheet, engine)
+        let values: Vec<f64> = self
+            .collect_numeric_values(args, sheet, engine)
             .into_iter()
             .filter_map(|v| v.ok())
             .collect();
@@ -164,7 +165,8 @@ impl BuiltinFunctions {
     }
 
     fn eval_min(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        let values: Vec<f64> = self.collect_numeric_values(args, sheet, engine)
+        let values: Vec<f64> = self
+            .collect_numeric_values(args, sheet, engine)
             .into_iter()
             .filter_map(|v| v.ok())
             .collect();
@@ -177,7 +179,8 @@ impl BuiltinFunctions {
     }
 
     fn eval_max(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        let values: Vec<f64> = self.collect_numeric_values(args, sheet, engine)
+        let values: Vec<f64> = self
+            .collect_numeric_values(args, sheet, engine)
             .into_iter()
             .filter_map(|v| v.ok())
             .collect();
@@ -190,7 +193,8 @@ impl BuiltinFunctions {
     }
 
     fn eval_count(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        let count = self.collect_numeric_values(args, sheet, engine)
+        let count = self
+            .collect_numeric_values(args, sheet, engine)
             .into_iter()
             .filter(|v| v.is_ok())
             .count();
@@ -198,7 +202,8 @@ impl BuiltinFunctions {
     }
 
     fn eval_counta(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        let count = self.collect_all_values(args, sheet, engine)
+        let count = self
+            .collect_all_values(args, sheet, engine)
             .into_iter()
             .filter(|v| !matches!(v, CellResult::Empty))
             .count();
@@ -217,13 +222,15 @@ impl BuiltinFunctions {
     }
 
     fn eval_round(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        if args.len() < 1 || args.len() > 2 {
+        if args.is_empty() || args.len() > 2 {
             return CellResult::Error(CellError::Value);
         }
 
         let val = self.eval_arg(&args[0], sheet, engine);
         let digits = if args.len() == 2 {
-            self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as i32
+            self.eval_arg(&args[1], sheet, engine)
+                .as_number()
+                .unwrap_or(0.0) as i32
         } else {
             0
         };
@@ -270,7 +277,7 @@ impl BuiltinFunctions {
         let divisor = self.eval_arg(&args[1], sheet, engine);
 
         match (num.as_number(), divisor.as_number()) {
-            (Some(_), Some(d)) if d == 0.0 => CellResult::Error(CellError::DivZero),
+            (Some(_), Some(0.0)) => CellResult::Error(CellError::DivZero),
             (Some(n), Some(d)) => CellResult::Value(n - d * (n / d).floor()),
             _ => CellResult::Error(CellError::Value),
         }
@@ -293,7 +300,9 @@ impl BuiltinFunctions {
         }
         let val = self.eval_arg(&args[0], sheet, engine);
         let digits = if args.len() == 2 {
-            self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as i32
+            self.eval_arg(&args[1], sheet, engine)
+                .as_number()
+                .unwrap_or(0.0) as i32
         } else {
             0
         };
@@ -358,7 +367,9 @@ impl BuiltinFunctions {
         }
         let val = self.eval_arg(&args[0], sheet, engine);
         let digits = if args.len() == 2 {
-            self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as i32
+            self.eval_arg(&args[1], sheet, engine)
+                .as_number()
+                .unwrap_or(0.0) as i32
         } else {
             0
         };
@@ -379,7 +390,9 @@ impl BuiltinFunctions {
         }
         let val = self.eval_arg(&args[0], sheet, engine);
         let digits = if args.len() == 2 {
-            self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as i32
+            self.eval_arg(&args[1], sheet, engine)
+                .as_number()
+                .unwrap_or(0.0) as i32
         } else {
             0
         };
@@ -436,7 +449,9 @@ impl BuiltinFunctions {
         }
         let val = self.eval_arg(&args[0], sheet, engine);
         let base = if args.len() == 2 {
-            self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(10.0)
+            self.eval_arg(&args[1], sheet, engine)
+                .as_number()
+                .unwrap_or(10.0)
         } else {
             10.0
         };
@@ -460,7 +475,13 @@ impl BuiltinFunctions {
         }
     }
 
-    fn eval_trig(&self, args: &[Expr], sheet: u32, engine: &CalcEngine, f: fn(f64) -> f64) -> CellResult {
+    fn eval_trig(
+        &self,
+        args: &[Expr],
+        sheet: u32,
+        engine: &CalcEngine,
+        f: fn(f64) -> f64,
+    ) -> CellResult {
         if args.len() != 1 {
             return CellResult::Error(CellError::Value);
         }
@@ -501,7 +522,8 @@ impl BuiltinFunctions {
     }
 
     fn eval_median(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        let mut values: Vec<f64> = self.collect_numeric_values(args, sheet, engine)
+        let mut values: Vec<f64> = self
+            .collect_numeric_values(args, sheet, engine)
             .into_iter()
             .filter_map(|v| v.ok())
             .collect();
@@ -566,14 +588,26 @@ impl BuiltinFunctions {
         CellResult::Value(sum)
     }
 
-    fn eval_stdev(&self, args: &[Expr], sheet: u32, engine: &CalcEngine, population: bool) -> CellResult {
+    fn eval_stdev(
+        &self,
+        args: &[Expr],
+        sheet: u32,
+        engine: &CalcEngine,
+        population: bool,
+    ) -> CellResult {
         match self.variance(args, sheet, engine, population) {
             Ok(v) => CellResult::Value(v.sqrt()),
             Err(e) => e,
         }
     }
 
-    fn eval_var(&self, args: &[Expr], sheet: u32, engine: &CalcEngine, population: bool) -> CellResult {
+    fn eval_var(
+        &self,
+        args: &[Expr],
+        sheet: u32,
+        engine: &CalcEngine,
+        population: bool,
+    ) -> CellResult {
         match self.variance(args, sheet, engine, population) {
             Ok(v) => CellResult::Value(v),
             Err(e) => e,
@@ -754,7 +788,11 @@ impl BuiltinFunctions {
 
         let expr_val = self.eval_arg(&args[0], sheet, engine);
         let has_default = args.len() % 2 == 0;
-        let pairs_end = if has_default { args.len() - 1 } else { args.len() };
+        let pairs_end = if has_default {
+            args.len() - 1
+        } else {
+            args.len()
+        };
 
         for i in (1..pairs_end).step_by(2) {
             let case_val = self.eval_arg(&args[i], sheet, engine);
@@ -863,7 +901,9 @@ impl BuiltinFunctions {
 
         let text = self.to_string_val(&self.eval_arg(&args[0], sheet, engine));
         let num_chars = if args.len() == 2 {
-            self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(1.0) as usize
+            self.eval_arg(&args[1], sheet, engine)
+                .as_number()
+                .unwrap_or(1.0) as usize
         } else {
             1
         };
@@ -881,7 +921,9 @@ impl BuiltinFunctions {
 
         let text = self.to_string_val(&self.eval_arg(&args[0], sheet, engine));
         let num_chars = if args.len() == 2 {
-            self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(1.0) as usize
+            self.eval_arg(&args[1], sheet, engine)
+                .as_number()
+                .unwrap_or(1.0) as usize
         } else {
             1
         };
@@ -902,8 +944,14 @@ impl BuiltinFunctions {
         }
 
         let text = self.to_string_val(&self.eval_arg(&args[0], sheet, engine));
-        let start = self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as usize;
-        let num_chars = self.eval_arg(&args[2], sheet, engine).as_number().unwrap_or(0.0) as usize;
+        let start = self
+            .eval_arg(&args[1], sheet, engine)
+            .as_number()
+            .unwrap_or(0.0) as usize;
+        let num_chars = self
+            .eval_arg(&args[2], sheet, engine)
+            .as_number()
+            .unwrap_or(0.0) as usize;
 
         if start < 1 {
             return CellResult::Error(CellError::Value);
@@ -923,7 +971,9 @@ impl BuiltinFunctions {
         let find_text = self.to_string_val(&self.eval_arg(&args[0], sheet, engine));
         let within_text = self.to_string_val(&self.eval_arg(&args[1], sheet, engine));
         let start_num = if args.len() == 3 {
-            self.eval_arg(&args[2], sheet, engine).as_number().unwrap_or(1.0) as usize
+            self.eval_arg(&args[2], sheet, engine)
+                .as_number()
+                .unwrap_or(1.0) as usize
         } else {
             1
         };
@@ -951,7 +1001,9 @@ impl BuiltinFunctions {
         let find_text = self.to_string_val(&self.eval_arg(&args[0], sheet, engine));
         let within_text = self.to_string_val(&self.eval_arg(&args[1], sheet, engine));
         let start_num = if args.len() == 3 {
-            self.eval_arg(&args[2], sheet, engine).as_number().unwrap_or(1.0) as usize
+            self.eval_arg(&args[2], sheet, engine)
+                .as_number()
+                .unwrap_or(1.0) as usize
         } else {
             1
         };
@@ -981,7 +1033,11 @@ impl BuiltinFunctions {
         let old_text = self.to_string_val(&self.eval_arg(&args[1], sheet, engine));
         let new_text = self.to_string_val(&self.eval_arg(&args[2], sheet, engine));
         let instance_num = if args.len() == 4 {
-            Some(self.eval_arg(&args[3], sheet, engine).as_number().unwrap_or(0.0) as usize)
+            Some(
+                self.eval_arg(&args[3], sheet, engine)
+                    .as_number()
+                    .unwrap_or(0.0) as usize,
+            )
         } else {
             None
         };
@@ -997,7 +1053,12 @@ impl BuiltinFunctions {
                         count += 1;
                         if count == n {
                             let abs_pos = search_start + pos;
-                            result = format!("{}{}{}", &result[..abs_pos], new, &result[abs_pos + old.len()..]);
+                            result = format!(
+                                "{}{}{}",
+                                &result[..abs_pos],
+                                new,
+                                &result[abs_pos + old.len()..]
+                            );
                             break;
                         }
                         search_start += pos + old.len();
@@ -1017,8 +1078,14 @@ impl BuiltinFunctions {
         }
 
         let text = self.to_string_val(&self.eval_arg(&args[0], sheet, engine));
-        let start = self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as usize;
-        let num_chars = self.eval_arg(&args[2], sheet, engine).as_number().unwrap_or(0.0) as usize;
+        let start = self
+            .eval_arg(&args[1], sheet, engine)
+            .as_number()
+            .unwrap_or(0.0) as usize;
+        let num_chars = self
+            .eval_arg(&args[2], sheet, engine)
+            .as_number()
+            .unwrap_or(0.0) as usize;
         let new_text = self.to_string_val(&self.eval_arg(&args[3], sheet, engine));
 
         match (text, new_text) {
@@ -1038,7 +1105,10 @@ impl BuiltinFunctions {
         }
 
         let text = self.to_string_val(&self.eval_arg(&args[0], sheet, engine));
-        let times = self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as usize;
+        let times = self
+            .eval_arg(&args[1], sheet, engine)
+            .as_number()
+            .unwrap_or(0.0) as usize;
 
         match text {
             Some(t) => CellResult::Text(t.repeat(times)),
@@ -1089,9 +1159,7 @@ impl BuiltinFunctions {
         match val {
             CellResult::Value(n) => CellResult::Text(apply_text_format(n, &format)),
             CellResult::Text(s) => CellResult::Text(s),
-            CellResult::Bool(b) => {
-                CellResult::Text(if b { "TRUE".into() } else { "FALSE".into() })
-            }
+            CellResult::Bool(b) => CellResult::Text(if b { "TRUE".into() } else { "FALSE".into() }),
             CellResult::Empty => CellResult::Text(String::new()),
             CellResult::Error(e) => CellResult::Error(e),
         }
@@ -1104,7 +1172,7 @@ impl BuiltinFunctions {
 
         let val = self.eval_arg(&args[0], sheet, engine);
         match val.as_number() {
-            Some(n) if n >= 1.0 && n <= 255.0 => {
+            Some(n) if (1.0..=255.0).contains(&n) => {
                 CellResult::Text(char::from(n as u8).to_string())
             }
             _ => CellResult::Error(CellError::Value),
@@ -1177,7 +1245,10 @@ impl BuiltinFunctions {
         }
 
         let exact_match = if args.len() == 4 {
-            !self.eval_arg(&args[3], sheet, engine).as_bool().unwrap_or(true)
+            !self
+                .eval_arg(&args[3], sheet, engine)
+                .as_bool()
+                .unwrap_or(true)
         } else {
             false
         };
@@ -1198,7 +1269,8 @@ impl BuiltinFunctions {
             };
 
             if matches {
-                let result_coord = crate::cell::CellCoord::new(row, range.start.col + col_index - 1);
+                let result_coord =
+                    crate::cell::CellCoord::new(row, range.start.col + col_index - 1);
                 return engine.get_value(data_sheet, result_coord);
             }
         }
@@ -1229,7 +1301,10 @@ impl BuiltinFunctions {
         }
 
         let exact_match = if args.len() == 4 {
-            !self.eval_arg(&args[3], sheet, engine).as_bool().unwrap_or(true)
+            !self
+                .eval_arg(&args[3], sheet, engine)
+                .as_bool()
+                .unwrap_or(true)
         } else {
             false
         };
@@ -1249,7 +1324,8 @@ impl BuiltinFunctions {
             };
 
             if matches {
-                let result_coord = crate::cell::CellCoord::new(range.start.row + row_index - 1, col);
+                let result_coord =
+                    crate::cell::CellCoord::new(range.start.row + row_index - 1, col);
                 return engine.get_value(data_sheet, result_coord);
             }
         }
@@ -1268,9 +1344,14 @@ impl BuiltinFunctions {
         };
         let range = *range;
 
-        let row_num = self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as u32;
+        let row_num = self
+            .eval_arg(&args[1], sheet, engine)
+            .as_number()
+            .unwrap_or(0.0) as u32;
         let col_num = if args.len() == 3 {
-            self.eval_arg(&args[2], sheet, engine).as_number().unwrap_or(1.0) as u32
+            self.eval_arg(&args[2], sheet, engine)
+                .as_number()
+                .unwrap_or(1.0) as u32
         } else {
             1
         };
@@ -1300,14 +1381,20 @@ impl BuiltinFunctions {
         let range = *range;
 
         let match_type = if args.len() == 3 {
-            self.eval_arg(&args[2], sheet, engine).as_number().unwrap_or(1.0) as i32
+            self.eval_arg(&args[2], sheet, engine)
+                .as_number()
+                .unwrap_or(1.0) as i32
         } else {
             1
         };
 
         // Determine if horizontal or vertical
         let is_horizontal = range.height() == 1;
-        let count = if is_horizontal { range.width() } else { range.height() };
+        let count = if is_horizontal {
+            range.width()
+        } else {
+            range.height()
+        };
 
         for i in 0..count {
             let coord = if is_horizontal {
@@ -1672,10 +1759,7 @@ impl BuiltinFunctions {
         }
         let mut mask = vec![true; expected_len];
         for pair in pairs.chunks(2) {
-            let (range, data_sheet) = match self.bind_range(&pair[0], sheet, engine) {
-                Ok(v) => v,
-                Err(e) => return Err(e),
-            };
+            let (range, data_sheet) = self.bind_range(&pair[0], sheet, engine)?;
             if range.width() != expected_w || range.height() != expected_h {
                 return Err(CellResult::Error(CellError::Value));
             }
@@ -1777,9 +1861,18 @@ impl BuiltinFunctions {
             return CellResult::Error(CellError::Value);
         }
 
-        let year = self.eval_arg(&args[0], sheet, engine).as_number().unwrap_or(0.0) as i32;
-        let month = self.eval_arg(&args[1], sheet, engine).as_number().unwrap_or(0.0) as i32;
-        let day = self.eval_arg(&args[2], sheet, engine).as_number().unwrap_or(0.0) as i32;
+        let year = self
+            .eval_arg(&args[0], sheet, engine)
+            .as_number()
+            .unwrap_or(0.0) as i32;
+        let month = self
+            .eval_arg(&args[1], sheet, engine)
+            .as_number()
+            .unwrap_or(0.0) as i32;
+        let day = self
+            .eval_arg(&args[2], sheet, engine)
+            .as_number()
+            .unwrap_or(0.0) as i32;
 
         // Simplified date serial number calculation (Excel epoch: 1900-01-01 = 1)
         // This is a basic implementation - full date handling would need a proper library
@@ -1881,7 +1974,12 @@ impl BuiltinFunctions {
         engine.evaluate_expr(sheet, expr)
     }
 
-    fn collect_numeric_values(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> Vec<Result<f64, ()>> {
+    fn collect_numeric_values(
+        &self,
+        args: &[Expr],
+        sheet: u32,
+        engine: &CalcEngine,
+    ) -> Vec<Result<f64, ()>> {
         let mut values = Vec::new();
         for arg in args {
             match arg {
@@ -1912,7 +2010,12 @@ impl BuiltinFunctions {
         values
     }
 
-    fn collect_all_values(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> Vec<CellResult> {
+    fn collect_all_values(
+        &self,
+        args: &[Expr],
+        sheet: u32,
+        engine: &CalcEngine,
+    ) -> Vec<CellResult> {
         let mut values = Vec::new();
         for arg in args {
             match arg {
@@ -1966,41 +2069,46 @@ impl BuiltinFunctions {
             // Check for comparison operators
             if let Some(rest) = crit_str.strip_prefix(">=") {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return criteria_number(cell_val).map_or(false, |n| n >= crit_num);
+                    return criteria_number(cell_val).is_some_and(|n| n >= crit_num);
                 }
             } else if let Some(rest) = crit_str.strip_prefix("<=") {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return criteria_number(cell_val).map_or(false, |n| n <= crit_num);
+                    return criteria_number(cell_val).is_some_and(|n| n <= crit_num);
                 }
             } else if let Some(rest) = crit_str.strip_prefix("<>") {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return criteria_number(cell_val).map_or(true, |n| (n - crit_num).abs() > f64::EPSILON);
+                    return criteria_number(cell_val)
+                        .is_none_or(|n| (n - crit_num).abs() > f64::EPSILON);
                 } else {
                     // String comparison
-                    return !self.to_string_val(cell_val)
-                        .map_or(false, |s| s.eq_ignore_ascii_case(rest.trim()));
+                    return !self
+                        .to_string_val(cell_val)
+                        .is_some_and(|s| s.eq_ignore_ascii_case(rest.trim()));
                 }
             } else if let Some(rest) = crit_str.strip_prefix('>') {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return criteria_number(cell_val).map_or(false, |n| n > crit_num);
+                    return criteria_number(cell_val).is_some_and(|n| n > crit_num);
                 }
             } else if let Some(rest) = crit_str.strip_prefix('<') {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return criteria_number(cell_val).map_or(false, |n| n < crit_num);
+                    return criteria_number(cell_val).is_some_and(|n| n < crit_num);
                 }
             } else if let Some(rest) = crit_str.strip_prefix('=') {
                 // Explicit equality
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
-                    return criteria_number(cell_val).map_or(false, |n| (n - crit_num).abs() < f64::EPSILON);
+                    return criteria_number(cell_val)
+                        .is_some_and(|n| (n - crit_num).abs() < f64::EPSILON);
                 } else {
-                    return self.to_string_val(cell_val)
-                        .map_or(false, |s| s.eq_ignore_ascii_case(rest.trim()));
+                    return self
+                        .to_string_val(cell_val)
+                        .is_some_and(|s| s.eq_ignore_ascii_case(rest.trim()));
                 }
             }
 
             // No operator - try numeric comparison first, then string
             if let Ok(crit_num) = crit_str.parse::<f64>() {
-                return criteria_number(cell_val).map_or(false, |n| (n - crit_num).abs() < f64::EPSILON);
+                return criteria_number(cell_val)
+                    .is_some_and(|n| (n - crit_num).abs() < f64::EPSILON);
             }
 
             // Wildcard matching (* and ?)
@@ -2012,8 +2120,9 @@ impl BuiltinFunctions {
             }
 
             // Plain string comparison (case-insensitive)
-            return self.to_string_val(cell_val)
-                .map_or(false, |s| s.eq_ignore_ascii_case(crit_str));
+            return self
+                .to_string_val(cell_val)
+                .is_some_and(|s| s.eq_ignore_ascii_case(crit_str));
         }
 
         // Non-text criteria: direct value comparison
@@ -2280,8 +2389,8 @@ fn month_name(month: i32) -> &'static str {
 /// Simple pseudo-random number generator (deterministic for reproducibility in tests)
 /// Uses a simple linear congruential generator seeded from system time
 fn rand_simple() -> f64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static SEED: AtomicU64 = AtomicU64::new(0);
 
@@ -2442,8 +2551,8 @@ impl Default for BuiltinFunctions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cell::{CellCoord, CellError};
     use crate::calc::engine::CellValueInput;
+    use crate::cell::{CellCoord, CellError};
 
     #[test]
     fn test_sum() {
@@ -2451,18 +2560,28 @@ mod tests {
         engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(1.0));
         engine.set_value(0, CellCoord::new(1, 0), CellValueInput::Number(2.0));
         engine.set_value(0, CellCoord::new(2, 0), CellValueInput::Number(3.0));
-        engine.set_formula(0, CellCoord::new(3, 0), "=SUM(A1:A3)").unwrap();
+        engine
+            .set_formula(0, CellCoord::new(3, 0), "=SUM(A1:A3)")
+            .unwrap();
 
-        assert_eq!(engine.get_value(0, CellCoord::new(3, 0)), CellResult::Value(6.0));
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(3, 0)),
+            CellResult::Value(6.0)
+        );
     }
 
     #[test]
     fn test_if() {
         let mut engine = CalcEngine::new();
         engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(10.0));
-        engine.set_formula(0, CellCoord::new(0, 1), "=IF(A1>5,\"big\",\"small\")").unwrap();
+        engine
+            .set_formula(0, CellCoord::new(0, 1), "=IF(A1>5,\"big\",\"small\")")
+            .unwrap();
 
-        assert_eq!(engine.get_value(0, CellCoord::new(0, 1)), CellResult::Text("big".to_string()));
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 1)),
+            CellResult::Text("big".to_string())
+        );
     }
 
     #[test]
@@ -2470,9 +2589,14 @@ mod tests {
         let mut engine = CalcEngine::new();
         engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(10.0));
         engine.set_value(0, CellCoord::new(1, 0), CellValueInput::Number(20.0));
-        engine.set_formula(0, CellCoord::new(2, 0), "=AVERAGE(A1:A2)").unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 0), "=AVERAGE(A1:A2)")
+            .unwrap();
 
-        assert_eq!(engine.get_value(0, CellCoord::new(2, 0)), CellResult::Value(15.0));
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 0)),
+            CellResult::Value(15.0)
+        );
     }
 
     #[test]
@@ -2484,7 +2608,10 @@ mod tests {
         engine
             .set_formula(0, CellCoord::new(0, 0), "=SUM(Sheet2!A1:A2)")
             .unwrap();
-        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(10.0));
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 0)),
+            CellResult::Value(10.0)
+        );
     }
 
     #[test]
@@ -2492,43 +2619,97 @@ mod tests {
         let mut engine = CalcEngine::new();
         engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(10.0));
         engine.set_value(0, CellCoord::new(2, 0), CellValueInput::Number(20.0));
-        engine.set_formula(0, CellCoord::new(0, 1), "=AVERAGE(A1:A3)").unwrap();
-        engine.set_formula(0, CellCoord::new(1, 1), "=COUNT(A1:A3)").unwrap();
-        engine.set_formula(0, CellCoord::new(2, 1), "=PRODUCT(A1:A3)").unwrap();
-        engine.set_formula(0, CellCoord::new(3, 1), "=MIN(A1:A3)").unwrap();
-        engine.set_formula(0, CellCoord::new(4, 1), "=COUNTIF(A1:A3,\">=0\")").unwrap();
+        engine
+            .set_formula(0, CellCoord::new(0, 1), "=AVERAGE(A1:A3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 1), "=COUNT(A1:A3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 1), "=PRODUCT(A1:A3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(3, 1), "=MIN(A1:A3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(4, 1), "=COUNTIF(A1:A3,\">=0\")")
+            .unwrap();
 
-        assert_eq!(engine.get_value(0, CellCoord::new(0, 1)), CellResult::Value(15.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(1, 1)), CellResult::Value(2.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(2, 1)), CellResult::Value(200.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(3, 1)), CellResult::Value(10.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(4, 1)), CellResult::Value(2.0));
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 1)),
+            CellResult::Value(15.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 1)),
+            CellResult::Value(2.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 1)),
+            CellResult::Value(200.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(3, 1)),
+            CellResult::Value(10.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(4, 1)),
+            CellResult::Value(2.0)
+        );
     }
 
     #[test]
     fn excel_mod_follows_divisor_sign() {
         let mut engine = CalcEngine::new();
-        engine.set_formula(0, CellCoord::new(0, 0), "=MOD(-3,2)").unwrap();
-        engine.set_formula(0, CellCoord::new(1, 0), "=MOD(3,-2)").unwrap();
-        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(1.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(1, 0)), CellResult::Value(-1.0));
+        engine
+            .set_formula(0, CellCoord::new(0, 0), "=MOD(-3,2)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 0), "=MOD(3,-2)")
+            .unwrap();
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 0)),
+            CellResult::Value(1.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 0)),
+            CellResult::Value(-1.0)
+        );
     }
 
     #[test]
     fn ceiling_floor_reject_mixed_signs() {
         let mut engine = CalcEngine::new();
-        engine.set_formula(0, CellCoord::new(0, 0), "=CEILING(2.5,1)").unwrap();
-        engine.set_formula(0, CellCoord::new(1, 0), "=CEILING(-2.5,-1)").unwrap();
-        engine.set_formula(0, CellCoord::new(2, 0), "=CEILING(-2.5,1)").unwrap();
-        engine.set_formula(0, CellCoord::new(3, 0), "=FLOOR(-2.5,-1)").unwrap();
-        engine.set_formula(0, CellCoord::new(4, 0), "=FLOOR(2.5,0)").unwrap();
-        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(3.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(1, 0)), CellResult::Value(-3.0));
+        engine
+            .set_formula(0, CellCoord::new(0, 0), "=CEILING(2.5,1)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 0), "=CEILING(-2.5,-1)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 0), "=CEILING(-2.5,1)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(3, 0), "=FLOOR(-2.5,-1)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(4, 0), "=FLOOR(2.5,0)")
+            .unwrap();
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 0)),
+            CellResult::Value(3.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 0)),
+            CellResult::Value(-3.0)
+        );
         assert_eq!(
             engine.get_value(0, CellCoord::new(2, 0)),
             CellResult::Error(CellError::Num)
         );
-        assert_eq!(engine.get_value(0, CellCoord::new(3, 0)), CellResult::Value(-2.0));
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(3, 0)),
+            CellResult::Value(-2.0)
+        );
         assert_eq!(
             engine.get_value(0, CellCoord::new(4, 0)),
             CellResult::Error(CellError::DivZero)
@@ -2538,10 +2719,22 @@ mod tests {
     #[test]
     fn text_applies_number_and_date_formats() {
         let mut engine = CalcEngine::new();
-        engine.set_formula(0, CellCoord::new(0, 0), "=TEXT(1234.5,\"0.00\")").unwrap();
-        engine.set_formula(0, CellCoord::new(1, 0), "=TEXT(1234.5,\"#,##0.00\")").unwrap();
-        engine.set_formula(0, CellCoord::new(2, 0), "=TEXT(0.5,\"0%\")").unwrap();
-        engine.set_formula(0, CellCoord::new(3, 0), "=TEXT(DATE(2024,8,18),\"yyyy-mm-dd\")").unwrap();
+        engine
+            .set_formula(0, CellCoord::new(0, 0), "=TEXT(1234.5,\"0.00\")")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 0), "=TEXT(1234.5,\"#,##0.00\")")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 0), "=TEXT(0.5,\"0%\")")
+            .unwrap();
+        engine
+            .set_formula(
+                0,
+                CellCoord::new(3, 0),
+                "=TEXT(DATE(2024,8,18),\"yyyy-mm-dd\")",
+            )
+            .unwrap();
         assert_eq!(
             engine.get_value(0, CellCoord::new(0, 0)),
             CellResult::Text("1234.50".into())
@@ -2563,12 +2756,27 @@ mod tests {
     #[test]
     fn trunc_toward_zero() {
         let mut engine = CalcEngine::new();
-        engine.set_formula(0, CellCoord::new(0, 0), "=TRUNC(-2.9)").unwrap();
-        engine.set_formula(0, CellCoord::new(1, 0), "=INT(-2.9)").unwrap();
-        engine.set_formula(0, CellCoord::new(2, 0), "=TRUNC(2.99,1)").unwrap();
-        assert_eq!(engine.get_value(0, CellCoord::new(0, 0)), CellResult::Value(-2.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(1, 0)), CellResult::Value(-3.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(2, 0)), CellResult::Value(2.9));
+        engine
+            .set_formula(0, CellCoord::new(0, 0), "=TRUNC(-2.9)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 0), "=INT(-2.9)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 0), "=TRUNC(2.99,1)")
+            .unwrap();
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 0)),
+            CellResult::Value(-2.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 0)),
+            CellResult::Value(-3.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 0)),
+            CellResult::Value(2.9)
+        );
     }
 
     #[test]
@@ -2584,7 +2792,11 @@ mod tests {
         engine.set_value(0, CellCoord::new(1, 2), CellValueInput::Number(1.0));
         engine.set_value(0, CellCoord::new(2, 2), CellValueInput::Number(2.0));
         engine
-            .set_formula(0, CellCoord::new(0, 3), "=SUMIFS(B1:B3,A1:A3,\"a\",C1:C3,1)")
+            .set_formula(
+                0,
+                CellCoord::new(0, 3),
+                "=SUMIFS(B1:B3,A1:A3,\"a\",C1:C3,1)",
+            )
             .unwrap();
         engine
             .set_formula(0, CellCoord::new(1, 3), "=COUNTIFS(A1:A3,\"a\",C1:C3,1)")
@@ -2592,9 +2804,18 @@ mod tests {
         engine
             .set_formula(0, CellCoord::new(2, 3), "=AVERAGEIFS(B1:B3,A1:A3,\"a\")")
             .unwrap();
-        assert_eq!(engine.get_value(0, CellCoord::new(0, 3)), CellResult::Value(10.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(1, 3)), CellResult::Value(1.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(2, 3)), CellResult::Value(20.0));
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 3)),
+            CellResult::Value(10.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 3)),
+            CellResult::Value(1.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 3)),
+            CellResult::Value(20.0)
+        );
     }
 
     #[test]
@@ -2606,15 +2827,400 @@ mod tests {
         engine.set_value(0, CellCoord::new(0, 1), CellValueInput::Number(4.0));
         engine.set_value(0, CellCoord::new(1, 1), CellValueInput::Number(5.0));
         engine.set_value(0, CellCoord::new(2, 1), CellValueInput::Number(6.0));
-        engine.set_formula(0, CellCoord::new(0, 2), "=SUMPRODUCT(A1:A3,B1:B3)").unwrap();
-        engine.set_formula(0, CellCoord::new(1, 2), "=STDEV(A1:A3)").unwrap();
-        engine.set_formula(0, CellCoord::new(2, 2), "=VAR.S(A1:A3)").unwrap();
-        engine.set_formula(0, CellCoord::new(3, 2), "=LARGE(A1:A3,2)").unwrap();
-        engine.set_formula(0, CellCoord::new(4, 2), "=SMALL(A1:A3,2)").unwrap();
-        assert_eq!(engine.get_value(0, CellCoord::new(0, 2)), CellResult::Value(32.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(1, 2)), CellResult::Value(1.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(2, 2)), CellResult::Value(1.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(3, 2)), CellResult::Value(2.0));
-        assert_eq!(engine.get_value(0, CellCoord::new(4, 2)), CellResult::Value(2.0));
+        engine
+            .set_formula(0, CellCoord::new(0, 2), "=SUMPRODUCT(A1:A3,B1:B3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 2), "=STDEV(A1:A3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 2), "=VAR.S(A1:A3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(3, 2), "=LARGE(A1:A3,2)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(4, 2), "=SMALL(A1:A3,2)")
+            .unwrap();
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 2)),
+            CellResult::Value(32.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 2)),
+            CellResult::Value(1.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 2)),
+            CellResult::Value(1.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(3, 2)),
+            CellResult::Value(2.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(4, 2)),
+            CellResult::Value(2.0)
+        );
+    }
+
+    #[test]
+    fn mod_edge_cases() {
+        let mut engine = CalcEngine::new();
+        // MOD(n, d) = n - d * FLOOR(n/d)
+        // Excel: result has same sign as divisor
+        engine
+            .set_formula(0, CellCoord::new(0, 0), "=MOD(5,3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 0), "=MOD(-5,3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 0), "=MOD(5,-3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(3, 0), "=MOD(-5,-3)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(4, 0), "=MOD(0,5)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(5, 0), "=MOD(5,0)")
+            .unwrap();
+
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 0)),
+            CellResult::Value(2.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 0)),
+            CellResult::Value(1.0)
+        ); // -5 - 3*floor(-5/3) = -5 - 3*(-2) = 1
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 0)),
+            CellResult::Value(-1.0)
+        ); // 5 - (-3)*floor(5/-3) = 5 - (-3)*(-2) = -1
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(3, 0)),
+            CellResult::Value(-2.0)
+        ); // -5 - (-3)*floor(-5/-3) = -5 - (-3)*1 = -2
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(4, 0)),
+            CellResult::Value(0.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(5, 0)),
+            CellResult::Error(CellError::DivZero)
+        );
+    }
+
+    #[test]
+    fn ceiling_edge_cases() {
+        let mut engine = CalcEngine::new();
+        // CEILING rounds away from zero to a multiple of significance
+        engine
+            .set_formula(0, CellCoord::new(0, 0), "=CEILING(4.2,1)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 0), "=CEILING(4.2,0.5)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 0), "=CEILING(-4.2,-1)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(3, 0), "=CEILING(0,5)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(4, 0), "=CEILING(5,0)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(5, 0), "=CEILING(4.2,-1)")
+            .unwrap(); // Mixed signs = error
+
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 0)),
+            CellResult::Value(5.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 0)),
+            CellResult::Value(4.5)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 0)),
+            CellResult::Value(-5.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(3, 0)),
+            CellResult::Value(0.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(4, 0)),
+            CellResult::Value(0.0)
+        ); // CEILING(x, 0) = 0
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(5, 0)),
+            CellResult::Error(CellError::Num)
+        );
+    }
+
+    #[test]
+    fn floor_edge_cases() {
+        let mut engine = CalcEngine::new();
+        // FLOOR rounds toward zero to a multiple of significance
+        engine
+            .set_formula(0, CellCoord::new(0, 0), "=FLOOR(4.7,1)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 0), "=FLOOR(4.7,0.5)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 0), "=FLOOR(-4.7,-1)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(3, 0), "=FLOOR(0,5)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(4, 0), "=FLOOR(4.7,-1)")
+            .unwrap(); // Mixed signs = error
+
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 0)),
+            CellResult::Value(4.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 0)),
+            CellResult::Value(4.5)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 0)),
+            CellResult::Value(-4.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(3, 0)),
+            CellResult::Value(0.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(4, 0)),
+            CellResult::Error(CellError::Num)
+        );
+    }
+
+    #[test]
+    fn aggregates_skip_text_in_ranges() {
+        let mut engine = CalcEngine::new();
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(10.0));
+        engine.set_value(
+            0,
+            CellCoord::new(1, 0),
+            CellValueInput::Text("ignored".into()),
+        );
+        engine.set_value(0, CellCoord::new(2, 0), CellValueInput::Number(20.0));
+        engine.set_value(0, CellCoord::new(3, 0), CellValueInput::Bool(true)); // Bools in ranges are skipped too
+
+        engine
+            .set_formula(0, CellCoord::new(0, 1), "=SUM(A1:A4)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 1), "=AVERAGE(A1:A4)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 1), "=COUNT(A1:A4)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(3, 1), "=COUNTA(A1:A4)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(4, 1), "=MAX(A1:A4)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(5, 1), "=MIN(A1:A4)")
+            .unwrap();
+
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 1)),
+            CellResult::Value(30.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 1)),
+            CellResult::Value(15.0)
+        ); // 30/2 numbers
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 1)),
+            CellResult::Value(2.0)
+        ); // Only numbers
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(3, 1)),
+            CellResult::Value(4.0)
+        ); // All non-empty
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(4, 1)),
+            CellResult::Value(20.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(5, 1)),
+            CellResult::Value(10.0)
+        );
+    }
+
+    #[test]
+    fn cross_sheet_range_aggregates() {
+        let mut engine = CalcEngine::new();
+        engine.set_sheet_names(vec!["Data".into(), "Summary".into()]);
+
+        // Set up data on "Data" sheet (index 0)
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(100.0));
+        engine.set_value(0, CellCoord::new(1, 0), CellValueInput::Number(200.0));
+        engine.set_value(0, CellCoord::new(2, 0), CellValueInput::Number(300.0));
+
+        // Formulas on "Summary" sheet (index 1) referencing "Data"
+        engine
+            .set_formula(1, CellCoord::new(0, 0), "=SUM(Data!A1:A3)")
+            .unwrap();
+        engine
+            .set_formula(1, CellCoord::new(1, 0), "=AVERAGE(Data!A1:A3)")
+            .unwrap();
+        engine
+            .set_formula(1, CellCoord::new(2, 0), "=MAX(Data!A1:A3)")
+            .unwrap();
+
+        assert_eq!(
+            engine.get_value(1, CellCoord::new(0, 0)),
+            CellResult::Value(600.0)
+        );
+        assert_eq!(
+            engine.get_value(1, CellCoord::new(1, 0)),
+            CellResult::Value(200.0)
+        );
+        assert_eq!(
+            engine.get_value(1, CellCoord::new(2, 0)),
+            CellResult::Value(300.0)
+        );
+    }
+
+    #[test]
+    fn wildcard_countif_sumif() {
+        let mut engine = CalcEngine::new();
+        engine.set_value(
+            0,
+            CellCoord::new(0, 0),
+            CellValueInput::Text("Apple".into()),
+        );
+        engine.set_value(
+            0,
+            CellCoord::new(1, 0),
+            CellValueInput::Text("Apricot".into()),
+        );
+        engine.set_value(
+            0,
+            CellCoord::new(2, 0),
+            CellValueInput::Text("Banana".into()),
+        );
+        engine.set_value(0, CellCoord::new(3, 0), CellValueInput::Text("app".into()));
+        engine.set_value(0, CellCoord::new(0, 1), CellValueInput::Number(1.0));
+        engine.set_value(0, CellCoord::new(1, 1), CellValueInput::Number(2.0));
+        engine.set_value(0, CellCoord::new(2, 1), CellValueInput::Number(3.0));
+        engine.set_value(0, CellCoord::new(3, 1), CellValueInput::Number(4.0));
+
+        // Wildcard * matches any characters
+        engine
+            .set_formula(0, CellCoord::new(0, 2), "=COUNTIF(A1:A4,\"A*\")")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 2), "=SUMIF(A1:A4,\"A*\",B1:B4)")
+            .unwrap();
+        // Wildcard ? matches single character
+        engine
+            .set_formula(0, CellCoord::new(2, 2), "=COUNTIF(A1:A4,\"App?e\")")
+            .unwrap();
+
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 2)),
+            CellResult::Value(3.0)
+        ); // Apple, Apricot, app
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 2)),
+            CellResult::Value(7.0)
+        ); // 1+2+4
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 2)),
+            CellResult::Value(1.0)
+        ); // Apple
+    }
+
+    #[test]
+    fn roundup_rounddown_negative() {
+        let mut engine = CalcEngine::new();
+        engine
+            .set_formula(0, CellCoord::new(0, 0), "=ROUNDUP(3.14159,2)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(1, 0), "=ROUNDDOWN(3.14159,2)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(2, 0), "=ROUNDUP(-3.14159,2)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(3, 0), "=ROUNDDOWN(-3.14159,2)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(4, 0), "=ROUND(2.5,0)")
+            .unwrap();
+        engine
+            .set_formula(0, CellCoord::new(5, 0), "=ROUND(-2.5,0)")
+            .unwrap();
+
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 0)),
+            CellResult::Value(3.15)
+        ); // Away from zero
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 0)),
+            CellResult::Value(3.14)
+        ); // Toward zero
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(2, 0)),
+            CellResult::Value(-3.15)
+        ); // Away from zero (more negative)
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(3, 0)),
+            CellResult::Value(-3.14)
+        ); // Toward zero
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(4, 0)),
+            CellResult::Value(3.0)
+        ); // Standard rounding
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(5, 0)),
+            CellResult::Value(-3.0)
+        ); // Standard rounding
+    }
+
+    #[test]
+    fn nested_function_calls() {
+        let mut engine = CalcEngine::new();
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(16.0));
+        engine.set_value(0, CellCoord::new(1, 0), CellValueInput::Number(9.0));
+
+        // IF with nested function arguments
+        engine
+            .set_formula(
+                0,
+                CellCoord::new(0, 1),
+                "=IF(SUM(A1:A2)>20,SQRT(A1),SQRT(A2))",
+            )
+            .unwrap();
+        // Nested aggregates
+        engine
+            .set_formula(0, CellCoord::new(1, 1), "=SUM(SQRT(A1),SQRT(A2))")
+            .unwrap();
+
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(0, 1)),
+            CellResult::Value(4.0)
+        ); // 25>20, sqrt(16)
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(1, 1)),
+            CellResult::Value(7.0)
+        ); // 4+3
     }
 }

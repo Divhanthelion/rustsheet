@@ -3,9 +3,9 @@
 //! This module provides JavaScript-friendly bindings for the spreadsheet engine
 //! when compiled to WASM.
 
-use wasm_bindgen::prelude::*;
 use crate::calc::{CalcEngine, CellResult, CellValueInput};
 use crate::cell::CellCoord;
+use wasm_bindgen::prelude::*;
 
 /// WASM-friendly spreadsheet engine wrapper
 #[wasm_bindgen]
@@ -33,7 +33,8 @@ impl WasmSpreadsheet {
     pub fn set_number(&mut self, sheet: u32, cell: &str, value: f64) -> Result<(), JsValue> {
         let coord = CellCoord::from_a1(cell)
             .ok_or_else(|| JsValue::from_str(&format!("Invalid cell address: {}", cell)))?;
-        self.engine.set_value(sheet, coord, CellValueInput::Number(value));
+        self.engine
+            .set_value(sheet, coord, CellValueInput::Number(value));
         Ok(())
     }
 
@@ -42,7 +43,8 @@ impl WasmSpreadsheet {
     pub fn set_text(&mut self, sheet: u32, cell: &str, value: &str) -> Result<(), JsValue> {
         let coord = CellCoord::from_a1(cell)
             .ok_or_else(|| JsValue::from_str(&format!("Invalid cell address: {}", cell)))?;
-        self.engine.set_value(sheet, coord, CellValueInput::Text(value.to_string()));
+        self.engine
+            .set_value(sheet, coord, CellValueInput::Text(value.to_string()));
         Ok(())
     }
 
@@ -51,7 +53,8 @@ impl WasmSpreadsheet {
     pub fn set_bool(&mut self, sheet: u32, cell: &str, value: bool) -> Result<(), JsValue> {
         let coord = CellCoord::from_a1(cell)
             .ok_or_else(|| JsValue::from_str(&format!("Invalid cell address: {}", cell)))?;
-        self.engine.set_value(sheet, coord, CellValueInput::Bool(value));
+        self.engine
+            .set_value(sheet, coord, CellValueInput::Bool(value));
         Ok(())
     }
 

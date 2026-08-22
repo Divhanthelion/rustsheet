@@ -68,25 +68,25 @@ pub fn lttb_downsample(data: &[(f64, f64)], target: usize) -> Vec<(f64, f64)> {
 
         // Find the point in this bucket that maximizes triangle area
         let mut max_area = -1.0;
-        let mut selected_idx = bucket_start;
+        let mut selected_point = data[bucket_start];
 
-        for j in bucket_start..bucket_end {
+        for point in &data[bucket_start..bucket_end] {
             let area = triangle_area(
                 prev_selected.0,
                 prev_selected.1,
-                data[j].0,
-                data[j].1,
+                point.0,
+                point.1,
                 next_avg_x,
                 next_avg_y,
             );
 
             if area > max_area {
                 max_area = area;
-                selected_idx = j;
+                selected_point = *point;
             }
         }
 
-        prev_selected = data[selected_idx];
+        prev_selected = selected_point;
         result.push(prev_selected);
     }
 
@@ -109,7 +109,9 @@ fn average_point(points: &[(f64, f64)]) -> (f64, f64) {
     if points.is_empty() {
         return (0.0, 0.0);
     }
-    let sum: (f64, f64) = points.iter().fold((0.0, 0.0), |acc, p| (acc.0 + p.0, acc.1 + p.1));
+    let sum: (f64, f64) = points
+        .iter()
+        .fold((0.0, 0.0), |acc, p| (acc.0 + p.0, acc.1 + p.1));
     (sum.0 / points.len() as f64, sum.1 / points.len() as f64)
 }
 

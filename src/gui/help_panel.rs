@@ -1,7 +1,7 @@
 //! Help panel showing functions and keyboard shortcuts
 
-use eframe::egui::{self, RichText, ScrollArea, Ui, Color32};
 use super::functions_help::{self, FunctionCategory, FunctionInfo};
+use eframe::egui::{self, Color32, RichText, ScrollArea, Ui};
 
 /// State for the help panel
 pub struct HelpPanel {
@@ -83,72 +83,86 @@ impl HelpPanel {
         // Two-column layout: categories on left, function list/details on right
         ui.columns(2, |columns| {
             // Left column: Categories
-            ScrollArea::vertical().id_salt("categories").show(&mut columns[0], |ui| {
-                ui.heading("Categories");
-                ui.separator();
-
-                if ui.selectable_label(self.selected_category.is_none(), "All Functions").clicked() {
-                    self.selected_category = None;
-                }
-
-                for category in FunctionCategory::all() {
-                    if ui.selectable_label(
-                        self.selected_category == Some(*category),
-                        category.name()
-                    ).clicked() {
-                        self.selected_category = Some(*category);
-                    }
-                }
-            });
-
-            // Right column: Function list and details
-            ScrollArea::vertical().id_salt("functions").show(&mut columns[1], |ui| {
-                let search_upper = self.search_text.to_uppercase();
-                let functions: Vec<&FunctionInfo> = functions_help::get_all_functions()
-                    .iter()
-                    .filter(|f| {
-                        // Filter by category
-                        if let Some(cat) = self.selected_category {
-                            if f.category != cat {
-                                return false;
-                            }
-                        }
-                        // Filter by search
-                        if !self.search_text.is_empty() {
-                            if !f.name.contains(&search_upper) &&
-                               !f.description.to_uppercase().contains(&search_upper) {
-                                return false;
-                            }
-                        }
-                        true
-                    })
-                    .collect();
-
-                // Show selected function details or list
-                if let Some(func_name) = self.selected_function {
-                    if let Some(func) = functions_help::get_function(func_name) {
-                        if ui.button("← Back to list").clicked() {
-                            self.selected_function = None;
-                        }
-                        ui.separator();
-                        show_function_details(ui, func);
-                    } else {
-                        self.selected_function = None;
-                    }
-                } else {
-                    ui.heading(format!("Functions ({})", functions.len()));
+            ScrollArea::vertical()
+                .id_salt("categories")
+                .show(&mut columns[0], |ui| {
+                    ui.heading("Categories");
                     ui.separator();
 
-                    for func in functions {
-                        ui.horizontal(|ui| {
-                            if ui.link(RichText::new(func.name).strong().monospace()).clicked() {
-                                self.selected_function = Some(func.name);
-                            }
-                            ui.label(format!("- {}", truncate(func.description, 40)));
-                        });
+                    if ui
+                        .selectable_label(self.selected_category.is_none(), "All Functions")
+                        .clicked()
+                    {
+                        self.selected_category = None;
                     }
-                }
-            });
+
+                    for category in FunctionCategory::all() {
+                        if ui
+                            .selectable_label(
+                                self.selected_category == Some(*category),
+                                category.name(),
+                            )
+                            .clicked()
+                        {
+                            self.selected_category = Some(*category);
+                        }
+                    }
+                });
+
+            // Right column: Function list and details
+            ScrollArea::vertical()
+                .id_salt("functions")
+                .show(&mut columns[1], |ui| {
+                    let search_upper = self.search_text.to_uppercase();
+                    let functions: Vec<&FunctionInfo> = functions_help::get_all_functions()
+                        .iter()
+                        .filter(|f| {
+                            // Filter by category
+                            if let Some(cat) = self.selected_category {
+                                if f.category != cat {
+                                    return false;
+                                }
+                            }
+                            // Filter by search
+                            if !self.search_text.is_empty() {
+                                if !f.name.contains(&search_upper)
+                                    && !f.description.to_uppercase().contains(&search_upper)
+                                {
+                                    return false;
+                                }
+                            }
+                            true
+                        })
+                        .collect();
+
+                    // Show selected function details or list
+                    if let Some(func_name) = self.selected_function {
+                        if let Some(func) = functions_help::get_function(func_name) {
+                            if ui.button("← Back to list").clicked() {
+                                self.selected_function = None;
+                            }
+                            ui.separator();
+                            show_function_details(ui, func);
+                        } else {
+                            self.selected_function = None;
+                        }
+                    } else {
+                        ui.heading(format!("Functions ({})", functions.len()));
+                        ui.separator();
+
+                        for func in functions {
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .link(RichText::new(func.name).strong().monospace())
+                                    .clicked()
+                                {
+                                    self.selected_function = Some(func.name);
+                                }
+                                ui.label(format!("- {}", truncate(func.description, 40)));
+                            });
+                        }
+                    }
+                });
         });
     }
 
@@ -184,7 +198,11 @@ impl HelpPanel {
             shortcut_row(ui, "Escape", "Cancel editing");
             shortcut_row(ui, "Delete", "Clear cell contents");
             shortcut_row(ui, "Backspace", "Clear cell and start editing");
-            shortcut_row(ui, "Type any character", "Start editing with that character");
+            shortcut_row(
+                ui,
+                "Type any character",
+                "Start editing with that character",
+            );
 
             ui.add_space(10.0);
             ui.heading("Formulas");
@@ -193,7 +211,11 @@ impl HelpPanel {
             shortcut_row(ui, "F4", "Toggle absolute/relative reference ($)");
             shortcut_row(ui, "Tab (while typing)", "Accept autocomplete suggestion");
             shortcut_row(ui, "Arrow Down (in autocomplete)", "Select next suggestion");
-            shortcut_row(ui, "Arrow Up (in autocomplete)", "Select previous suggestion");
+            shortcut_row(
+                ui,
+                "Arrow Up (in autocomplete)",
+                "Select previous suggestion",
+            );
 
             ui.add_space(10.0);
             ui.heading("File Operations");
@@ -251,25 +273,42 @@ impl HelpPanel {
 
 fn show_function_details(ui: &mut Ui, func: &FunctionInfo) {
     ui.heading(RichText::new(func.name).monospace().size(18.0));
-    ui.label(RichText::new(func.category.name()).italics().color(Color32::GRAY));
+    ui.label(
+        RichText::new(func.category.name())
+            .italics()
+            .color(Color32::GRAY),
+    );
 
     ui.add_space(10.0);
     ui.label(func.description);
 
     ui.add_space(10.0);
     ui.label(RichText::new("Syntax:").strong());
-    ui.label(RichText::new(func.syntax).monospace().color(Color32::from_rgb(0, 100, 0)));
+    ui.label(
+        RichText::new(func.syntax)
+            .monospace()
+            .color(Color32::from_rgb(0, 100, 0)),
+    );
 
     ui.add_space(10.0);
     ui.label(RichText::new("Examples:").strong());
     for example in func.examples {
-        ui.label(RichText::new(*example).monospace().color(Color32::from_rgb(200, 60, 60)));
+        ui.label(
+            RichText::new(*example)
+                .monospace()
+                .color(Color32::from_rgb(200, 60, 60)),
+        );
     }
 }
 
 fn shortcut_row(ui: &mut Ui, keys: &str, description: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(keys).monospace().strong().color(Color32::from_rgb(80, 80, 80)));
+        ui.label(
+            RichText::new(keys)
+                .monospace()
+                .strong()
+                .color(Color32::from_rgb(80, 80, 80)),
+        );
         ui.label("-");
         ui.label(description);
     });

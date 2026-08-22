@@ -1,8 +1,8 @@
 //! Text rendering using glyphon/cosmic-text
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer as GlyphonTextRenderer, Viewport,
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
+    TextArea, TextAtlas, TextBounds, TextRenderer as GlyphonTextRenderer, Viewport,
 };
 use wgpu::{Device, MultisampleState, Queue, TextureFormat};
 
@@ -35,12 +35,8 @@ impl TextRenderer {
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let mut atlas = TextAtlas::new(device, queue, &cache, format);
-        let renderer = GlyphonTextRenderer::new(
-            &mut atlas,
-            device,
-            MultisampleState::default(),
-            None,
-        );
+        let renderer =
+            GlyphonTextRenderer::new(&mut atlas, device, MultisampleState::default(), None);
 
         let viewport = Viewport::new(device, &cache);
 
@@ -71,9 +67,7 @@ impl TextRenderer {
 
         buffer.set_size(&mut self.font_system, Some(width), Some(height));
 
-        let attrs = Attrs::new()
-            .family(Family::SansSerif)
-            .color(color);
+        let attrs = Attrs::new().family(Family::SansSerif).color(color);
 
         buffer.set_text(&mut self.font_system, text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.font_system, false);
@@ -90,20 +84,8 @@ impl TextRenderer {
     }
 
     /// Update viewport for current frame
-    pub fn update_viewport(
-        &mut self,
-        _device: &Device,
-        queue: &Queue,
-        width: u32,
-        height: u32,
-    ) {
-        self.viewport.update(
-            queue,
-            Resolution {
-                width,
-                height,
-            },
-        );
+    pub fn update_viewport(&mut self, _device: &Device, queue: &Queue, width: u32, height: u32) {
+        self.viewport.update(queue, Resolution { width, height });
     }
 
     /// Prepare all text areas for rendering
@@ -116,8 +98,9 @@ impl TextRenderer {
         let areas: Vec<TextArea> = text_areas
             .iter()
             .filter_map(|area| {
-                self.text_buffers.get(area.buffer_index).map(|buffer| {
-                    TextArea {
+                self.text_buffers
+                    .get(area.buffer_index)
+                    .map(|buffer| TextArea {
                         buffer,
                         left: area.x,
                         top: area.y,
@@ -130,8 +113,7 @@ impl TextRenderer {
                         },
                         default_color: area.color,
                         custom_glyphs: &[],
-                    }
-                })
+                    })
             })
             .collect();
 
@@ -151,7 +133,10 @@ impl TextRenderer {
     }
 
     /// Render text to a render pass
-    pub fn render<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) -> Result<(), RendererError> {
+    pub fn render<'a>(
+        &'a self,
+        render_pass: &mut wgpu::RenderPass<'a>,
+    ) -> Result<(), RendererError> {
         self.renderer
             .render(&self.atlas, &self.viewport, render_pass)
             .map_err(|e| RendererError::ShaderError(format!("Text render error: {:?}", e)))?;

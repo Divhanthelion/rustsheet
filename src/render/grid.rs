@@ -2,9 +2,7 @@
 
 use std::mem;
 use wgpu::util::DeviceExt;
-use wgpu::{
-    BindGroup, Buffer, Device, Queue, RenderPipeline, TextureFormat,
-};
+use wgpu::{BindGroup, Buffer, Device, Queue, RenderPipeline, TextureFormat};
 
 use super::renderer::{RenderConfig, RendererError, VisibleRange};
 
@@ -244,7 +242,10 @@ impl GridRenderer {
             if col >= visible.start_col {
                 col_positions.push(x);
             }
-            let width = col_widths.get(col as usize).copied().unwrap_or(config.default_cell_width);
+            let width = col_widths
+                .get(col as usize)
+                .copied()
+                .unwrap_or(config.default_cell_width);
             x += width * scale;
         }
         col_positions.push(x); // End position
@@ -256,7 +257,10 @@ impl GridRenderer {
             if row >= visible.start_row {
                 row_positions.push(y);
             }
-            let height = row_heights.get(row as usize).copied().unwrap_or(config.default_cell_height);
+            let height = row_heights
+                .get(row as usize)
+                .copied()
+                .unwrap_or(config.default_cell_height);
             y += height * scale;
         }
         row_positions.push(y); // End position
@@ -332,10 +336,22 @@ impl GridRenderer {
         color: [f32; 4],
     ) {
         let idx = vertices.len() as u32;
-        vertices.push(GridVertex { position: [x, y], color });
-        vertices.push(GridVertex { position: [x + width, y], color });
-        vertices.push(GridVertex { position: [x + width, y + height], color });
-        vertices.push(GridVertex { position: [x, y + height], color });
+        vertices.push(GridVertex {
+            position: [x, y],
+            color,
+        });
+        vertices.push(GridVertex {
+            position: [x + width, y],
+            color,
+        });
+        vertices.push(GridVertex {
+            position: [x + width, y + height],
+            color,
+        });
+        vertices.push(GridVertex {
+            position: [x, y + height],
+            color,
+        });
         indices.extend_from_slice(&[idx, idx + 1, idx + 2, idx, idx + 2, idx + 3]);
     }
 

@@ -31,9 +31,10 @@ impl Default for ChartId {
 }
 
 /// Supported chart types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ChartKind {
     // Cartesian charts
+    #[default]
     Line,
     Bar,
     Scatter,
@@ -43,12 +44,6 @@ pub enum ChartKind {
     Doughnut,
     // Combined
     Combo,
-}
-
-impl Default for ChartKind {
-    fn default() -> Self {
-        Self::Line
-    }
 }
 
 impl ChartKind {
@@ -343,8 +338,10 @@ impl Default for ChartDefinition {
 
 impl ChartDefinition {
     pub fn new(chart_kind: ChartKind) -> Self {
-        let mut def = Self::default();
-        def.chart_kind = chart_kind;
+        let mut def = Self {
+            chart_kind,
+            ..Default::default()
+        };
 
         // Adjust style defaults based on chart type
         if chart_kind == ChartKind::Doughnut {
@@ -407,14 +404,14 @@ pub type ChartConfig = ChartDefinition;
 
 /// Default color palette for chart series
 pub const DEFAULT_PALETTE: &[[u8; 4]] = &[
-    [66, 133, 244, 255],   // Google Blue
-    [234, 67, 53, 255],    // Google Red
-    [251, 188, 5, 255],    // Google Yellow
-    [52, 168, 83, 255],    // Google Green
-    [154, 103, 234, 255],  // Purple
-    [255, 109, 0, 255],    // Orange
-    [0, 172, 193, 255],    // Cyan
-    [233, 30, 99, 255],    // Pink
+    [66, 133, 244, 255],  // Google Blue
+    [234, 67, 53, 255],   // Google Red
+    [251, 188, 5, 255],   // Google Yellow
+    [52, 168, 83, 255],   // Google Green
+    [154, 103, 234, 255], // Purple
+    [255, 109, 0, 255],   // Orange
+    [0, 172, 193, 255],   // Cyan
+    [233, 30, 99, 255],   // Pink
 ];
 
 /// Get a color from the default palette by index
@@ -439,12 +436,9 @@ mod tests {
         let chart = ChartDefinition::new(ChartKind::Bar)
             .with_title("Sales Data")
             .with_series(
-                ChartSeries::new(CellRange::new(
-                    CellCoord::new(1, 1),
-                    CellCoord::new(10, 1),
-                ))
-                .with_name("Sales")
-                .with_color(66, 133, 244, 255),
+                ChartSeries::new(CellRange::new(CellCoord::new(1, 1), CellCoord::new(10, 1)))
+                    .with_name("Sales")
+                    .with_color(66, 133, 244, 255),
             )
             .with_x_label("Month")
             .with_y_label("Revenue");

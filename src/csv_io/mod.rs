@@ -20,7 +20,11 @@ pub fn write_path(engine: &CalcEngine, sheet: u32, path: impl AsRef<Path>) -> Re
     write_sheet(engine, sheet, file)
 }
 
-pub fn read_path(engine: &mut CalcEngine, sheet: u32, path: impl AsRef<Path>) -> Result<(), CsvError> {
+pub fn read_path(
+    engine: &mut CalcEngine,
+    sheet: u32,
+    path: impl AsRef<Path>,
+) -> Result<(), CsvError> {
     let file = std::fs::File::open(path)?;
     read_sheet(engine, sheet, file)
 }
@@ -81,7 +85,10 @@ fn cell_to_csv(engine: &CalcEngine, sheet: u32, coord: CellCoord) -> String {
 
 fn apply_field(engine: &mut CalcEngine, sheet: u32, coord: CellCoord, field: &str) {
     if field.starts_with('=') {
-        if engine.set_formula(sheet, coord, &normalize_formula(field)).is_err() {
+        if engine
+            .set_formula(sheet, coord, &normalize_formula(field))
+            .is_err()
+        {
             engine.set_value(sheet, coord, CellValueInput::Text(field.to_string()));
         }
         return;
