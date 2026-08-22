@@ -146,16 +146,16 @@ impl SparseGrid {
 
     /// Iterate over cells in a specific row
     pub fn iter_row(&self, row: u32) -> impl Iterator<Item = (u32, &CellValue)> {
-        self.populated_cols.iter().filter_map(move |col| {
-            self.cells.get(&(row, col)).map(|value| (col, value))
-        })
+        self.populated_cols
+            .iter()
+            .filter_map(move |col| self.cells.get(&(row, col)).map(|value| (col, value)))
     }
 
     /// Iterate over cells in a specific column
     pub fn iter_col(&self, col: u32) -> impl Iterator<Item = (u32, &CellValue)> {
-        self.populated_rows.iter().filter_map(move |row| {
-            self.cells.get(&(row, col)).map(|value| (row, value))
-        })
+        self.populated_rows
+            .iter()
+            .filter_map(move |row| self.cells.get(&(row, col)).map(|value| (row, value)))
     }
 
     /// Count of populated rows

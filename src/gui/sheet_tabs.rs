@@ -1,7 +1,7 @@
 //! Sheet tab bar widget for switching between sheets
 
-use eframe::egui::{self, Sense, Ui, Color32, Pos2, Vec2, CornerRadius, Stroke, StrokeKind};
 use super::theme::Theme;
+use eframe::egui::{self, Color32, CornerRadius, Pos2, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 /// Response from the sheet tabs widget
 pub struct SheetTabsResponse {
@@ -60,10 +60,8 @@ impl<'a> SheetTabs<'a> {
             for (index, name) in self.sheet_names.iter().enumerate() {
                 let is_active = index as u32 == self.current_sheet;
 
-                let (rect, tab_response) = ui.allocate_exact_size(
-                    Vec2::new(tab_width, tab_height),
-                    Sense::click(),
-                );
+                let (rect, tab_response) =
+                    ui.allocate_exact_size(Vec2::new(tab_width, tab_height), Sense::click());
 
                 // Draw tab background
                 let bg_color = if is_active {
@@ -144,10 +142,8 @@ impl<'a> SheetTabs<'a> {
 
             // Add sheet button
             ui.add_space(4.0);
-            let (add_rect, add_response) = ui.allocate_exact_size(
-                Vec2::new(add_button_width, tab_height),
-                Sense::click(),
-            );
+            let (add_rect, add_response) =
+                ui.allocate_exact_size(Vec2::new(add_button_width, tab_height), Sense::click());
 
             let add_bg = if add_response.hovered() {
                 Color32::from_gray(60)
@@ -155,11 +151,8 @@ impl<'a> SheetTabs<'a> {
                 Color32::from_gray(45)
             };
 
-            ui.painter().rect_filled(
-                add_rect,
-                CornerRadius::same(4),
-                add_bg,
-            );
+            ui.painter()
+                .rect_filled(add_rect, CornerRadius::same(4), add_bg);
 
             ui.painter().text(
                 add_rect.center(),

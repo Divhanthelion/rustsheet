@@ -2,12 +2,12 @@
 //!
 //! Supports Line, Bar, Scatter, Area, and Combo charts.
 
-use eframe::egui::{self, Ui, Rect, Color32, RichText, Vec2};
-use egui_plot::{Plot, PlotPoints, Line, Points, Bar, BarChart, Polygon, Legend, Corner};
+use eframe::egui::{self, Color32, Rect, RichText, Ui, Vec2};
+use egui_plot::{Bar, BarChart, Corner, Legend, Line, Plot, PlotPoints, Points, Polygon};
 
 use crate::chart::{
-    ChartDefinition, ChartKind, ChartStyle, ResolvedChartData, ResolvedSeriesData,
-    LegendPosition, LineStyle,
+    ChartDefinition, ChartKind, ChartStyle, LegendPosition, LineStyle, ResolvedChartData,
+    ResolvedSeriesData,
 };
 
 use super::{ChartRenderer, to_color32};
@@ -25,7 +25,11 @@ impl CartesianRenderer {
         if let Some(title) = &chart.title {
             let response = ui.horizontal(|ui| {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new(title).size(chart.style.title_font_size).strong());
+                    ui.label(
+                        RichText::new(title)
+                            .size(chart.style.title_font_size)
+                            .strong(),
+                    );
                 });
             });
             response.response.rect.height() + 8.0
@@ -56,10 +60,7 @@ impl CartesianRenderer {
     }
 
     /// Render a line series
-    fn render_line_series<'a>(
-        series: &'a ResolvedSeriesData,
-        style: &ChartStyle,
-    ) -> Line<'a> {
+    fn render_line_series<'a>(series: &'a ResolvedSeriesData, style: &ChartStyle) -> Line<'a> {
         let points = Self::build_plot_points(series);
         let color = to_color32(series.color);
 
@@ -70,10 +71,7 @@ impl CartesianRenderer {
     }
 
     /// Render an area series (filled line)
-    fn render_area_series<'a>(
-        series: &'a ResolvedSeriesData,
-        style: &ChartStyle,
-    ) -> Polygon<'a> {
+    fn render_area_series<'a>(series: &'a ResolvedSeriesData, style: &ChartStyle) -> Polygon<'a> {
         // Create polygon from points, closing at y=0
         let mut vertices: Vec<[f64; 2]> = Vec::new();
 
@@ -109,10 +107,7 @@ impl CartesianRenderer {
     }
 
     /// Render a scatter series (points only)
-    fn render_scatter_series<'a>(
-        series: &'a ResolvedSeriesData,
-        style: &ChartStyle,
-    ) -> Points<'a> {
+    fn render_scatter_series<'a>(series: &'a ResolvedSeriesData, style: &ChartStyle) -> Points<'a> {
         let points = Self::build_plot_points(series);
         let color = to_color32(series.color);
 
@@ -131,10 +126,7 @@ impl CartesianRenderer {
     }
 
     /// Render bar series
-    fn render_bar_series(
-        all_series: &[ResolvedSeriesData],
-        style: &ChartStyle,
-    ) -> Vec<BarChart> {
+    fn render_bar_series(all_series: &[ResolvedSeriesData], style: &ChartStyle) -> Vec<BarChart> {
         let num_series = all_series.len();
         let total_width = 0.8; // Total width for all bars at one x position
         let bar_width = total_width / num_series as f64;
@@ -188,10 +180,7 @@ impl ChartRenderer for CartesianRenderer {
 
             // Calculate layout
             let title_height = self.render_title(ui, chart);
-            let plot_rect = Rect::from_min_max(
-                rect.min + Vec2::new(0.0, title_height),
-                rect.max,
-            );
+            let plot_rect = Rect::from_min_max(rect.min + Vec2::new(0.0, title_height), rect.max);
 
             // Configure legend
             let legend = match chart.legend.position {

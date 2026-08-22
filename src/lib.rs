@@ -33,11 +33,11 @@
 //! // result == CellResult::Value(30.0)
 //! ```
 
-pub mod cell;
-pub mod grid;
-pub mod formula;
 pub mod calc;
+pub mod cell;
 pub mod chart;
+pub mod formula;
+pub mod grid;
 
 #[cfg(feature = "xlsx")]
 pub mod xlsx;
@@ -59,24 +59,24 @@ pub mod wasm;
 
 /// Re-exports of commonly used types
 pub mod prelude {
-    pub use crate::cell::{CellCoord, CellRange, CellValue, CellError, StringPool};
-    pub use crate::grid::{Sheet, SparseGrid};
-    pub use crate::formula::{Expr, BinaryOp, UnaryOp, FunctionCall, FormulaParser};
     pub use crate::calc::{CalcEngine, CellResult, CellValueInput};
+    pub use crate::cell::{CellCoord, CellError, CellRange, CellValue, StringPool};
     pub use crate::chart::{
-        ChartId, ChartKind, ChartDefinition, ChartSeries, ChartStyle,
-        ChartOverlayArea, ChartDataResolver, SheetObject, SheetObjectManager,
+        ChartDataResolver, ChartDefinition, ChartId, ChartKind, ChartOverlayArea, ChartSeries,
+        ChartStyle, SheetObject, SheetObjectManager,
     };
+    pub use crate::formula::{BinaryOp, Expr, FormulaParser, FunctionCall, UnaryOp};
+    pub use crate::grid::{Sheet, SparseGrid};
 
     #[cfg(feature = "xlsx")]
     pub use crate::xlsx::{XlsxReader, XlsxWriter};
 
     #[cfg(feature = "gpu")]
-    pub use crate::render::{GpuRenderer, RenderConfig, TextRenderer, GridRenderer};
+    pub use crate::render::{GpuRenderer, GridRenderer, RenderConfig, TextRenderer};
 }
 
-pub use calc::CellValueInput;
 pub use calc::CellResult;
+pub use calc::CellValueInput;
 
 /// WASM entry point for web builds
 #[cfg(feature = "web")]

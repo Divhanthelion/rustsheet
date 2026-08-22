@@ -85,7 +85,14 @@ impl Selection {
     }
 
     /// Move active cell by delta, optionally extending selection
-    pub fn move_by(&mut self, row_delta: i32, col_delta: i32, extend: bool, max_row: u32, max_col: u32) {
+    pub fn move_by(
+        &mut self,
+        row_delta: i32,
+        col_delta: i32,
+        extend: bool,
+        max_row: u32,
+        max_col: u32,
+    ) {
         let new_row = (self.active.row as i32 + row_delta).clamp(0, max_row as i32) as u32;
         let new_col = (self.active.col as i32 + col_delta).clamp(0, max_col as i32) as u32;
         let new_coord = CellCoord::new(new_row, new_col);

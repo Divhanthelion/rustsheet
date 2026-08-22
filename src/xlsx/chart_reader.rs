@@ -44,14 +44,15 @@ impl ChartReader {
     pub fn read_charts_from_reader<R: Read + Seek>(
         reader: R,
     ) -> Result<Vec<(u32, ChartDefinition)>, ChartReadError> {
-        let mut archive = zip::ZipArchive::new(reader).map_err(|e| ChartReadError::Zip(e.to_string()))?;
+        let mut archive =
+            zip::ZipArchive::new(reader).map_err(|e| ChartReadError::Zip(e.to_string()))?;
 
         if let Ok(mut file) = archive.by_name("xl/rustsheet/charts.json") {
             let mut json = String::new();
             file.read_to_string(&mut json)?;
             drop(file);
-            let charts: Vec<ChartDefinition> = serde_json::from_str(&json)
-                .map_err(|e| ChartReadError::Xml(e.to_string()))?;
+            let charts: Vec<ChartDefinition> =
+                serde_json::from_str(&json).map_err(|e| ChartReadError::Xml(e.to_string()))?;
             return Ok(charts.into_iter().map(|c| (c.sheet_index, c)).collect());
         }
 
@@ -79,11 +80,11 @@ impl ChartReader {
 
 /// Parse chart XML content into a ChartDefinition (utility function)
 pub fn parse_chart_xml(content: &str, sheet_index: u32) -> Result<ChartDefinition, ChartReadError> {
-    let mut chart = ChartDefinition::default();
-    chart.sheet_index = sheet_index;
-
-    // Detect chart type from XML content
-    chart.chart_kind = detect_chart_type(content);
+    let mut chart = ChartDefinition {
+        sheet_index,
+        chart_kind: detect_chart_type(content),
+        ..Default::default()
+    };
 
     // Parse title
     if let Some(title) = extract_chart_title(content) {

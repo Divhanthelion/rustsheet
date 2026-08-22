@@ -2,11 +2,13 @@
 //!
 //! Supports Pie and Doughnut charts with custom mesh-based rendering.
 
-use eframe::egui::{self, Ui, Rect, Color32, RichText, Vec2, Pos2, Stroke};
+use eframe::egui::{self, Color32, Pos2, Rect, RichText, Stroke, Ui, Vec2};
 use eframe::epaint::{Mesh, Vertex};
 use std::f32::consts::{PI, TAU};
 
-use crate::chart::{ChartDefinition, ChartKind, ChartStyle, ResolvedChartData, LegendPosition, palette_color};
+use crate::chart::{
+    ChartDefinition, ChartKind, ChartStyle, LegendPosition, ResolvedChartData, palette_color,
+};
 
 use super::{ChartRenderer, to_color32};
 
@@ -26,7 +28,11 @@ impl PolarRenderer {
         if let Some(title) = &chart.title {
             let response = ui.horizontal(|ui| {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new(title).size(chart.style.title_font_size).strong());
+                    ui.label(
+                        RichText::new(title)
+                            .size(chart.style.title_font_size)
+                            .strong(),
+                    );
                 });
             });
             response.response.rect.height() + 8.0
@@ -129,7 +135,8 @@ impl PolarRenderer {
 
             // Create triangles
             for i in 0..segments as u32 {
-                mesh.indices.extend([center_idx, center_idx + 1 + i, center_idx + 2 + i]);
+                mesh.indices
+                    .extend([center_idx, center_idx + 1 + i, center_idx + 2 + i]);
             }
         } else {
             // Doughnut slice: triangle strip between inner and outer radii
@@ -208,7 +215,13 @@ impl PolarRenderer {
     }
 
     /// Render legend for pie chart
-    fn render_legend(&self, ui: &mut Ui, slices: &[PieSlice], style: &ChartStyle, _position: LegendPosition) {
+    fn render_legend(
+        &self,
+        ui: &mut Ui,
+        slices: &[PieSlice],
+        style: &ChartStyle,
+        _position: LegendPosition,
+    ) {
         if slices.is_empty() {
             return;
         }
@@ -274,10 +287,7 @@ impl ChartRenderer for PolarRenderer {
             let title_height = self.render_title(ui, chart);
 
             // Calculate chart area
-            let chart_area = Rect::from_min_max(
-                rect.min + Vec2::new(0.0, title_height),
-                rect.max,
-            );
+            let chart_area = Rect::from_min_max(rect.min + Vec2::new(0.0, title_height), rect.max);
 
             // Calculate legend area based on position
             let (pie_area, legend_area) = match chart.legend.position {
@@ -418,10 +428,8 @@ impl ChartRenderer for PolarRenderer {
             if let Some(idx) = hovered_slice {
                 if let Some(slice) = slices.get(idx) {
                     let percentage = slice.fraction * 100.0;
-                    let tooltip_text = format!(
-                        "{}\n{:.1} ({:.1}%)",
-                        slice.label, slice.value, percentage
-                    );
+                    let tooltip_text =
+                        format!("{}\n{:.1} ({:.1}%)", slice.label, slice.value, percentage);
 
                     if let Some(pos) = hover_pos {
                         egui::show_tooltip_at(
@@ -497,32 +505,23 @@ mod tests {
         // Test with a full circle slice (all angles pass)
         let point = Pos2::new(150.0, 100.0); // 50 pixels to the right
         assert!(renderer.point_in_slice(
-            point,
-            center,
-            0.0,    // inner radius
-            60.0,   // outer radius
-            0.0,    // start angle
-            TAU,    // full circle sweep
+            point, center, 0.0,  // inner radius
+            60.0, // outer radius
+            0.0,  // start angle
+            TAU,  // full circle sweep
         ));
 
         // Point too far from center
         let far_point = Pos2::new(200.0, 100.0); // 100 pixels away, outside outer_radius=60
-        assert!(!renderer.point_in_slice(
-            far_point,
-            center,
-            0.0,
-            60.0,
-            0.0,
-            TAU,
-        ));
+        assert!(!renderer.point_in_slice(far_point, center, 0.0, 60.0, 0.0, TAU,));
 
         // Point inside inner radius (for doughnut)
         let inner_point = Pos2::new(110.0, 100.0); // 10 pixels away, inside inner_radius=20
         assert!(!renderer.point_in_slice(
             inner_point,
             center,
-            20.0,   // inner radius
-            60.0,   // outer radius
+            20.0, // inner radius
+            60.0, // outer radius
             0.0,
             TAU,
         ));

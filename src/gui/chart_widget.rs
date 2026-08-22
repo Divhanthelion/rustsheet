@@ -2,9 +2,9 @@
 //!
 //! Provides drag, resize, and close functionality for chart overlays.
 
-use eframe::egui::{self, Context, Id, Rect, Vec2, Pos2, Response, Ui, Window};
+use eframe::egui::{self, Context, Id, Pos2, Rect, Response, Ui, Vec2, Window};
 
-use crate::chart::{ChartDefinition, ResolvedChartData, render::render_chart, ChartId};
+use crate::chart::{ChartDefinition, ChartId, ResolvedChartData, render::render_chart};
 
 /// State for a chart window
 #[derive(Clone)]
@@ -128,7 +128,10 @@ impl ChartWindowManager {
             }
 
             let chart_id = window_state.chart.id;
-            let title = window_state.chart.title.clone()
+            let title = window_state
+                .chart
+                .title
+                .clone()
                 .unwrap_or_else(|| format!("Chart {}", chart_id.0));
 
             let window_id = Id::new(format!("chart_window_{}", chart_id.0));

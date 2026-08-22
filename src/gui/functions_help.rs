@@ -266,7 +266,6 @@ static FUNCTIONS: &[FunctionInfo] = &[
         description: "Multiplies corresponding range elements and returns the sum",
         examples: &["=SUMPRODUCT(A1:A3, B1:B3)"],
     },
-
     // ===== Statistical Functions =====
     FunctionInfo {
         name: "AVERAGE",
@@ -315,7 +314,10 @@ static FUNCTIONS: &[FunctionInfo] = &[
         category: FunctionCategory::Statistical,
         syntax: "SUMIF(range, criteria, [sum_range])",
         description: "Sums cells that meet a specified condition",
-        examples: &["=SUMIF(A1:A10, \">5\")", "=SUMIF(A1:A10, \"Apple\", B1:B10)"],
+        examples: &[
+            "=SUMIF(A1:A10, \">5\")",
+            "=SUMIF(A1:A10, \"Apple\", B1:B10)",
+        ],
     },
     FunctionInfo {
         name: "COUNTIF",
@@ -329,7 +331,10 @@ static FUNCTIONS: &[FunctionInfo] = &[
         category: FunctionCategory::Statistical,
         syntax: "AVERAGEIF(range, criteria, [average_range])",
         description: "Averages cells that meet a specified condition",
-        examples: &["=AVERAGEIF(A1:A10, \">5\")", "=AVERAGEIF(A1:A10, \"X\", B1:B10)"],
+        examples: &[
+            "=AVERAGEIF(A1:A10, \">5\")",
+            "=AVERAGEIF(A1:A10, \"X\", B1:B10)",
+        ],
     },
     FunctionInfo {
         name: "COUNTBLANK",
@@ -429,14 +434,16 @@ static FUNCTIONS: &[FunctionInfo] = &[
         description: "Returns the k-th smallest value in a range",
         examples: &["=SMALL(A1:A10, 1)"],
     },
-
     // ===== Logical Functions =====
     FunctionInfo {
         name: "IF",
         category: FunctionCategory::Logical,
         syntax: "IF(condition, value_if_true, [value_if_false])",
         description: "Returns one value if a condition is true, another if false",
-        examples: &["=IF(A1>10, \"Big\", \"Small\")", "=IF(A1=B1, \"Match\", \"No match\")"],
+        examples: &[
+            "=IF(A1>10, \"Big\", \"Small\")",
+            "=IF(A1=B1, \"Match\", \"No match\")",
+        ],
     },
     FunctionInfo {
         name: "AND",
@@ -485,7 +492,10 @@ static FUNCTIONS: &[FunctionInfo] = &[
         category: FunctionCategory::Logical,
         syntax: "IFERROR(value, value_if_error)",
         description: "Returns value_if_error if value is an error, otherwise returns value",
-        examples: &["=IFERROR(A1/B1, 0)", "=IFERROR(VLOOKUP(...), \"Not found\")"],
+        examples: &[
+            "=IFERROR(A1/B1, 0)",
+            "=IFERROR(VLOOKUP(...), \"Not found\")",
+        ],
     },
     FunctionInfo {
         name: "IFNA",
@@ -515,7 +525,6 @@ static FUNCTIONS: &[FunctionInfo] = &[
         description: "Returns the value at the specified index position",
         examples: &["=CHOOSE(2, \"A\", \"B\", \"C\")", "=CHOOSE(A1, 10, 20, 30)"],
     },
-
     // ===== Text Functions =====
     FunctionInfo {
         name: "LEN",
@@ -578,7 +587,10 @@ static FUNCTIONS: &[FunctionInfo] = &[
         category: FunctionCategory::Text,
         syntax: "CONCATENATE(text1, [text2], ...)",
         description: "Joins several text strings into one",
-        examples: &["=CONCATENATE(A1, \" \", B1)", "=CONCATENATE(\"Hello\", \" \", \"World\")"],
+        examples: &[
+            "=CONCATENATE(A1, \" \", B1)",
+            "=CONCATENATE(\"Hello\", \" \", \"World\")",
+        ],
     },
     FunctionInfo {
         name: "CONCAT",
@@ -606,14 +618,20 @@ static FUNCTIONS: &[FunctionInfo] = &[
         category: FunctionCategory::Text,
         syntax: "SUBSTITUTE(text, old_text, new_text, [instance_num])",
         description: "Replaces occurrences of old_text with new_text",
-        examples: &["=SUBSTITUTE(A1, \"old\", \"new\")", "=SUBSTITUTE(\"aaa\", \"a\", \"b\", 2)"],
+        examples: &[
+            "=SUBSTITUTE(A1, \"old\", \"new\")",
+            "=SUBSTITUTE(\"aaa\", \"a\", \"b\", 2)",
+        ],
     },
     FunctionInfo {
         name: "REPLACE",
         category: FunctionCategory::Text,
         syntax: "REPLACE(old_text, start_num, num_chars, new_text)",
         description: "Replaces characters within text",
-        examples: &["=REPLACE(\"Hello\", 1, 2, \"XX\")", "=REPLACE(A1, 1, 3, \"New\")"],
+        examples: &[
+            "=REPLACE(\"Hello\", 1, 2, \"XX\")",
+            "=REPLACE(A1, 1, 3, \"New\")",
+        ],
     },
     FunctionInfo {
         name: "REPT",
@@ -641,7 +659,11 @@ static FUNCTIONS: &[FunctionInfo] = &[
         category: FunctionCategory::Text,
         syntax: "TEXT(value, format_text)",
         description: "Converts a value to text using a number, percent, or date format",
-        examples: &["=TEXT(1234.5, \"#,##0.00\")", "=TEXT(0.5, \"0%\")", "=TEXT(DATE(2024,8,18), \"yyyy-mm-dd\")"],
+        examples: &[
+            "=TEXT(1234.5, \"#,##0.00\")",
+            "=TEXT(0.5, \"0%\")",
+            "=TEXT(DATE(2024,8,18), \"yyyy-mm-dd\")",
+        ],
     },
     FunctionInfo {
         name: "CHAR",
@@ -657,21 +679,26 @@ static FUNCTIONS: &[FunctionInfo] = &[
         description: "Returns the numeric code for the first character",
         examples: &["=CODE(\"A\")", "=CODE(A1)"],
     },
-
     // ===== Lookup Functions =====
     FunctionInfo {
         name: "VLOOKUP",
         category: FunctionCategory::Lookup,
         syntax: "VLOOKUP(lookup_value, table_array, col_index_num, [range_lookup])",
         description: "Looks up a value in the first column and returns a value in the same row",
-        examples: &["=VLOOKUP(A1, B1:D10, 2, FALSE)", "=VLOOKUP(\"Apple\", A1:C100, 3, TRUE)"],
+        examples: &[
+            "=VLOOKUP(A1, B1:D10, 2, FALSE)",
+            "=VLOOKUP(\"Apple\", A1:C100, 3, TRUE)",
+        ],
     },
     FunctionInfo {
         name: "HLOOKUP",
         category: FunctionCategory::Lookup,
         syntax: "HLOOKUP(lookup_value, table_array, row_index_num, [range_lookup])",
         description: "Looks up a value in the first row and returns a value in the same column",
-        examples: &["=HLOOKUP(A1, A1:Z3, 2, FALSE)", "=HLOOKUP(\"Q1\", A1:D10, 3, TRUE)"],
+        examples: &[
+            "=HLOOKUP(A1, A1:Z3, 2, FALSE)",
+            "=HLOOKUP(\"Q1\", A1:D10, 3, TRUE)",
+        ],
     },
     FunctionInfo {
         name: "INDEX",
@@ -715,7 +742,6 @@ static FUNCTIONS: &[FunctionInfo] = &[
         description: "Returns the number of columns in a reference",
         examples: &["=COLUMNS(A1:C1)", "=COLUMNS(A1:Z100)"],
     },
-
     // ===== Date & Time Functions =====
     FunctionInfo {
         name: "DATE",
@@ -759,7 +785,6 @@ static FUNCTIONS: &[FunctionInfo] = &[
         description: "Returns the day from a date (1-31)",
         examples: &["=DAY(TODAY())", "=DAY(A1)"],
     },
-
     // ===== Information Functions =====
     FunctionInfo {
         name: "ISBLANK",

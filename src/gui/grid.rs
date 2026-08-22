@@ -1,11 +1,11 @@
 //! Spreadsheet grid widget
 
-use eframe::egui::{self, Pos2, Rect, Sense, Ui, Vec2, Key, StrokeKind};
-use crate::cell::{CellCoord, CellError};
-use crate::calc::CellResult;
-use crate::calc::CalcEngine;
 use super::selection::Selection;
 use super::theme::Theme;
+use crate::calc::CalcEngine;
+use crate::calc::CellResult;
+use crate::cell::{CellCoord, CellError};
+use eframe::egui::{self, Key, Pos2, Rect, Sense, StrokeKind, Ui, Vec2};
 
 /// Default cell dimensions
 pub const DEFAULT_COLUMN_WIDTH: f32 = 80.0;
@@ -38,11 +38,17 @@ impl Default for GridConfig {
 
 impl GridConfig {
     pub fn column_width(&self, col: u32) -> f32 {
-        self.column_widths.get(col as usize).copied().unwrap_or(DEFAULT_COLUMN_WIDTH)
+        self.column_widths
+            .get(col as usize)
+            .copied()
+            .unwrap_or(DEFAULT_COLUMN_WIDTH)
     }
 
     pub fn row_height(&self, row: u32) -> f32 {
-        self.row_heights.get(row as usize).copied().unwrap_or(DEFAULT_ROW_HEIGHT)
+        self.row_heights
+            .get(row as usize)
+            .copied()
+            .unwrap_or(DEFAULT_ROW_HEIGHT)
     }
 
     /// Get x position of column left edge relative to data area
@@ -226,16 +232,22 @@ impl<'a> SpreadsheetGrid<'a> {
             self.draw_cells(&painter, data_rect);
 
             // Draw row headers
-            self.draw_row_headers(&painter, Rect::from_min_size(
-                grid_rect.min + Vec2::new(0.0, HEADER_HEIGHT),
-                Vec2::new(HEADER_WIDTH, viewport_size.y - HEADER_HEIGHT),
-            ));
+            self.draw_row_headers(
+                &painter,
+                Rect::from_min_size(
+                    grid_rect.min + Vec2::new(0.0, HEADER_HEIGHT),
+                    Vec2::new(HEADER_WIDTH, viewport_size.y - HEADER_HEIGHT),
+                ),
+            );
 
             // Draw column headers
-            self.draw_column_headers(&painter, Rect::from_min_size(
-                grid_rect.min + Vec2::new(HEADER_WIDTH, 0.0),
-                Vec2::new(viewport_size.x - HEADER_WIDTH, HEADER_HEIGHT),
-            ));
+            self.draw_column_headers(
+                &painter,
+                Rect::from_min_size(
+                    grid_rect.min + Vec2::new(HEADER_WIDTH, 0.0),
+                    Vec2::new(viewport_size.x - HEADER_WIDTH, HEADER_HEIGHT),
+                ),
+            );
 
             // Draw corner header
             painter.rect_filled(
@@ -250,7 +262,8 @@ impl<'a> SpreadsheetGrid<'a> {
             // Helper to convert screen position to cell coordinate
             let pos_to_cell = |pos: Pos2| -> Option<CellCoord> {
                 if data_rect.contains(pos) {
-                    let local_pos = pos - data_rect.min + Vec2::new(self.scroll.offset_x, self.scroll.offset_y);
+                    let local_pos =
+                        pos - data_rect.min + Vec2::new(self.scroll.offset_x, self.scroll.offset_y);
                     let col = self.config.column_at_x(local_pos.x);
                     let row = self.config.row_at_y(local_pos.y);
                     Some(CellCoord::new(row, col))
@@ -306,12 +319,18 @@ impl<'a> SpreadsheetGrid<'a> {
             response.navigation = self.handle_keyboard_consume(ui);
 
             // Handle F2 for edit mode
-            if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F2)) {
+            if ui
+                .ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F2))
+            {
                 response.edit_cell = Some(self.selection.active);
             }
 
             // Handle Enter for edit mode
-            if ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+            if ui
+                .ctx()
+                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+            {
                 response.edit_cell = Some(self.selection.active);
             }
 
@@ -367,10 +386,8 @@ impl<'a> SpreadsheetGrid<'a> {
                 }
 
                 let col_width = self.config.column_width(col);
-                let cell_rect = Rect::from_min_size(
-                    Pos2::new(x, y),
-                    Vec2::new(col_width, row_height),
-                );
+                let cell_rect =
+                    Rect::from_min_size(Pos2::new(x, y), Vec2::new(col_width, row_height));
 
                 // Only draw if visible
                 if cell_rect.intersects(clip_rect) {
@@ -417,16 +434,21 @@ impl<'a> SpreadsheetGrid<'a> {
                 let s = if n.fract() == 0.0 && n.abs() < 1e10 {
                     format!("{}", *n as i64)
                 } else {
-                    format!("{:.10}", n).trim_end_matches('0').trim_end_matches('.').to_string()
+                    format!("{:.10}", n)
+                        .trim_end_matches('0')
+                        .trim_end_matches('.')
+                        .to_string()
                 };
                 (s, self.theme.text_number, egui::Align::Max) // Right align numbers
             }
             CellResult::Text(s) => {
                 (s.clone(), self.theme.text_normal, egui::Align::Min) // Left align text
             }
-            CellResult::Bool(b) => {
-                (if *b { "TRUE" } else { "FALSE" }.to_string(), self.theme.text_normal, egui::Align::Center)
-            }
+            CellResult::Bool(b) => (
+                if *b { "TRUE" } else { "FALSE" }.to_string(),
+                self.theme.text_normal,
+                egui::Align::Center,
+            ),
             CellResult::Error(e) => {
                 let s = match e {
                     CellError::DivZero => "#DIV/0!",
@@ -446,14 +468,13 @@ impl<'a> SpreadsheetGrid<'a> {
         };
 
         // Clip text to cell bounds
-        let galley = painter.layout_no_wrap(
-            text,
-            egui::FontId::proportional(13.0),
-            color,
-        );
+        let galley = painter.layout_no_wrap(text, egui::FontId::proportional(13.0), color);
 
         let text_pos = match align {
-            egui::Align::Min => Pos2::new(text_rect.min.x, text_rect.center().y - galley.size().y / 2.0),
+            egui::Align::Min => Pos2::new(
+                text_rect.min.x,
+                text_rect.center().y - galley.size().y / 2.0,
+            ),
             egui::Align::Center => Pos2::new(
                 text_rect.center().x - galley.size().x / 2.0,
                 text_rect.center().y - galley.size().y / 2.0,
@@ -485,7 +506,10 @@ impl<'a> SpreadsheetGrid<'a> {
             );
 
             // Highlight if selected
-            if self.selection.contains(CellCoord::new(row, self.selection.active.col)) {
+            if self
+                .selection
+                .contains(CellCoord::new(row, self.selection.active.col))
+            {
                 painter.rect_filled(header_rect, 0.0, self.theme.selection_bg);
             }
 
@@ -536,7 +560,10 @@ impl<'a> SpreadsheetGrid<'a> {
             );
 
             // Highlight if selected
-            if self.selection.contains(CellCoord::new(self.selection.active.row, col)) {
+            if self
+                .selection
+                .contains(CellCoord::new(self.selection.active.row, col))
+            {
                 painter.rect_filled(header_rect, 0.0, self.theme.selection_bg);
             }
 
@@ -603,14 +630,24 @@ impl<'a> SpreadsheetGrid<'a> {
         );
 
         if active_rect.intersects(data_rect) {
-            painter.rect_stroke(active_rect, 0.0, self.theme.active_cell_stroke(), StrokeKind::Outside);
+            painter.rect_stroke(
+                active_rect,
+                0.0,
+                self.theme.active_cell_stroke(),
+                StrokeKind::Outside,
+            );
         }
 
         // Draw selection border (only if multi-cell)
         if range.width() > 1 || range.height() > 1 {
             if sel_rect.intersects(data_rect) {
                 let clipped = sel_rect.intersect(data_rect);
-                painter.rect_stroke(clipped, 0.0, self.theme.selection_stroke(), StrokeKind::Outside);
+                painter.rect_stroke(
+                    clipped,
+                    0.0,
+                    self.theme.selection_stroke(),
+                    StrokeKind::Outside,
+                );
             }
         }
     }

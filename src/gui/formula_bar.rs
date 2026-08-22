@@ -1,9 +1,9 @@
 //! Formula bar widget with autocomplete
 
-use eframe::egui::{self, Ui, TextEdit, RichText, Key, Color32, ScrollArea};
-use crate::cell::CellCoord;
-use super::theme::Theme;
 use super::functions_help::{self, FunctionInfo};
+use super::theme::Theme;
+use crate::cell::CellCoord;
+use eframe::egui::{self, Color32, Key, RichText, ScrollArea, TextEdit, Ui};
 
 /// State for the formula bar
 pub struct FormulaBar {
@@ -130,7 +130,9 @@ impl FormulaBar {
 
     /// Apply the selected autocomplete suggestion
     fn apply_autocomplete(&mut self) {
-        let func_name = self.autocomplete.suggestions
+        let func_name = self
+            .autocomplete
+            .suggestions
             .get(self.autocomplete.selected_index)
             .map(|f| f.name.to_string());
 
@@ -167,7 +169,10 @@ impl FormulaBar {
         // This allows us to intercept Tab for autocomplete
         if self.editing {
             let key_response = self.handle_keys_internal(ui.ctx());
-            if key_response.confirmed.is_some() || key_response.cancelled || key_response.consume_key {
+            if key_response.confirmed.is_some()
+                || key_response.cancelled
+                || key_response.consume_key
+            {
                 response.confirmed = key_response.confirmed;
                 response.cancelled = key_response.cancelled;
                 response.move_down = key_response.move_down;
@@ -187,14 +192,18 @@ impl FormulaBar {
                 egui::Label::new(
                     RichText::new(&self.cell_address)
                         .monospace()
-                        .color(theme.header_text)
+                        .color(theme.header_text),
                 ),
             );
 
             ui.separator();
 
             // Function button (fx) - opens help
-            if ui.button(RichText::new("fx").monospace()).on_hover_text("Insert function (or press F1 for help)").clicked() {
+            if ui
+                .button(RichText::new("fx").monospace())
+                .on_hover_text("Insert function (or press F1 for help)")
+                .clicked()
+            {
                 response.open_help = true;
             }
 
@@ -256,7 +265,8 @@ impl FormulaBar {
                 if self.autocomplete.selected_index > 0 {
                     self.autocomplete.selected_index -= 1;
                 } else {
-                    self.autocomplete.selected_index = self.autocomplete.suggestions.len().saturating_sub(1);
+                    self.autocomplete.selected_index =
+                        self.autocomplete.suggestions.len().saturating_sub(1);
                 }
                 response.consume_key = true;
                 return response;
@@ -315,45 +325,56 @@ impl FormulaBar {
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(70.0, 52.0))
             .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style())
-                    .show(ui, |ui| {
-                        ui.set_max_height(200.0);
-                        ui.set_max_width(350.0);
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_height(200.0);
+                    ui.set_max_width(350.0);
 
-                        ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
-                            for (i, func) in suggestions.iter().enumerate() {
-                                let is_selected = i == selected_index;
+                    ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                        for (i, func) in suggestions.iter().enumerate() {
+                            let is_selected = i == selected_index;
 
-                                let response = ui.selectable_label(
-                                    is_selected,
-                                    RichText::new(format!("{} - {}", func.name, truncate(func.description, 35)))
-                                        .monospace()
-                                );
+                            let response = ui.selectable_label(
+                                is_selected,
+                                RichText::new(format!(
+                                    "{} - {}",
+                                    func.name,
+                                    truncate(func.description, 35)
+                                ))
+                                .monospace(),
+                            );
 
-                                if response.clicked() {
-                                    clicked_index = Some(i);
-                                }
-
-                                // Show tooltip with full info
-                                response.on_hover_ui(|ui| {
-                                    ui.label(RichText::new(func.name).strong().monospace());
-                                    ui.label(func.description);
-                                    ui.separator();
-                                    ui.label(RichText::new("Syntax:").small());
-                                    ui.label(RichText::new(func.syntax).monospace().color(Color32::from_rgb(0, 100, 0)));
-                                    if !func.examples.is_empty() {
-                                        ui.label(RichText::new("Example:").small());
-                                        ui.label(RichText::new(func.examples[0]).monospace().color(Color32::from_rgb(0, 0, 150)));
-                                    }
-                                });
+                            if response.clicked() {
+                                clicked_index = Some(i);
                             }
-                        });
 
-                        ui.separator();
-                        ui.horizontal(|ui| {
-                            ui.small("Tab to insert | ↑↓ to navigate | Esc to close");
-                        });
+                            // Show tooltip with full info
+                            response.on_hover_ui(|ui| {
+                                ui.label(RichText::new(func.name).strong().monospace());
+                                ui.label(func.description);
+                                ui.separator();
+                                ui.label(RichText::new("Syntax:").small());
+                                ui.label(
+                                    RichText::new(func.syntax)
+                                        .monospace()
+                                        .color(Color32::from_rgb(0, 100, 0)),
+                                );
+                                if !func.examples.is_empty() {
+                                    ui.label(RichText::new("Example:").small());
+                                    ui.label(
+                                        RichText::new(func.examples[0])
+                                            .monospace()
+                                            .color(Color32::from_rgb(0, 0, 150)),
+                                    );
+                                }
+                            });
+                        }
                     });
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.small("Tab to insert | ↑↓ to navigate | Esc to close");
+                    });
+                });
             });
 
         // Handle click outside the borrow

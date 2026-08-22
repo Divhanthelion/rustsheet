@@ -1,6 +1,6 @@
 //! Theme and color definitions for the spreadsheet UI
 
-use eframe::egui::{Color32, Stroke, CornerRadius};
+use eframe::egui::{Color32, CornerRadius, Stroke};
 
 /// Colors for the spreadsheet theme
 pub struct Theme {

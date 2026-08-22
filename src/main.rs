@@ -76,10 +76,26 @@ fn demo_formulas() {
     println!("  A3 = 30");
     println!("  B1 = 5");
 
-    engine.set_value(0, CellCoord::from_a1("A1").unwrap(), CellValueInput::Number(10.0));
-    engine.set_value(0, CellCoord::from_a1("A2").unwrap(), CellValueInput::Number(20.0));
-    engine.set_value(0, CellCoord::from_a1("A3").unwrap(), CellValueInput::Number(30.0));
-    engine.set_value(0, CellCoord::from_a1("B1").unwrap(), CellValueInput::Number(5.0));
+    engine.set_value(
+        0,
+        CellCoord::from_a1("A1").unwrap(),
+        CellValueInput::Number(10.0),
+    );
+    engine.set_value(
+        0,
+        CellCoord::from_a1("A2").unwrap(),
+        CellValueInput::Number(20.0),
+    );
+    engine.set_value(
+        0,
+        CellCoord::from_a1("A3").unwrap(),
+        CellValueInput::Number(30.0),
+    );
+    engine.set_value(
+        0,
+        CellCoord::from_a1("B1").unwrap(),
+        CellValueInput::Number(5.0),
+    );
 
     // Test various formulas
     let formulas = [
@@ -107,7 +123,11 @@ fn demo_formulas() {
     // Demo dependency updates
     println!("\nDependency tracking:");
     println!("  Changing A1 from 10 to 100...");
-    engine.set_value(0, CellCoord::from_a1("A1").unwrap(), CellValueInput::Number(100.0));
+    engine.set_value(
+        0,
+        CellCoord::from_a1("A1").unwrap(),
+        CellValueInput::Number(100.0),
+    );
 
     let c1_result = engine.get_value(0, CellCoord::from_a1("C1").unwrap());
     let c3_result = engine.get_value(0, CellCoord::from_a1("C3").unwrap());
@@ -116,18 +136,35 @@ fn demo_formulas() {
 
     // Demo error handling
     println!("\nError handling:");
-    engine.set_formula(0, CellCoord::from_a1("D1").unwrap(), "=1/0").unwrap();
-    engine.set_formula(0, CellCoord::from_a1("D2").unwrap(), "=UNKNOWN()").unwrap();
+    engine
+        .set_formula(0, CellCoord::from_a1("D1").unwrap(), "=1/0")
+        .unwrap();
+    engine
+        .set_formula(0, CellCoord::from_a1("D2").unwrap(), "=UNKNOWN()")
+        .unwrap();
 
-    println!("  D1 = =1/0 => {:?}", engine.get_value(0, CellCoord::from_a1("D1").unwrap()));
-    println!("  D2 = =UNKNOWN() => {:?}", engine.get_value(0, CellCoord::from_a1("D2").unwrap()));
+    println!(
+        "  D1 = =1/0 => {:?}",
+        engine.get_value(0, CellCoord::from_a1("D1").unwrap())
+    );
+    println!(
+        "  D2 = =UNKNOWN() => {:?}",
+        engine.get_value(0, CellCoord::from_a1("D2").unwrap())
+    );
 
     // Demo cycle detection
     println!("\nCycle detection:");
-    engine.set_formula(0, CellCoord::from_a1("E1").unwrap(), "=E2").unwrap();
-    engine.set_formula(0, CellCoord::from_a1("E2").unwrap(), "=E1").unwrap();
+    engine
+        .set_formula(0, CellCoord::from_a1("E1").unwrap(), "=E2")
+        .unwrap();
+    engine
+        .set_formula(0, CellCoord::from_a1("E2").unwrap(), "=E1")
+        .unwrap();
     println!("  E1 = =E2, E2 = =E1");
-    println!("  E1 => {:?}", engine.get_value(0, CellCoord::from_a1("E1").unwrap()));
+    println!(
+        "  E1 => {:?}",
+        engine.get_value(0, CellCoord::from_a1("E1").unwrap())
+    );
 
     println!();
 }

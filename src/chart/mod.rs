@@ -30,18 +30,18 @@
 //!     .with_overlay_area(ChartOverlayArea::new(0, 4, 500.0, 350.0));
 //! ```
 
-mod definition;
-mod objects;
 mod database;
+mod definition;
 mod downsample;
+mod objects;
 
 #[cfg(any(feature = "gui", feature = "web"))]
 pub mod render;
 
-pub use definition::*;
-pub use objects::*;
 pub use database::*;
+pub use definition::*;
 pub use downsample::*;
+pub use objects::*;
 
 #[cfg(any(feature = "gui", feature = "web"))]
-pub use render::{render_chart, CartesianRenderer, PolarRenderer, ChartRenderer};
+pub use render::{CartesianRenderer, ChartRenderer, PolarRenderer, render_chart};
