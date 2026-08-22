@@ -2,12 +2,12 @@
 //!
 //! A multi-step dialog for creating and configuring charts.
 
-use eframe::egui::{self, Context, Id, Color32, RichText, Vec2, Ui, Window};
+use eframe::egui::{self, Color32, Context, Id, RichText, Ui, Vec2, Window};
 
 use crate::cell::CellRange;
 use crate::chart::{
-    ChartDefinition, ChartId, ChartKind, ChartSeries, ChartStyle,
-    LegendConfig, LegendPosition, AxisConfig,
+    AxisConfig, ChartDefinition, ChartId, ChartKind, ChartSeries, ChartStyle, LegendConfig,
+    LegendPosition,
 };
 
 /// Wizard step
@@ -178,11 +178,15 @@ impl ChartEditor {
         self.show_grid = chart.x_axis.show_grid;
 
         // Populate series
-        self.series_list = chart.series.iter().map(|s| SeriesConfig {
-            name: s.name.clone().unwrap_or_default(),
-            range_text: s.y_range.to_a1(),
-            color: s.color.unwrap_or([0, 0, 255, 255]),
-        }).collect();
+        self.series_list = chart
+            .series
+            .iter()
+            .map(|s| SeriesConfig {
+                name: s.name.clone().unwrap_or_default(),
+                range_text: s.y_range.to_a1(),
+                color: s.color.unwrap_or([0, 0, 255, 255]),
+            })
+            .collect();
 
         if let Some(first_series) = chart.series.first() {
             self.data_range_text = first_series.y_range.to_a1();
@@ -307,14 +311,12 @@ impl ChartEditor {
                 ui.separator();
 
                 // Step content
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    match self.step {
-                        WizardStep::ChartType => self.show_chart_type_step(ui),
-                        WizardStep::DataRange => self.show_data_range_step(ui),
-                        WizardStep::SeriesConfig => self.show_series_config_step(ui),
-                        WizardStep::TitlesLabels => self.show_titles_step(ui),
-                        WizardStep::StyleOptions => self.show_style_step(ui),
-                    }
+                egui::ScrollArea::vertical().show(ui, |ui| match self.step {
+                    WizardStep::ChartType => self.show_chart_type_step(ui),
+                    WizardStep::DataRange => self.show_data_range_step(ui),
+                    WizardStep::SeriesConfig => self.show_series_config_step(ui),
+                    WizardStep::TitlesLabels => self.show_titles_step(ui),
+                    WizardStep::StyleOptions => self.show_style_step(ui),
                 });
 
                 // Error message
@@ -329,7 +331,10 @@ impl ChartEditor {
                 ui.horizontal(|ui| {
                     // Back button
                     let can_go_back = self.step.prev().is_some();
-                    if ui.add_enabled(can_go_back, egui::Button::new("< Back")).clicked() {
+                    if ui
+                        .add_enabled(can_go_back, egui::Button::new("< Back"))
+                        .clicked()
+                    {
                         if let Some(prev) = self.step.prev() {
                             self.step = prev;
                             self.error_message = None;
@@ -359,7 +364,10 @@ impl ChartEditor {
                                         response.is_edit = self.editing_id.is_some();
                                         self.open = false;
                                     } else {
-                                        self.error_message = Some("Failed to create chart. Check your data ranges.".to_string());
+                                        self.error_message = Some(
+                                            "Failed to create chart. Check your data ranges."
+                                                .to_string(),
+                                        );
                                     }
                                 }
                             }
@@ -412,7 +420,11 @@ impl ChartEditor {
         let chart_types = [
             (ChartKind::Line, "Line", "Best for trends over time"),
             (ChartKind::Bar, "Bar", "Compare categories"),
-            (ChartKind::Scatter, "Scatter", "Show relationships between variables"),
+            (
+                ChartKind::Scatter,
+                "Scatter",
+                "Show relationships between variables",
+            ),
             (ChartKind::Area, "Area", "Show cumulative values over time"),
             (ChartKind::Pie, "Pie", "Show parts of a whole"),
             (ChartKind::Doughnut, "Doughnut", "Pie chart with a hole"),
@@ -424,11 +436,9 @@ impl ChartEditor {
             .show(ui, |ui| {
                 for (i, (kind, name, description)) in chart_types.iter().enumerate() {
                     let is_selected = self.selected_kind == *kind;
-                    let button = egui::Button::new(
-                        RichText::new(*name).size(16.0)
-                    )
-                    .min_size(Vec2::new(120.0, 60.0))
-                    .selected(is_selected);
+                    let button = egui::Button::new(RichText::new(*name).size(16.0))
+                        .min_size(Vec2::new(120.0, 60.0))
+                        .selected(is_selected);
 
                     if ui.add(button).clicked() {
                         self.selected_kind = *kind;
@@ -548,10 +558,10 @@ impl ChartEditor {
         if ui.button("+ Add Series").clicked() {
             let idx = self.series_list.len();
             let colors = [
-                [234, 67, 53, 255],   // Red
-                [251, 188, 5, 255],   // Yellow
-                [52, 168, 83, 255],   // Green
-                [103, 58, 183, 255],  // Purple
+                [234, 67, 53, 255],  // Red
+                [251, 188, 5, 255],  // Yellow
+                [52, 168, 83, 255],  // Green
+                [103, 58, 183, 255], // Purple
             ];
             self.series_list.push(SeriesConfig {
                 name: format!("Series {}", idx + 1),
@@ -603,10 +613,22 @@ impl ChartEditor {
                         LegendPosition::None => "None",
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.legend_position, LegendPosition::Right, "Right");
-                        ui.selectable_value(&mut self.legend_position, LegendPosition::Left, "Left");
+                        ui.selectable_value(
+                            &mut self.legend_position,
+                            LegendPosition::Right,
+                            "Right",
+                        );
+                        ui.selectable_value(
+                            &mut self.legend_position,
+                            LegendPosition::Left,
+                            "Left",
+                        );
                         ui.selectable_value(&mut self.legend_position, LegendPosition::Top, "Top");
-                        ui.selectable_value(&mut self.legend_position, LegendPosition::Bottom, "Bottom");
+                        ui.selectable_value(
+                            &mut self.legend_position,
+                            LegendPosition::Bottom,
+                            "Bottom",
+                        );
                     });
             });
         }
@@ -647,7 +669,8 @@ impl ChartEditor {
                         return false;
                     }
                     if CellRange::from_a1(&series.range_text).is_none() {
-                        self.error_message = Some(format!("Series {} has an invalid range.", i + 1));
+                        self.error_message =
+                            Some(format!("Series {} has an invalid range.", i + 1));
                         return false;
                     }
                 }

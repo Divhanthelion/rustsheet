@@ -1,7 +1,7 @@
-mod value;
 mod coord;
 mod interner;
+mod value;
 
-pub use value::{CellValue, CellError};
 pub use coord::{CellCoord, CellRange};
 pub use interner::StringPool;
+pub use value::{CellError, CellValue};

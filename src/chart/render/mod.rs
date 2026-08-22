@@ -17,7 +17,7 @@ pub use cartesian::*;
 pub use polar::*;
 
 #[cfg(any(feature = "gui", feature = "web"))]
-use eframe::egui::{Ui, Rect, Color32};
+use eframe::egui::{Color32, Rect, Ui};
 
 use super::{ChartDefinition, ChartKind, ResolvedChartData};
 
@@ -30,14 +30,13 @@ pub trait ChartRenderer {
 
 /// Render a chart based on its type
 #[cfg(any(feature = "gui", feature = "web"))]
-pub fn render_chart(
-    ui: &mut Ui,
-    chart: &ChartDefinition,
-    data: &ResolvedChartData,
-    rect: Rect,
-) {
+pub fn render_chart(ui: &mut Ui, chart: &ChartDefinition, data: &ResolvedChartData, rect: Rect) {
     match chart.chart_kind {
-        ChartKind::Line | ChartKind::Scatter | ChartKind::Area | ChartKind::Bar | ChartKind::Combo => {
+        ChartKind::Line
+        | ChartKind::Scatter
+        | ChartKind::Area
+        | ChartKind::Bar
+        | ChartKind::Combo => {
             let renderer = CartesianRenderer::new();
             renderer.render(ui, chart, data, rect);
         }

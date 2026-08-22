@@ -310,9 +310,7 @@ impl ChartDataResolver {
         };
 
         // Get color from series or palette
-        let color = series
-            .color
-            .unwrap_or_else(|| super::palette_color(index));
+        let color = series.color.unwrap_or_else(|| super::palette_color(index));
 
         // Get series name
         let name = series

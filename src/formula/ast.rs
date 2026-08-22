@@ -1,4 +1,4 @@
-use crate::cell::{CellCoord, CellRange, CellError};
+use crate::cell::{CellCoord, CellError, CellRange};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -115,10 +115,7 @@ pub enum Expr {
         right: Box<Expr>,
     },
     /// Unary operation
-    Unary {
-        op: UnaryOp,
-        operand: Box<Expr>,
-    },
+    Unary { op: UnaryOp, operand: Box<Expr> },
     /// Function call
     Function(FunctionCall),
 }
@@ -153,9 +150,7 @@ impl Expr {
     pub fn has_dependencies(&self) -> bool {
         match self {
             Expr::CellRef(_) | Expr::RangeRef(_) => true,
-            Expr::Binary { left, right, .. } => {
-                left.has_dependencies() || right.has_dependencies()
-            }
+            Expr::Binary { left, right, .. } => left.has_dependencies() || right.has_dependencies(),
             Expr::Unary { operand, .. } => operand.has_dependencies(),
             Expr::Function(f) => f.args.iter().any(|a| a.has_dependencies()),
             _ => false,
@@ -166,12 +161,18 @@ impl Expr {
     pub fn rename_sheet(&mut self, old: &str, new: &str) {
         match self {
             Expr::CellRef(r) => {
-                if r.sheet.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(old)) {
+                if r.sheet
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(old))
+                {
                     r.sheet = Some(new.to_string());
                 }
             }
             Expr::RangeRef(r) => {
-                if r.sheet.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(old)) {
+                if r.sheet
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(old))
+                {
                     r.sheet = Some(new.to_string());
                 }
             }
@@ -242,12 +243,7 @@ impl fmt::Display for Expr {
                 sheet_prefix(r.sheet.as_deref()),
                 r.coord.to_a1_abs(r.row_absolute, r.col_absolute)
             ),
-            Expr::RangeRef(r) => write!(
-                f,
-                "{}{}",
-                sheet_prefix(r.sheet.as_deref()),
-                r.range
-            ),
+            Expr::RangeRef(r) => write!(f, "{}{}", sheet_prefix(r.sheet.as_deref()), r.range),
             Expr::Binary { op, left, right } => {
                 write!(f, "({}{}{})", left, op.as_str(), right)
             }

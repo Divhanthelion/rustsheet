@@ -1,9 +1,7 @@
 //! Main GPU renderer coordinating wgpu context and rendering pipeline
 
 use std::sync::Arc;
-use wgpu::{
-    Adapter, Device, Instance, Queue, Surface, SurfaceConfiguration, TextureFormat,
-};
+use wgpu::{Adapter, Device, Instance, Queue, Surface, SurfaceConfiguration, TextureFormat};
 
 /// Configuration for the renderer
 #[derive(Debug, Clone)]
@@ -108,12 +106,13 @@ impl GpuRenderer {
     ///
     /// # Safety
     /// The window must remain valid for the lifetime of the surface.
-    pub async fn new_with_surface<W>(
-        window: W,
-        config: RenderConfig,
-    ) -> Result<Self, RendererError>
+    pub async fn new_with_surface<W>(window: W, config: RenderConfig) -> Result<Self, RendererError>
     where
-        W: raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle + Send + Sync + 'static,
+        W: raw_window_handle::HasWindowHandle
+            + raw_window_handle::HasDisplayHandle
+            + Send
+            + Sync
+            + 'static,
     {
         let instance = Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -274,11 +273,15 @@ impl GpuRenderer {
             .get_current_texture()
             .map_err(|e| RendererError::SurfaceError(e.to_string()))?;
 
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("render_encoder"),
-        });
+        let encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("render_encoder"),
+            });
 
         Ok(RenderFrame {
             output,

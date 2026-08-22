@@ -2,9 +2,7 @@ use crate::calc::{CalcEngine, CellInput, CellValueInput};
 use crate::cell::{CellCoord, CellValue};
 use crate::chart::{ChartDefinition, ChartKind, ChartSeries, LegendPosition};
 use crate::grid::Sheet;
-use rust_xlsxwriter::{
-    Chart, ChartLegendPosition, ChartType, Workbook, Worksheet, XlsxError,
-};
+use rust_xlsxwriter::{Chart, ChartLegendPosition, ChartType, Workbook, Worksheet, XlsxError};
 use std::path::Path;
 use thiserror::Error;
 
