@@ -703,14 +703,22 @@ impl SpreadsheetApp {
     fn open_file(&mut self) {
         use rfd::FileDialog;
 
-        let mut dialog = FileDialog::new();
+        // The first filter is the one selected by default, so lead with every
+        // supported format rather than hiding .xlsx behind a CSV-only view.
+        let mut supported: Vec<&str> = Vec::new();
+        #[cfg(feature = "xlsx")]
+        supported.extend(["xlsx", "xls"]);
         #[cfg(feature = "csv")]
-        {
-            dialog = dialog.add_filter("CSV", &["csv"]);
-        }
+        supported.push("csv");
+
+        let mut dialog = FileDialog::new().add_filter("Spreadsheets", &supported);
         #[cfg(feature = "xlsx")]
         {
             dialog = dialog.add_filter("Excel Files", &["xlsx", "xls"]);
+        }
+        #[cfg(feature = "csv")]
+        {
+            dialog = dialog.add_filter("CSV", &["csv"]);
         }
         let file = dialog.add_filter("All Files", &["*"]).pick_file();
 
@@ -845,14 +853,15 @@ impl SpreadsheetApp {
     fn save_file_as(&mut self) {
         use rfd::FileDialog;
 
+        // Excel first so the default filter matches the default file name.
         let mut dialog = FileDialog::new();
-        #[cfg(feature = "csv")]
-        {
-            dialog = dialog.add_filter("CSV", &["csv"]);
-        }
         #[cfg(feature = "xlsx")]
         {
             dialog = dialog.add_filter("Excel Files", &["xlsx"]);
+        }
+        #[cfg(feature = "csv")]
+        {
+            dialog = dialog.add_filter("CSV", &["csv"]);
         }
         let default_name = if cfg!(feature = "xlsx") {
             "workbook.xlsx"
