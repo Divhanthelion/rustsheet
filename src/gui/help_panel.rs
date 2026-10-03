@@ -226,6 +226,20 @@ impl HelpPanel {
             shortcut_row(ui, "Ctrl+Y", "Redo");
 
             ui.add_space(10.0);
+            ui.heading("Formatting");
+            ui.separator();
+            shortcut_row(ui, "Ctrl+B", "Bold");
+            shortcut_row(ui, "Ctrl+I", "Italic");
+            shortcut_row(ui, "Ctrl+U", "Underline");
+            shortcut_row(ui, "Drag header border", "Resize a column or row");
+            shortcut_row(ui, "Double-click column border", "Fit column to contents");
+            shortcut_row(
+                ui,
+                "Type 12%, $5 or 2026-10-03",
+                "Enter a percent, amount or date",
+            );
+
+            ui.add_space(10.0);
             ui.heading("View");
             ui.separator();
             shortcut_row(ui, "F1", "Open Help");
@@ -253,7 +267,8 @@ impl HelpPanel {
             ));
             ui.label("• Formula parsing with dependency tracking and cycle detection");
             ui.label("• Cross-sheet references; sheet delete remaps cells");
-            ui.label("• Excel (.xlsx) formulas, used range, and charts");
+            ui.label("• Excel (.xlsx) formulas, formatting, and charts");
+            ui.label("• Fonts, fills, borders, alignment, and number formats");
             ui.label("• CSV import/export of the current sheet");
             ui.label("• Cross-platform (Windows, macOS, Linux)");
             ui.add_space(20.0);

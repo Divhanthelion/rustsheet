@@ -62,7 +62,9 @@ Alternatively, push a tag `vX.Y.Z` and download the MSIX from the GitHub release
 >
 > Work across sheets with references like Sheet2!A1. Rename a sheet and every formula that uses it updates. Turn a range into a line, bar, scatter, area, pie or doughnut chart in a couple of clicks.
 >
-> Open the .xlsx files you already have, edit them, and save them back with their formulas and charts intact. Import and export CSV as well.
+> Make it look the way you want with bold and italic text, font colors and sizes, fills, borders, alignment, and number formats for currency, percentages, dates and times. Type 12%, $1,234.50 or 2026-10-03 and RustSheet formats it for you.
+>
+> Open the .xlsx files you already have, edit them, and save them back with their formulas, formatting and charts intact. Import and export CSV as well.
 >
 > RustSheet has no account, no subscription, no ads and no telemetry. It never connects to the internet.
 >
@@ -75,7 +77,10 @@ Alternatively, push a tag `vX.Y.Z` and download the MSIX from the GitHub release
 **Product features** (one per line, up to 20):
 
 - 100+ Excel-compatible functions with autocomplete and built-in help
-- Opens and saves Excel .xlsx files, including formulas and charts
+- Opens and saves Excel .xlsx files, including formulas, formatting and charts
+- Fonts, colors, fills, borders, alignment and number formats
+- Currency, percent, date and time entry that formats itself
+- Resizable columns and rows, with fit-to-contents
 - CSV import and export
 - Line, bar, scatter, area, pie and doughnut charts
 - Multiple sheets with cross-sheet references

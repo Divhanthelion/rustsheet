@@ -1,8 +1,13 @@
 use crate::calc::{CalcEngine, CellInput, CellValueInput};
 use crate::cell::{CellCoord, CellValue};
 use crate::chart::{ChartDefinition, ChartKind, ChartSeries, LegendPosition};
+use crate::format::{CellFormat, HAlign};
 use crate::grid::Sheet;
-use rust_xlsxwriter::{Chart, ChartLegendPosition, ChartType, Workbook, Worksheet, XlsxError};
+use rust_xlsxwriter::{
+    Chart, ChartLegendPosition, ChartType, Color, Format, FormatAlign, FormatBorder,
+    FormatUnderline, Workbook, Worksheet, XlsxError,
+};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use thiserror::Error;
 
@@ -57,8 +62,42 @@ impl XlsxWriter {
         let worksheet = self.workbook.add_worksheet();
         worksheet.set_name(name)?;
 
+        let formatting = engine.formatting(sheet_index);
+        let mut formats: HashMap<&CellFormat, Format> = HashMap::new();
+        let mut format_for = |coord: CellCoord| -> Option<Format> {
+            let cell_format = formatting?.get(coord)?;
+            Some(
+                formats
+                    .entry(cell_format)
+                    .or_insert_with(|| to_xlsx_format(cell_format))
+                    .clone(),
+            )
+        };
+
+        let mut written = HashSet::new();
         for (coord, input) in engine.iter_sheet_inputs(sheet_index) {
-            Self::write_engine_cell(worksheet, coord, input)?;
+            Self::write_engine_cell(worksheet, coord, input, format_for(coord).as_ref())?;
+            written.insert(coord);
+        }
+
+        if let Some(formatting) = formatting {
+            // Formatted cells with no value still carry their style.
+            for (coord, _) in formatting.cells() {
+                if !written.contains(&coord) {
+                    if let Some(format) = format_for(coord) {
+                        let col = u16::try_from(coord.col)
+                            .map_err(|_| XlsxWriteError::ColumnLimit(coord.col))?;
+                        worksheet.write_blank(coord.row, col, &format)?;
+                    }
+                }
+            }
+            for (&col, &points) in &formatting.column_widths {
+                let col = u16::try_from(col).map_err(|_| XlsxWriteError::ColumnLimit(col))?;
+                worksheet.set_column_width(col, super::styles::points_to_excel_width(points))?;
+            }
+            for (&row, &points) in &formatting.row_heights {
+                worksheet.set_row_height(row, super::styles::points_to_excel_height(points))?;
+            }
         }
 
         for chart_def in charts.iter().filter(|c| c.sheet_index == sheet_index) {
@@ -75,26 +114,31 @@ impl XlsxWriter {
         worksheet: &mut Worksheet,
         coord: CellCoord,
         input: &CellInput,
+        format: Option<&Format>,
     ) -> Result<(), XlsxWriteError> {
         let row = coord.row;
         let col = u16::try_from(coord.col).map_err(|_| XlsxWriteError::ColumnLimit(coord.col))?;
+        let plain = Format::new();
+        let format = format.unwrap_or(&plain);
 
         match input {
-            CellInput::Empty => {}
+            CellInput::Empty => {
+                worksheet.write_blank(row, col, format)?;
+            }
             CellInput::Value(CellValueInput::Number(n)) => {
-                worksheet.write_number(row, col, *n)?;
+                worksheet.write_number_with_format(row, col, *n, format)?;
             }
             CellInput::Value(CellValueInput::Text(s)) => {
-                worksheet.write_string(row, col, s)?;
+                worksheet.write_string_with_format(row, col, s, format)?;
             }
             CellInput::Value(CellValueInput::Bool(b)) => {
-                worksheet.write_boolean(row, col, *b)?;
+                worksheet.write_boolean_with_format(row, col, *b, format)?;
             }
             CellInput::Value(CellValueInput::Error(e)) => {
-                worksheet.write_string(row, col, e.as_str())?;
+                worksheet.write_string_with_format(row, col, e.as_str(), format)?;
             }
             CellInput::Formula(formula) => {
-                worksheet.write_formula(row, col, formula.as_str())?;
+                worksheet.write_formula_with_format(row, col, formula.as_str(), format)?;
             }
         }
 
@@ -353,6 +397,54 @@ impl Default for XlsxWriter {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The rust_xlsxwriter format for a cell. Sizes and widths use Excel units.
+fn to_xlsx_format(f: &CellFormat) -> Format {
+    let mut format = Format::new();
+    if f.bold {
+        format = format.set_bold();
+    }
+    if f.italic {
+        format = format.set_italic();
+    }
+    if f.underline {
+        format = format.set_underline(FormatUnderline::Single);
+    }
+    if f.strikethrough {
+        format = format.set_font_strikethrough();
+    }
+    if let Some(size) = f.font_size {
+        format = format.set_font_size(size as f64);
+    }
+    if let Some(color) = f.font_color {
+        format = format.set_font_color(Color::RGB(color.to_u32()));
+    }
+    if let Some(fill) = f.fill {
+        format = format.set_background_color(Color::RGB(fill.to_u32()));
+    }
+    format = match f.h_align {
+        HAlign::General => format,
+        HAlign::Left => format.set_align(FormatAlign::Left),
+        HAlign::Center => format.set_align(FormatAlign::Center),
+        HAlign::Right => format.set_align(FormatAlign::Right),
+    };
+    if f.borders.top {
+        format = format.set_border_top(FormatBorder::Thin);
+    }
+    if f.borders.right {
+        format = format.set_border_right(FormatBorder::Thin);
+    }
+    if f.borders.bottom {
+        format = format.set_border_bottom(FormatBorder::Thin);
+    }
+    if f.borders.left {
+        format = format.set_border_left(FormatBorder::Thin);
+    }
+    if let Some(code) = &f.number_format {
+        format = format.set_num_format(code);
+    }
+    format
 }
 
 /// Format a CellRange as an Excel formula reference

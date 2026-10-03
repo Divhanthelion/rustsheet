@@ -535,7 +535,7 @@ impl BuiltinFunctions {
         values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = values.len() / 2;
 
-        if values.len() % 2 == 0 {
+        if values.len().is_multiple_of(2) {
             CellResult::Value((values[mid - 1] + values[mid]) / 2.0)
         } else {
             CellResult::Value(values[mid])
@@ -767,7 +767,7 @@ impl BuiltinFunctions {
     }
 
     fn eval_ifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        if args.len() < 2 || args.len() % 2 != 0 {
+        if args.len() < 2 || !args.len().is_multiple_of(2) {
             return CellResult::Error(CellError::Value);
         }
 
@@ -787,7 +787,7 @@ impl BuiltinFunctions {
         }
 
         let expr_val = self.eval_arg(&args[0], sheet, engine);
-        let has_default = args.len() % 2 == 0;
+        let has_default = args.len().is_multiple_of(2);
         let pairs_end = if has_default {
             args.len() - 1
         } else {
@@ -1157,7 +1157,7 @@ impl BuiltinFunctions {
         };
 
         match val {
-            CellResult::Value(n) => CellResult::Text(apply_text_format(n, &format)),
+            CellResult::Value(n) => CellResult::Text(crate::format::format_number(n, &format).text),
             CellResult::Text(s) => CellResult::Text(s),
             CellResult::Bool(b) => CellResult::Text(if b { "TRUE".into() } else { "FALSE".into() }),
             CellResult::Empty => CellResult::Text(String::new()),
@@ -1646,7 +1646,7 @@ impl BuiltinFunctions {
     }
 
     fn eval_sumifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        if args.len() < 3 || args.len() % 2 == 0 {
+        if args.len() < 3 || args.len().is_multiple_of(2) {
             return CellResult::Error(CellError::Value);
         }
         let (sum_range, sum_sheet) = match self.bind_range(&args[0], sheet, engine) {
@@ -1681,7 +1681,7 @@ impl BuiltinFunctions {
     }
 
     fn eval_countifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        if args.len() < 2 || args.len() % 2 != 0 {
+        if args.len() < 2 || !args.len().is_multiple_of(2) {
             return CellResult::Error(CellError::Value);
         }
         let (first_range, _) = match self.bind_range(&args[0], sheet, engine) {
@@ -1703,7 +1703,7 @@ impl BuiltinFunctions {
     }
 
     fn eval_averageifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        if args.len() < 3 || args.len() % 2 == 0 {
+        if args.len() < 3 || args.len().is_multiple_of(2) {
             return CellResult::Error(CellError::Value);
         }
         let (avg_range, avg_sheet) = match self.bind_range(&args[0], sheet, engine) {
@@ -1754,7 +1754,7 @@ impl BuiltinFunctions {
         expected_w: u32,
         expected_h: u32,
     ) -> Result<Vec<bool>, CellResult> {
-        if pairs.len() < 2 || pairs.len() % 2 != 0 {
+        if pairs.len() < 2 || !pairs.len().is_multiple_of(2) {
             return Err(CellResult::Error(CellError::Value));
         }
         let mut mask = vec![true; expected_len];
@@ -2157,7 +2157,7 @@ fn criteria_number(val: &CellResult) -> Option<f64> {
     }
 }
 
-fn apply_text_format(n: f64, format: &str) -> String {
+pub(crate) fn apply_text_format(n: f64, format: &str) -> String {
     if is_date_format(format) {
         return format_date_serial(n, format);
     }
@@ -2414,7 +2414,7 @@ fn rand_simple() -> f64 {
 
 /// Convert year, month, day to Excel serial date number
 /// Excel's epoch is 1900-01-01 = 1 (with the infamous 1900 leap year bug)
-fn date_to_serial(year: i32, month: i32, day: i32) -> f64 {
+pub(crate) fn date_to_serial(year: i32, month: i32, day: i32) -> f64 {
     // Adjust for months outside 1-12
     let mut y = year;
     let mut m = month;
@@ -2458,7 +2458,7 @@ fn date_to_serial(year: i32, month: i32, day: i32) -> f64 {
 }
 
 /// Convert Excel serial date number to (year, month, day)
-fn serial_to_date(serial: f64) -> (i32, i32, i32) {
+pub(crate) fn serial_to_date(serial: f64) -> (i32, i32, i32) {
     let mut days = serial as i32;
 
     // Account for Excel's 1900 leap year bug

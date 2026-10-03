@@ -1,21 +1,26 @@
 //! Main spreadsheet application
 
 use crate::calc::{CalcEngine, CellResult, CellValueInput};
-use crate::cell::{CellCoord, StringPool};
+use crate::cell::{CellCoord, CellRange, StringPool};
 use crate::chart::{ChartDataResolver, ChartDefinition, ChartId};
 use eframe::egui::{self, CentralPanel, Key, TopBottomPanel, Vec2};
 use std::path::{Path, PathBuf};
 
 use super::chart_editor::ChartEditor;
 use super::chart_widget::ChartWindowManager;
+use super::format_bar::{self, BorderPreset, FormatAction};
 use super::formula_bar::FormulaBar;
 use super::grid::{
-    GridConfig, HEADER_HEIGHT, HEADER_WIDTH, NavigationKey, ScrollState, SpreadsheetGrid,
+    DEFAULT_COLUMN_WIDTH, DEFAULT_ROW_HEIGHT, GridConfig, HEADER_HEIGHT, HEADER_WIDTH,
+    NavigationKey, ResizeAxis, ScrollState, SpreadsheetGrid, fit_column_width,
 };
 use super::help_panel::HelpPanel;
 use super::selection::Selection;
 use super::sheet_tabs::SheetTabs;
 use super::theme::Theme;
+use crate::format::{
+    Borders, CellFormat, format_general, format_number, is_date_format, parse_typed_number,
+};
 
 /// Modifier key name shown in menu shortcut hints.
 const MOD: &str = if cfg!(target_os = "macos") {
@@ -67,6 +72,21 @@ enum UndoAction {
         coord: CellCoord,
         old_value: Option<CellSnapshot>,
     },
+    /// Formats of several cells: (coord, old, new)
+    Format {
+        sheet: u32,
+        changes: Vec<(CellCoord, Option<CellFormat>, Option<CellFormat>)>,
+    },
+    /// A column width or row height; `None` is the default size
+    Resize {
+        sheet: u32,
+        axis: ResizeAxis,
+        index: u32,
+        old: Option<f32>,
+        new: Option<f32>,
+    },
+    /// Several actions undone and redone together
+    Group(Vec<UndoAction>),
 }
 
 /// Snapshot of a cell's state for undo/redo
@@ -173,6 +193,8 @@ pub struct SpreadsheetApp {
     modified: bool,
     /// Last title sent to the window
     window_title: String,
+    /// Size of the column or row being resized, before the drag began
+    resize_origin: Option<(ResizeAxis, u32, Option<f32>)>,
     /// Screen position of cell A1's top-left corner, from the last frame
     grid_origin: Option<egui::Pos2>,
     /// Status message to display
@@ -219,6 +241,7 @@ impl SpreadsheetApp {
             current_file: None,
             modified: false,
             window_title: String::new(),
+            resize_origin: None,
             grid_origin: None,
             status_message: None,
             undo_history: UndoHistory::default(),
@@ -324,6 +347,30 @@ impl SpreadsheetApp {
             return formula_bar_text(&formula);
         }
 
+        // Dates and percents edit as typed (2026-10-03, 12%), not as raw numbers.
+        if let (CellResult::Value(n), Some(code)) = (
+            self.engine.get_value(self.current_sheet, coord),
+            self.engine
+                .cell_format(self.current_sheet, coord)
+                .and_then(|f| f.number_format.as_deref()),
+        ) {
+            if is_date_format(code) {
+                let editable = match (n.fract() == 0.0, n < 1.0) {
+                    (true, _) => "yyyy-mm-dd",
+                    (false, true) => "h:mm:ss",
+                    (false, false) => "yyyy-mm-dd h:mm:ss",
+                };
+                return format_number(n, editable).text;
+            }
+            if code
+                .split('"')
+                .step_by(2)
+                .any(|unquoted| unquoted.contains('%'))
+            {
+                return format!("{}%", format_general(n * 100.0, 15));
+            }
+        }
+
         self.get_cell_display(coord)
     }
 
@@ -346,65 +393,69 @@ impl SpreadsheetApp {
     /// Set cell content from user input (with undo support)
     fn set_cell_content(&mut self, coord: CellCoord, content: &str) {
         let content = content.trim();
+        let sheet = self.current_sheet;
 
         // Capture old value for undo
         let old_value = self
             .get_cell_content_string(coord)
             .map(|s| CellSnapshot { input: s });
-        let new_value = if content.is_empty() {
-            None
+        let content_action = if content.is_empty() {
+            UndoAction::CellClear {
+                sheet,
+                coord,
+                old_value,
+            }
         } else {
-            Some(CellSnapshot {
-                input: content.to_string(),
-            })
+            UndoAction::CellChange {
+                sheet,
+                coord,
+                old_value,
+                new_value: Some(CellSnapshot {
+                    input: content.to_string(),
+                }),
+            }
         };
 
-        // Record undo action
-        if content.is_empty() {
-            self.undo_history.push(UndoAction::CellClear {
-                sheet: self.current_sheet,
-                coord,
-                old_value,
-            });
-        } else {
-            self.undo_history.push(UndoAction::CellChange {
-                sheet: self.current_sheet,
-                coord,
-                old_value,
-                new_value,
-            });
-        }
-
-        // Apply the change
-        if content.is_empty() {
-            self.engine.clear(self.current_sheet, coord);
-        } else if content.starts_with('=') {
-            // Formula
-            if let Err(e) = self.engine.set_formula(self.current_sheet, coord, content) {
-                self.set_status(&format!("Formula error: {:?}", e));
+        if content.starts_with('=') {
+            if let Err(e) = self.engine.set_formula(sheet, coord, content) {
+                self.set_status(&format!("Formula error: {e}"));
             }
-        } else if let Ok(n) = content.parse::<f64>() {
-            // Number
-            self.engine
-                .set_value(self.current_sheet, coord, CellValueInput::Number(n));
-        } else if content.eq_ignore_ascii_case("true") {
-            self.engine
-                .set_value(self.current_sheet, coord, CellValueInput::Bool(true));
-        } else if content.eq_ignore_ascii_case("false") {
-            self.engine
-                .set_value(self.current_sheet, coord, CellValueInput::Bool(false));
+            self.modified = true;
+            self.refresh_all_charts();
         } else {
-            // Text
-            self.engine.set_value(
-                self.current_sheet,
-                coord,
-                CellValueInput::Text(content.to_string()),
-            );
+            self.apply_cell_content(sheet, coord, (!content.is_empty()).then_some(content));
         }
-        self.modified = true;
 
-        // Refresh charts that may depend on this cell
-        self.refresh_all_charts();
+        // Typing 12% or a date into an unformatted cell gives it that format.
+        let old_format = self.engine.cell_format(sheet, coord).cloned();
+        let typed_format = match parse_typed_number(content) {
+            Some((_, Some(code)))
+                if !content.starts_with('=')
+                    && old_format
+                        .as_ref()
+                        .is_none_or(|f| f.number_format.is_none()) =>
+            {
+                Some(code)
+            }
+            _ => None,
+        };
+        let action = match typed_format {
+            Some(code) => {
+                let mut new_format = old_format.clone().unwrap_or_default();
+                new_format.number_format = Some(code.to_string());
+                self.engine
+                    .set_cell_format(sheet, coord, new_format.clone());
+                UndoAction::Group(vec![
+                    content_action,
+                    UndoAction::Format {
+                        sheet,
+                        changes: vec![(coord, old_format, Some(new_format))],
+                    },
+                ])
+            }
+            None => content_action,
+        };
+        self.undo_history.push(action);
     }
 
     /// Apply a cell content string (used by undo/redo)
@@ -416,9 +467,20 @@ impl SpreadsheetApp {
             Some(s) if s.starts_with('=') => {
                 let _ = self.engine.set_formula(sheet, coord, s);
             }
-            Some(s) if s.parse::<f64>().is_ok() => {
+            // Text-formatted (@) cells keep what was typed as text.
+            Some(s)
+                if self
+                    .engine
+                    .cell_format(sheet, coord)
+                    .is_some_and(|f| f.number_format.as_deref() == Some("@")) =>
+            {
                 self.engine
-                    .set_value(sheet, coord, CellValueInput::Number(s.parse().unwrap()));
+                    .set_value(sheet, coord, CellValueInput::Text(s.to_string()));
+            }
+            Some(s) if parse_typed_number(s).is_some() => {
+                let (n, _) = parse_typed_number(s).unwrap_or_default();
+                self.engine
+                    .set_value(sheet, coord, CellValueInput::Number(n));
             }
             Some(s) if s.eq_ignore_ascii_case("true") => {
                 self.engine
@@ -442,34 +504,7 @@ impl SpreadsheetApp {
     /// Undo the last action
     fn undo(&mut self) {
         if let Some(action) = self.undo_history.pop_undo() {
-            match &action {
-                UndoAction::CellChange {
-                    sheet,
-                    coord,
-                    old_value,
-                    new_value: _,
-                } => {
-                    self.apply_cell_content(
-                        *sheet,
-                        *coord,
-                        old_value.as_ref().map(|s| s.input.as_str()),
-                    );
-                    self.selection.move_to(*coord);
-                }
-                UndoAction::CellClear {
-                    sheet,
-                    coord,
-                    old_value,
-                } => {
-                    self.apply_cell_content(
-                        *sheet,
-                        *coord,
-                        old_value.as_ref().map(|s| s.input.as_str()),
-                    );
-                    self.selection.move_to(*coord);
-                }
-            }
-            // Push to redo stack (with inverted action)
+            self.replay(&action, false);
             self.undo_history.push_redo(action);
             self.set_status("Undo");
         }
@@ -478,34 +513,182 @@ impl SpreadsheetApp {
     /// Redo the last undone action
     fn redo(&mut self) {
         if let Some(action) = self.undo_history.pop_redo() {
-            match &action {
-                UndoAction::CellChange {
-                    sheet,
-                    coord,
-                    old_value: _,
-                    new_value,
-                } => {
-                    self.apply_cell_content(
-                        *sheet,
-                        *coord,
-                        new_value.as_ref().map(|s| s.input.as_str()),
-                    );
-                    self.selection.move_to(*coord);
-                }
-                UndoAction::CellClear {
-                    sheet,
-                    coord,
-                    old_value: _,
-                } => {
-                    self.engine.clear(*sheet, *coord);
-                    self.selection.move_to(*coord);
-                    self.modified = true;
-                }
-            }
-            // Push back to undo stack
+            self.replay(&action, true);
             self.undo_history.push_undo_for_redo(action);
             self.set_status("Redo");
         }
+    }
+
+    /// Apply an action's new state (`forward`) or restore its old state.
+    fn replay(&mut self, action: &UndoAction, forward: bool) {
+        match action {
+            UndoAction::CellChange {
+                sheet,
+                coord,
+                old_value,
+                new_value,
+            } => {
+                let value = if forward { new_value } else { old_value };
+                self.apply_cell_content(*sheet, *coord, value.as_ref().map(|s| s.input.as_str()));
+                self.selection.move_to(*coord);
+            }
+            UndoAction::CellClear {
+                sheet,
+                coord,
+                old_value,
+            } => {
+                let value = if forward { None } else { old_value.as_ref() };
+                self.apply_cell_content(*sheet, *coord, value.map(|s| s.input.as_str()));
+                self.selection.move_to(*coord);
+            }
+            UndoAction::Format { sheet, changes } => {
+                for (coord, old, new) in changes {
+                    let format = if forward { new } else { old };
+                    self.engine
+                        .set_cell_format(*sheet, *coord, format.clone().unwrap_or_default());
+                }
+                self.modified = true;
+            }
+            UndoAction::Resize {
+                sheet,
+                axis,
+                index,
+                old,
+                new,
+            } => {
+                let size = if forward { *new } else { *old };
+                self.set_size(*sheet, *axis, *index, size);
+            }
+            UndoAction::Group(actions) => {
+                if forward {
+                    for a in actions {
+                        self.replay(a, true);
+                    }
+                } else {
+                    for a in actions.iter().rev() {
+                        self.replay(a, false);
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Formatting
+    // ------------------------------------------------------------------
+
+    fn active_format(&self) -> CellFormat {
+        self.engine
+            .cell_format(self.current_sheet, self.selection.active)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Change every selected cell's format as one undo step. `change` gets
+    /// each cell's position and the selection's bounds.
+    fn apply_format(&mut self, change: impl Fn(CellCoord, CellRange, &mut CellFormat)) {
+        let sheet = self.current_sheet;
+        let range = self.selection.primary_range();
+        let mut changes = Vec::new();
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                let coord = CellCoord::new(row, col);
+                let old = self.engine.cell_format(sheet, coord).cloned();
+                let mut new = old.clone().unwrap_or_default();
+                change(coord, range, &mut new);
+                let new = (!new.is_default()).then_some(new);
+                if new != old {
+                    self.engine
+                        .set_cell_format(sheet, coord, new.clone().unwrap_or_default());
+                    changes.push((coord, old, new));
+                }
+            }
+        }
+        if !changes.is_empty() {
+            self.undo_history
+                .push(UndoAction::Format { sheet, changes });
+            self.modified = true;
+        }
+    }
+
+    fn handle_format_action(&mut self, action: FormatAction) {
+        let current = self.active_format();
+        match action {
+            FormatAction::ToggleBold => {
+                let on = !current.bold;
+                self.apply_format(|_, _, f| f.bold = on);
+            }
+            FormatAction::ToggleItalic => {
+                let on = !current.italic;
+                self.apply_format(|_, _, f| f.italic = on);
+            }
+            FormatAction::ToggleUnderline => {
+                let on = !current.underline;
+                self.apply_format(|_, _, f| f.underline = on);
+            }
+            FormatAction::ToggleStrikethrough => {
+                let on = !current.strikethrough;
+                self.apply_format(|_, _, f| f.strikethrough = on);
+            }
+            FormatAction::FontSize(size) => self.apply_format(|_, _, f| f.font_size = size),
+            FormatAction::FontColor(color) => self.apply_format(|_, _, f| f.font_color = color),
+            FormatAction::Fill(fill) => self.apply_format(|_, _, f| f.fill = fill),
+            FormatAction::Align(align) => self.apply_format(|_, _, f| f.h_align = align),
+            FormatAction::Borders(preset) => self.apply_format(|coord, range, f| {
+                f.borders = match preset {
+                    BorderPreset::All => Borders::ALL,
+                    BorderPreset::None => Borders::NONE,
+                    BorderPreset::Outside => Borders {
+                        top: coord.row == range.start.row,
+                        bottom: coord.row == range.end.row,
+                        left: coord.col == range.start.col,
+                        right: coord.col == range.end.col,
+                    },
+                    BorderPreset::Bottom => Borders {
+                        bottom: coord.row == range.end.row,
+                        ..f.borders
+                    },
+                }
+            }),
+            FormatAction::NumberFormat(code) => {
+                self.apply_format(|_, _, f| f.number_format = code.clone())
+            }
+            FormatAction::Decimals(delta) => {
+                let code = format_bar::adjust_decimals(current.number_format.as_deref(), delta);
+                self.apply_format(|_, _, f| f.number_format = code.clone());
+            }
+            FormatAction::Clear => self.apply_format(|_, _, f| *f = CellFormat::default()),
+        }
+    }
+
+    /// Set a column width or row height; `None` restores the default.
+    fn set_size(&mut self, sheet: u32, axis: ResizeAxis, index: u32, size: Option<f32>) {
+        let formatting = self.engine.formatting_mut(sheet);
+        let (sizes, default) = match axis {
+            ResizeAxis::Column => (&mut formatting.column_widths, DEFAULT_COLUMN_WIDTH),
+            ResizeAxis::Row => (&mut formatting.row_heights, DEFAULT_ROW_HEIGHT),
+        };
+        match size.filter(|s| (s - default).abs() >= 0.5) {
+            Some(s) => sizes.insert(index, s),
+            None => sizes.remove(&index),
+        };
+        if sheet == self.current_sheet {
+            self.sync_grid_config();
+        }
+        self.modified = true;
+    }
+
+    fn current_size(&self, axis: ResizeAxis, index: u32) -> Option<f32> {
+        let formatting = self.engine.formatting(self.current_sheet)?;
+        match axis {
+            ResizeAxis::Column => formatting.column_widths.get(&index).copied(),
+            ResizeAxis::Row => formatting.row_heights.get(&index).copied(),
+        }
+    }
+
+    /// Point the grid at the current sheet's column widths and row heights.
+    fn sync_grid_config(&mut self) {
+        self.grid_config = GridConfig::for_sheet(self.engine.formatting(self.current_sheet));
     }
 
     /// Handle navigation keys
@@ -690,6 +873,7 @@ impl SpreadsheetApp {
             self.selection = state.selection.clone();
             self.scroll = state.scroll.clone();
         }
+        self.sync_grid_config();
     }
 
     /// Switch to a different sheet
@@ -859,6 +1043,7 @@ impl SpreadsheetApp {
         self.current_file = None;
         self.modified = false;
         self.undo_history.clear();
+        self.sync_grid_config();
         self.set_status("New workbook created");
     }
 
@@ -917,6 +1102,7 @@ impl SpreadsheetApp {
 
     fn finish_open(&mut self, path: &Path) {
         self.current_sheet = 0;
+        self.sync_grid_config();
         self.current_file = Some(path.to_path_buf());
         self.modified = false;
         self.selection = Selection::default();
@@ -997,6 +1183,18 @@ impl SpreadsheetApp {
                         selection: Selection::default(),
                         scroll: ScrollState::default(),
                     });
+                }
+
+                // Fonts, fills, borders, number formats and column/row sizes.
+                match crate::xlsx::read_formatting_from_path(path) {
+                    Ok(sheets) => {
+                        for (name, formatting) in sheets {
+                            if let Some(i) = self.sheet_names.iter().position(|n| *n == name) {
+                                *self.engine.formatting_mut(i as u32) = formatting;
+                            }
+                        }
+                    }
+                    Err(e) => self.set_status(&format!("Formatting not loaded: {e}")),
                 }
 
                 self.chart_windows.clear();
@@ -1239,6 +1437,8 @@ impl eframe::App for SpreadsheetApp {
         // Track if formula bar has focus
         let mut formula_bar_has_focus = false;
 
+        let mut format_action: Option<FormatAction> = None;
+
         // Top panel for toolbar
         TopBottomPanel::top("toolbar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -1288,6 +1488,31 @@ impl eframe::App for SpreadsheetApp {
                     }
                 });
 
+                ui.menu_button("Format", |ui| {
+                    let items = [
+                        (format!("Bold ({MOD}+B)"), FormatAction::ToggleBold),
+                        (format!("Italic ({MOD}+I)"), FormatAction::ToggleItalic),
+                        (
+                            format!("Underline ({MOD}+U)"),
+                            FormatAction::ToggleUnderline,
+                        ),
+                        (
+                            "Strikethrough".to_string(),
+                            FormatAction::ToggleStrikethrough,
+                        ),
+                        ("Clear Formatting".to_string(), FormatAction::Clear),
+                    ];
+                    for (label, action) in items {
+                        if action == FormatAction::Clear {
+                            ui.separator();
+                        }
+                        if ui.button(label).clicked() {
+                            format_action = Some(action);
+                            ui.close_menu();
+                        }
+                    }
+                });
+
                 ui.menu_button("View", |ui| {
                     if ui.button("Light Theme").clicked() {
                         self.theme = Theme::light();
@@ -1329,6 +1554,19 @@ impl eframe::App for SpreadsheetApp {
                 });
             });
         });
+
+        // Formatting toolbar
+        let active_format = self.active_format();
+        TopBottomPanel::top("format_bar").show(ctx, |ui| {
+            ui.add_space(2.0);
+            if let Some(action) = format_bar::show(ui, &active_format) {
+                format_action = Some(action);
+            }
+            ui.add_space(2.0);
+        });
+        if let Some(action) = format_action.take() {
+            self.handle_format_action(action);
+        }
 
         // Formula bar panel
         let mut formula_response = None;
@@ -1487,6 +1725,18 @@ impl eframe::App for SpreadsheetApp {
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::N)) {
             self.request_new_workbook();
         }
+        // Bold / italic / underline, unless typing in the formula bar
+        if !self.is_editing() && !formula_bar_has_focus {
+            for (key, action) in [
+                (Key::B, FormatAction::ToggleBold),
+                (Key::I, FormatAction::ToggleItalic),
+                (Key::U, FormatAction::ToggleUnderline),
+            ] {
+                if ctx.input(|i| i.modifiers.command && i.key_pressed(key)) {
+                    self.handle_format_action(action);
+                }
+            }
+        }
         // Undo: Ctrl+Z
         if ctx.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::Z)) {
             self.undo();
@@ -1515,6 +1765,45 @@ impl eframe::App for SpreadsheetApp {
             );
 
             let grid_response = grid.show(ui);
+
+            // Column and row resizing; one undo step per drag
+            if let Some((axis, index, size)) = grid_response.resize {
+                if self.resize_origin.is_none() {
+                    self.resize_origin = Some((axis, index, self.current_size(axis, index)));
+                }
+                self.set_size(self.current_sheet, axis, index, Some(size));
+            }
+            if grid_response.resize_ended {
+                if let Some((axis, index, old)) = self.resize_origin.take() {
+                    let new = self.current_size(axis, index);
+                    if new != old {
+                        self.undo_history.push(UndoAction::Resize {
+                            sheet: self.current_sheet,
+                            axis,
+                            index,
+                            old,
+                            new,
+                        });
+                    }
+                }
+            }
+            if let Some(col) = grid_response.autofit_column {
+                if let Some(width) = fit_column_width(ctx, &self.engine, self.current_sheet, col) {
+                    let axis = ResizeAxis::Column;
+                    let old = self.current_size(axis, col);
+                    self.set_size(self.current_sheet, axis, col, Some(width));
+                    let new = self.current_size(axis, col);
+                    if new != old {
+                        self.undo_history.push(UndoAction::Resize {
+                            sheet: self.current_sheet,
+                            axis,
+                            index: col,
+                            old,
+                            new,
+                        });
+                    }
+                }
+            }
 
             // Handle drag for multi-cell selection
             if let Some(coord) = grid_response.drag_started {
@@ -1771,6 +2060,182 @@ mod tests {
             app.engine.get_value(app.current_sheet, a1),
             CellResult::Value(2.0),
             "remaining tab must still show the surviving sheet's A1"
+        );
+    }
+
+    fn select(app: &mut SpreadsheetApp, from: &str, to: &str) {
+        app.selection.move_to(CellCoord::from_a1(from).unwrap());
+        app.selection.extend_to(CellCoord::from_a1(to).unwrap());
+    }
+
+    fn format_of(app: &SpreadsheetApp, a1: &str) -> CellFormat {
+        app.engine
+            .cell_format(app.current_sheet, CellCoord::from_a1(a1).unwrap())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn toolbar_actions_apply_to_selection_and_undo_in_one_step() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        select(&mut app, "A1", "B2");
+
+        app.handle_format_action(FormatAction::ToggleBold);
+        app.handle_format_action(FormatAction::Fill(Some(crate::format::Rgb(255, 242, 204))));
+        for cell in ["A1", "A2", "B1", "B2"] {
+            assert!(format_of(&app, cell).bold, "{cell} bold");
+        }
+        assert!(!format_of(&app, "C1").bold);
+
+        // Toggling again turns bold off everywhere, following the active cell.
+        app.handle_format_action(FormatAction::ToggleBold);
+        assert!(!format_of(&app, "A1").bold);
+
+        app.undo();
+        assert!(format_of(&app, "B2").bold);
+        app.undo();
+        assert!(format_of(&app, "B2").fill.is_none());
+        app.redo();
+        assert!(format_of(&app, "B2").fill.is_some());
+
+        app.handle_format_action(FormatAction::Clear);
+        assert!(format_of(&app, "A1").is_default());
+        assert!(
+            app.engine
+                .formatting(0)
+                .is_none_or(|f| f.cells().next().is_none())
+        );
+    }
+
+    #[test]
+    fn outside_borders_follow_the_selection_edges() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        select(&mut app, "B2", "C3");
+        app.handle_format_action(FormatAction::Borders(BorderPreset::Outside));
+        let b2 = format_of(&app, "B2").borders;
+        assert!(b2.top && b2.left && !b2.right && !b2.bottom);
+        let c3 = format_of(&app, "C3").borders;
+        assert!(c3.bottom && c3.right && !c3.top && !c3.left);
+    }
+
+    #[test]
+    fn typed_percent_and_dates_get_a_format_and_undo_together() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        let a1 = CellCoord::from_a1("A1").unwrap();
+        app.set_cell_content(a1, "12%");
+        assert_eq!(app.engine.get_value(0, a1), CellResult::Value(0.12));
+        assert_eq!(format_of(&app, "A1").number_format.as_deref(), Some("0%"));
+        assert_eq!(app.get_cell_formula_or_value(a1), "12%");
+
+        // One undo removes both the value and the format it brought.
+        app.undo();
+        assert_eq!(app.engine.get_value(0, a1), CellResult::Empty);
+        assert!(format_of(&app, "A1").number_format.is_none());
+        app.redo();
+        assert_eq!(app.engine.get_value(0, a1), CellResult::Value(0.12));
+        assert_eq!(format_of(&app, "A1").number_format.as_deref(), Some("0%"));
+
+        let b1 = CellCoord::from_a1("B1").unwrap();
+        app.set_cell_content(b1, "2023-03-15");
+        assert_eq!(app.engine.get_value(0, b1), CellResult::Value(45000.0));
+        assert_eq!(app.get_cell_formula_or_value(b1), "2023-03-15");
+
+        // An explicit format is kept when a decorated number is typed.
+        let c1 = CellCoord::from_a1("C1").unwrap();
+        select(&mut app, "C1", "C1");
+        app.handle_format_action(FormatAction::NumberFormat(Some("0.00".into())));
+        app.set_cell_content(c1, "50%");
+        assert_eq!(format_of(&app, "C1").number_format.as_deref(), Some("0.00"));
+
+        // Text-formatted cells keep digits as text.
+        let d1 = CellCoord::from_a1("D1").unwrap();
+        select(&mut app, "D1", "D1");
+        app.handle_format_action(FormatAction::NumberFormat(Some("@".into())));
+        app.set_cell_content(d1, "00123");
+        assert_eq!(
+            app.engine.get_value(0, d1),
+            CellResult::Text("00123".into())
+        );
+    }
+
+    #[test]
+    fn resizing_updates_the_grid_and_undoes() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        app.set_size(0, ResizeAxis::Column, 2, Some(150.0));
+        assert_eq!(app.grid_config.column_width(2), 150.0);
+        app.undo_history.push(UndoAction::Resize {
+            sheet: 0,
+            axis: ResizeAxis::Column,
+            index: 2,
+            old: None,
+            new: Some(150.0),
+        });
+        app.undo();
+        assert_eq!(app.grid_config.column_width(2), DEFAULT_COLUMN_WIDTH);
+        app.redo();
+        assert_eq!(app.grid_config.column_width(2), 150.0);
+    }
+
+    #[test]
+    fn sheets_keep_their_own_sizes_and_formats() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        app.set_size(0, ResizeAxis::Row, 0, Some(40.0));
+        app.handle_format_action(FormatAction::ToggleItalic);
+        app.add_sheet();
+        assert_eq!(app.current_sheet, 1);
+        assert_eq!(app.grid_config.row_height(0), DEFAULT_ROW_HEIGHT);
+        assert!(!format_of(&app, "A1").italic);
+        app.switch_sheet(0);
+        assert_eq!(app.grid_config.row_height(0), 40.0);
+        assert!(format_of(&app, "A1").italic);
+
+        // Deleting the first sheet moves the second sheet's (empty) formatting down.
+        app.delete_sheet(0);
+        assert!(!format_of(&app, "A1").italic);
+        assert_eq!(app.grid_config.row_height(0), DEFAULT_ROW_HEIGHT);
+    }
+
+    #[test]
+    #[cfg(feature = "xlsx")]
+    fn formatting_survives_save_and_open() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        app.set_cell_content(CellCoord::from_a1("A1").unwrap(), "Total");
+        app.set_cell_content(CellCoord::from_a1("B1").unwrap(), "$1,234.50");
+        select(&mut app, "A1", "B1");
+        app.handle_format_action(FormatAction::ToggleBold);
+        app.handle_format_action(FormatAction::Borders(BorderPreset::Bottom));
+        app.set_size(0, ResizeAxis::Column, 0, Some(120.0));
+
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "rustsheet_gui_fmt_{}_{}.xlsx",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        app.save_to_path(&path);
+        app.new_workbook();
+        assert!(!format_of(&app, "A1").bold);
+        app.load_file(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let a1 = format_of(&app, "A1");
+        assert!(a1.bold && a1.borders.bottom);
+        let b1 = format_of(&app, "B1");
+        assert_eq!(b1.number_format.as_deref(), Some("$#,##0.00"));
+        assert!(b1.bold);
+        assert!((app.grid_config.column_width(0) - 120.0).abs() < 2.0);
+        assert_eq!(
+            app.engine.get_value(0, CellCoord::from_a1("B1").unwrap()),
+            CellResult::Value(1234.5)
         );
     }
 }
