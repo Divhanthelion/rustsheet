@@ -48,9 +48,10 @@ impl CellError {
 
 /// Core cell value enum - optimized for memory efficiency.
 /// Strings are interned via `Spur` (4-byte token) instead of heap String.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum CellValue {
     /// Empty cell (distinct from blank string)
+    #[default]
     Empty,
     /// Boolean value
     Bool(bool),
@@ -101,12 +102,6 @@ impl CellValue {
             CellValue::Empty => Some(false),
             _ => None,
         }
-    }
-}
-
-impl Default for CellValue {
-    fn default() -> Self {
-        CellValue::Empty
     }
 }
 

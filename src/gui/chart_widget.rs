@@ -2,9 +2,9 @@
 //!
 //! Provides drag, resize, and close functionality for chart overlays.
 
-use eframe::egui::{self, Context, Id, Rect, Vec2, Pos2, Response, Ui, Window};
+use eframe::egui::{self, Context, Id, Pos2, Response, Ui, Vec2, Window};
 
-use crate::chart::{ChartDefinition, ResolvedChartData, render::render_chart, ChartId};
+use crate::chart::{ChartDefinition, ChartId, ResolvedChartData, render::render_chart};
 
 /// State for a chart window
 #[derive(Clone)]
@@ -23,10 +23,7 @@ pub struct ChartWindowState {
 
 impl ChartWindowState {
     pub fn new(chart: ChartDefinition) -> Self {
-        let size = Vec2::new(
-            chart.overlay_area.size.0 as f32,
-            chart.overlay_area.size.1 as f32,
-        );
+        let size = Vec2::new(chart.overlay_area.size.0, chart.overlay_area.size.1);
         Self {
             chart,
             data: None,
@@ -128,7 +125,10 @@ impl ChartWindowManager {
             }
 
             let chart_id = window_state.chart.id;
-            let title = window_state.chart.title.clone()
+            let title = window_state
+                .chart
+                .title
+                .clone()
                 .unwrap_or_else(|| format!("Chart {}", chart_id.0));
 
             let window_id = Id::new(format!("chart_window_{}", chart_id.0));
@@ -234,8 +234,8 @@ impl<'a> ChartWidget<'a> {
     /// Show the chart in the given UI
     pub fn show(self, ui: &mut Ui) -> Response {
         let desired_size = Vec2::new(
-            self.chart.overlay_area.size.0 as f32,
-            self.chart.overlay_area.size.1 as f32,
+            self.chart.overlay_area.size.0,
+            self.chart.overlay_area.size.1,
         );
 
         let (rect, response) = ui.allocate_exact_size(desired_size, egui::Sense::click_and_drag());

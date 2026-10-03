@@ -1,7 +1,7 @@
 //! Sheet tab bar widget for switching between sheets
 
-use eframe::egui::{self, Sense, Ui, Color32, Pos2, Vec2, CornerRadius, Stroke, StrokeKind};
 use super::theme::Theme;
+use eframe::egui::{self, Color32, CornerRadius, Pos2, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 /// Response from the sheet tabs widget
 pub struct SheetTabsResponse {
@@ -60,10 +60,8 @@ impl<'a> SheetTabs<'a> {
             for (index, name) in self.sheet_names.iter().enumerate() {
                 let is_active = index as u32 == self.current_sheet;
 
-                let (rect, tab_response) = ui.allocate_exact_size(
-                    Vec2::new(tab_width, tab_height),
-                    Sense::click(),
-                );
+                let (rect, tab_response) =
+                    ui.allocate_exact_size(Vec2::new(tab_width, tab_height), Sense::click());
 
                 // Draw tab background
                 let bg_color = if is_active {
@@ -88,7 +86,7 @@ impl<'a> SheetTabs<'a> {
                     ui.painter().rect_stroke(
                         rect,
                         rounding,
-                        Stroke::new(1.0, self.theme.selection_border),
+                        Stroke::new(1.0_f32, self.theme.selection_border),
                         StrokeKind::Outside,
                     );
                     // Draw bottom line to "connect" to grid
@@ -97,7 +95,7 @@ impl<'a> SheetTabs<'a> {
                             Pos2::new(rect.left() + 1.0, rect.bottom()),
                             Pos2::new(rect.right() - 1.0, rect.bottom()),
                         ],
-                        Stroke::new(2.0, bg_color),
+                        Stroke::new(2.0_f32, bg_color),
                     );
                 }
 
@@ -133,21 +131,17 @@ impl<'a> SheetTabs<'a> {
                         // For now, just close the menu - rename UI would need more work
                         ui.close_menu();
                     }
-                    if self.sheet_names.len() > 1 {
-                        if ui.button("Delete").clicked() {
-                            response.delete_sheet = Some(index as u32);
-                            ui.close_menu();
-                        }
+                    if self.sheet_names.len() > 1 && ui.button("Delete").clicked() {
+                        response.delete_sheet = Some(index as u32);
+                        ui.close_menu();
                     }
                 });
             }
 
             // Add sheet button
             ui.add_space(4.0);
-            let (add_rect, add_response) = ui.allocate_exact_size(
-                Vec2::new(add_button_width, tab_height),
-                Sense::click(),
-            );
+            let (add_rect, add_response) =
+                ui.allocate_exact_size(Vec2::new(add_button_width, tab_height), Sense::click());
 
             let add_bg = if add_response.hovered() {
                 Color32::from_gray(60)
@@ -155,11 +149,8 @@ impl<'a> SheetTabs<'a> {
                 Color32::from_gray(45)
             };
 
-            ui.painter().rect_filled(
-                add_rect,
-                CornerRadius::same(4),
-                add_bg,
-            );
+            ui.painter()
+                .rect_filled(add_rect, CornerRadius::same(4), add_bg);
 
             ui.painter().text(
                 add_rect.center(),

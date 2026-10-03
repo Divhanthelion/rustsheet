@@ -2,7 +2,7 @@ use crate::calc::{CalcEngine, CellValueInput};
 use crate::cell::{CellCoord, CellValue};
 use crate::formula::normalize_formula;
 use crate::grid::Sheet;
-use calamine::{open_workbook, Data, Range, Reader, Xlsx, XlsxError};
+use calamine::{Data, Range, Reader, Xlsx, XlsxError, open_workbook};
 use std::path::Path;
 use thiserror::Error;
 
@@ -94,8 +94,8 @@ impl XlsxReader {
 
         for row in 0..rows {
             for col in 0..cols {
-                let excel_row = start.0 as u32 + row as u32;
-                let excel_col = start.1 as u32 + col as u32;
+                let excel_row = start.0 + row as u32;
+                let excel_col = start.1 + col as u32;
 
                 if let Some(cell) = range.get((row, col)) {
                     let coord = CellCoord::new(excel_row, excel_col);

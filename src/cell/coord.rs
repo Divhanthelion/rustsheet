@@ -89,7 +89,10 @@ impl CellRange {
     }
 
     pub fn single(coord: CellCoord) -> Self {
-        Self { start: coord, end: coord }
+        Self {
+            start: coord,
+            end: coord,
+        }
     }
 
     /// Parse A1:B2 style range

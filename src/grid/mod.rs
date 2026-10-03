@@ -1,5 +1,5 @@
-mod sparse;
 mod sheet;
+mod sparse;
 
-pub use sparse::SparseGrid;
 pub use sheet::Sheet;
+pub use sparse::SparseGrid;

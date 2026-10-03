@@ -1,9 +1,9 @@
-use crate::cell::{CellCoord, CellRange, CellError};
+use crate::cell::{CellCoord, CellError, CellRange};
 use crate::formula::ast::{BinaryOp, CellRef, Expr, RangeRef, UnaryOp};
 use crate::formula::grammar::{FormulaGrammar, Rule};
+use pest::Parser;
 use pest::iterators::{Pair, Pairs};
 use pest::pratt_parser::{Assoc, Op, PrattParser};
-use pest::Parser;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -286,10 +286,16 @@ mod tests {
         let expr = parser().parse("=1+2*3").unwrap();
         // Should parse as 1 + (2 * 3) due to precedence
         match expr {
-            Expr::Binary { op: BinaryOp::Add, left, right } => {
+            Expr::Binary {
+                op: BinaryOp::Add,
+                left,
+                right,
+            } => {
                 assert_eq!(*left, Expr::Number(1.0));
                 match *right {
-                    Expr::Binary { op: BinaryOp::Mul, .. } => {}
+                    Expr::Binary {
+                        op: BinaryOp::Mul, ..
+                    } => {}
                     _ => panic!("Expected multiplication"),
                 }
             }
@@ -356,7 +362,9 @@ mod tests {
     fn test_comparison() {
         let expr = parser().parse("=A1>10").unwrap();
         match expr {
-            Expr::Binary { op: BinaryOp::Gt, .. } => {}
+            Expr::Binary {
+                op: BinaryOp::Gt, ..
+            } => {}
             _ => panic!("Expected comparison"),
         }
     }

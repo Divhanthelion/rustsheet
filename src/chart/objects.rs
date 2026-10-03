@@ -153,10 +153,7 @@ impl SheetObject {
         self.anchor_top_left.1 = (self.anchor_top_left.1 + delta_col).max(0.0);
 
         // Update the chart definition's overlay area too
-        let new_anchor = (
-            self.anchor_top_left.0 as u32,
-            self.anchor_top_left.1 as u32,
-        );
+        let new_anchor = (self.anchor_top_left.0 as u32, self.anchor_top_left.1 as u32);
         if let Some(chart) = self.as_chart_mut() {
             chart.overlay_area.anchor_cell = new_anchor;
         }
@@ -273,7 +270,7 @@ impl SheetObjectManager {
     ) -> Option<ObjectId> {
         // Sort by z-index descending to find topmost first
         let mut sorted: Vec<_> = self.objects.iter().collect();
-        sorted.sort_by(|a, b| b.z_index.cmp(&a.z_index));
+        sorted.sort_by_key(|a| std::cmp::Reverse(a.z_index));
 
         for obj in sorted {
             let offset = grid_offset_fn(obj);

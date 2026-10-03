@@ -1,35 +1,30 @@
 //! Main spreadsheet application
 
-use eframe::egui::{self, CentralPanel, TopBottomPanel, Key, Vec2};
+use crate::calc::{CalcEngine, CellResult, CellValueInput};
 use crate::cell::{CellCoord, StringPool};
-use crate::calc::{CalcEngine, CellValueInput, CellResult};
 use crate::chart::{ChartDataResolver, ChartDefinition, ChartId};
-use std::path::PathBuf;
+use eframe::egui::{self, CentralPanel, Key, TopBottomPanel, Vec2};
+use std::path::{Path, PathBuf};
 
+use super::chart_editor::ChartEditor;
+use super::chart_widget::ChartWindowManager;
 use super::formula_bar::FormulaBar;
-use super::grid::{SpreadsheetGrid, GridConfig, ScrollState, NavigationKey};
+use super::grid::{GridConfig, NavigationKey, ScrollState, SpreadsheetGrid};
 use super::help_panel::HelpPanel;
 use super::selection::Selection;
 use super::sheet_tabs::SheetTabs;
 use super::theme::Theme;
-use super::chart_widget::ChartWindowManager;
-use super::chart_editor::ChartEditor;
 
 /// Input mode FSM - decouples input handling from render order
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum InputMode {
     /// Standard navigation mode; Grid captures focus
+    #[default]
     Navigation,
     /// Transition frame; Focus is being transferred to editor
     TransitionToEdit { initial_char: Option<char> },
     /// Editing mode; FormulaBar captures focus
     Editing { cell: CellCoord },
-}
-
-impl Default for InputMode {
-    fn default() -> Self {
-        Self::Navigation
-    }
 }
 
 /// Per-sheet state that gets saved/restored when switching sheets
@@ -224,30 +219,70 @@ impl SpreadsheetApp {
 
     fn set_demo_data(&mut self) {
         // Headers
-        self.engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Text("Item".to_string()));
-        self.engine.set_value(0, CellCoord::new(0, 1), CellValueInput::Text("Quantity".to_string()));
-        self.engine.set_value(0, CellCoord::new(0, 2), CellValueInput::Text("Price".to_string()));
-        self.engine.set_value(0, CellCoord::new(0, 3), CellValueInput::Text("Total".to_string()));
+        self.engine.set_value(
+            0,
+            CellCoord::new(0, 0),
+            CellValueInput::Text("Item".to_string()),
+        );
+        self.engine.set_value(
+            0,
+            CellCoord::new(0, 1),
+            CellValueInput::Text("Quantity".to_string()),
+        );
+        self.engine.set_value(
+            0,
+            CellCoord::new(0, 2),
+            CellValueInput::Text("Price".to_string()),
+        );
+        self.engine.set_value(
+            0,
+            CellCoord::new(0, 3),
+            CellValueInput::Text("Total".to_string()),
+        );
 
         // Data rows
-        self.engine.set_value(0, CellCoord::new(1, 0), CellValueInput::Text("Apples".to_string()));
-        self.engine.set_value(0, CellCoord::new(1, 1), CellValueInput::Number(10.0));
-        self.engine.set_value(0, CellCoord::new(1, 2), CellValueInput::Number(1.50));
+        self.engine.set_value(
+            0,
+            CellCoord::new(1, 0),
+            CellValueInput::Text("Apples".to_string()),
+        );
+        self.engine
+            .set_value(0, CellCoord::new(1, 1), CellValueInput::Number(10.0));
+        self.engine
+            .set_value(0, CellCoord::new(1, 2), CellValueInput::Number(1.50));
         let _ = self.engine.set_formula(0, CellCoord::new(1, 3), "=B2*C2");
 
-        self.engine.set_value(0, CellCoord::new(2, 0), CellValueInput::Text("Oranges".to_string()));
-        self.engine.set_value(0, CellCoord::new(2, 1), CellValueInput::Number(8.0));
-        self.engine.set_value(0, CellCoord::new(2, 2), CellValueInput::Number(2.00));
+        self.engine.set_value(
+            0,
+            CellCoord::new(2, 0),
+            CellValueInput::Text("Oranges".to_string()),
+        );
+        self.engine
+            .set_value(0, CellCoord::new(2, 1), CellValueInput::Number(8.0));
+        self.engine
+            .set_value(0, CellCoord::new(2, 2), CellValueInput::Number(2.00));
         let _ = self.engine.set_formula(0, CellCoord::new(2, 3), "=B3*C3");
 
-        self.engine.set_value(0, CellCoord::new(3, 0), CellValueInput::Text("Bananas".to_string()));
-        self.engine.set_value(0, CellCoord::new(3, 1), CellValueInput::Number(15.0));
-        self.engine.set_value(0, CellCoord::new(3, 2), CellValueInput::Number(0.75));
+        self.engine.set_value(
+            0,
+            CellCoord::new(3, 0),
+            CellValueInput::Text("Bananas".to_string()),
+        );
+        self.engine
+            .set_value(0, CellCoord::new(3, 1), CellValueInput::Number(15.0));
+        self.engine
+            .set_value(0, CellCoord::new(3, 2), CellValueInput::Number(0.75));
         let _ = self.engine.set_formula(0, CellCoord::new(3, 3), "=B4*C4");
 
         // Summary row
-        self.engine.set_value(0, CellCoord::new(5, 2), CellValueInput::Text("Grand Total:".to_string()));
-        let _ = self.engine.set_formula(0, CellCoord::new(5, 3), "=SUM(D2:D4)");
+        self.engine.set_value(
+            0,
+            CellCoord::new(5, 2),
+            CellValueInput::Text("Grand Total:".to_string()),
+        );
+        let _ = self
+            .engine
+            .set_formula(0, CellCoord::new(5, 3), "=SUM(D2:D4)");
     }
 
     /// Get the display content of the current cell
@@ -298,8 +333,16 @@ impl SpreadsheetApp {
         let content = content.trim();
 
         // Capture old value for undo
-        let old_value = self.get_cell_content_string(coord).map(|s| CellSnapshot { input: s });
-        let new_value = if content.is_empty() { None } else { Some(CellSnapshot { input: content.to_string() }) };
+        let old_value = self
+            .get_cell_content_string(coord)
+            .map(|s| CellSnapshot { input: s });
+        let new_value = if content.is_empty() {
+            None
+        } else {
+            Some(CellSnapshot {
+                input: content.to_string(),
+            })
+        };
 
         // Record undo action
         if content.is_empty() {
@@ -327,14 +370,21 @@ impl SpreadsheetApp {
             }
         } else if let Ok(n) = content.parse::<f64>() {
             // Number
-            self.engine.set_value(self.current_sheet, coord, CellValueInput::Number(n));
+            self.engine
+                .set_value(self.current_sheet, coord, CellValueInput::Number(n));
         } else if content.eq_ignore_ascii_case("true") {
-            self.engine.set_value(self.current_sheet, coord, CellValueInput::Bool(true));
+            self.engine
+                .set_value(self.current_sheet, coord, CellValueInput::Bool(true));
         } else if content.eq_ignore_ascii_case("false") {
-            self.engine.set_value(self.current_sheet, coord, CellValueInput::Bool(false));
+            self.engine
+                .set_value(self.current_sheet, coord, CellValueInput::Bool(false));
         } else {
             // Text
-            self.engine.set_value(self.current_sheet, coord, CellValueInput::Text(content.to_string()));
+            self.engine.set_value(
+                self.current_sheet,
+                coord,
+                CellValueInput::Text(content.to_string()),
+            );
         }
         self.modified = true;
 
@@ -352,16 +402,20 @@ impl SpreadsheetApp {
                 let _ = self.engine.set_formula(sheet, coord, s);
             }
             Some(s) if s.parse::<f64>().is_ok() => {
-                self.engine.set_value(sheet, coord, CellValueInput::Number(s.parse().unwrap()));
+                self.engine
+                    .set_value(sheet, coord, CellValueInput::Number(s.parse().unwrap()));
             }
             Some(s) if s.eq_ignore_ascii_case("true") => {
-                self.engine.set_value(sheet, coord, CellValueInput::Bool(true));
+                self.engine
+                    .set_value(sheet, coord, CellValueInput::Bool(true));
             }
             Some(s) if s.eq_ignore_ascii_case("false") => {
-                self.engine.set_value(sheet, coord, CellValueInput::Bool(false));
+                self.engine
+                    .set_value(sheet, coord, CellValueInput::Bool(false));
             }
             Some(s) => {
-                self.engine.set_value(sheet, coord, CellValueInput::Text(s.to_string()));
+                self.engine
+                    .set_value(sheet, coord, CellValueInput::Text(s.to_string()));
             }
         }
         self.modified = true;
@@ -374,12 +428,29 @@ impl SpreadsheetApp {
     fn undo(&mut self) {
         if let Some(action) = self.undo_history.pop_undo() {
             match &action {
-                UndoAction::CellChange { sheet, coord, old_value, new_value: _ } => {
-                    self.apply_cell_content(*sheet, *coord, old_value.as_ref().map(|s| s.input.as_str()));
+                UndoAction::CellChange {
+                    sheet,
+                    coord,
+                    old_value,
+                    new_value: _,
+                } => {
+                    self.apply_cell_content(
+                        *sheet,
+                        *coord,
+                        old_value.as_ref().map(|s| s.input.as_str()),
+                    );
                     self.selection.move_to(*coord);
                 }
-                UndoAction::CellClear { sheet, coord, old_value } => {
-                    self.apply_cell_content(*sheet, *coord, old_value.as_ref().map(|s| s.input.as_str()));
+                UndoAction::CellClear {
+                    sheet,
+                    coord,
+                    old_value,
+                } => {
+                    self.apply_cell_content(
+                        *sheet,
+                        *coord,
+                        old_value.as_ref().map(|s| s.input.as_str()),
+                    );
                     self.selection.move_to(*coord);
                 }
             }
@@ -393,11 +464,24 @@ impl SpreadsheetApp {
     fn redo(&mut self) {
         if let Some(action) = self.undo_history.pop_redo() {
             match &action {
-                UndoAction::CellChange { sheet, coord, old_value: _, new_value } => {
-                    self.apply_cell_content(*sheet, *coord, new_value.as_ref().map(|s| s.input.as_str()));
+                UndoAction::CellChange {
+                    sheet,
+                    coord,
+                    old_value: _,
+                    new_value,
+                } => {
+                    self.apply_cell_content(
+                        *sheet,
+                        *coord,
+                        new_value.as_ref().map(|s| s.input.as_str()),
+                    );
                     self.selection.move_to(*coord);
                 }
-                UndoAction::CellClear { sheet, coord, old_value: _ } => {
+                UndoAction::CellClear {
+                    sheet,
+                    coord,
+                    old_value: _,
+                } => {
                     self.engine.clear(*sheet, *coord);
                     self.selection.move_to(*coord);
                     self.modified = true;
@@ -418,20 +502,26 @@ impl SpreadsheetApp {
             NavigationKey::Right => (0, 1),
             NavigationKey::Home => {
                 if !shift {
-                    self.selection.move_to(CellCoord::new(self.selection.active.row, 0));
+                    self.selection
+                        .move_to(CellCoord::new(self.selection.active.row, 0));
                 } else {
-                    self.selection.extend_to(CellCoord::new(self.selection.active.row, 0));
+                    self.selection
+                        .extend_to(CellCoord::new(self.selection.active.row, 0));
                 }
-                self.scroll.scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
+                self.scroll
+                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
                 return;
             }
             NavigationKey::End => {
                 if !shift {
-                    self.selection.move_to(CellCoord::new(self.selection.active.row, self.max_col));
+                    self.selection
+                        .move_to(CellCoord::new(self.selection.active.row, self.max_col));
                 } else {
-                    self.selection.extend_to(CellCoord::new(self.selection.active.row, self.max_col));
+                    self.selection
+                        .extend_to(CellCoord::new(self.selection.active.row, self.max_col));
                 }
-                self.scroll.scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
+                self.scroll
+                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
                 return;
             }
             NavigationKey::CtrlHome => {
@@ -440,16 +530,20 @@ impl SpreadsheetApp {
                 } else {
                     self.selection.extend_to(CellCoord::new(0, 0));
                 }
-                self.scroll.scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
+                self.scroll
+                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
                 return;
             }
             NavigationKey::CtrlEnd => {
                 if !shift {
-                    self.selection.move_to(CellCoord::new(self.max_row, self.max_col));
+                    self.selection
+                        .move_to(CellCoord::new(self.max_row, self.max_col));
                 } else {
-                    self.selection.extend_to(CellCoord::new(self.max_row, self.max_col));
+                    self.selection
+                        .extend_to(CellCoord::new(self.max_row, self.max_col));
                 }
-                self.scroll.scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
+                self.scroll
+                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
                 return;
             }
             NavigationKey::PageUp => (-20, 0),
@@ -458,47 +552,61 @@ impl SpreadsheetApp {
                 // Jump to top of data region or row 0
                 let new_row = 0;
                 if !shift {
-                    self.selection.move_to(CellCoord::new(new_row, self.selection.active.col));
+                    self.selection
+                        .move_to(CellCoord::new(new_row, self.selection.active.col));
                 } else {
-                    self.selection.extend_to(CellCoord::new(new_row, self.selection.active.col));
+                    self.selection
+                        .extend_to(CellCoord::new(new_row, self.selection.active.col));
                 }
-                self.scroll.scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
+                self.scroll
+                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
                 return;
             }
             NavigationKey::CtrlDown => {
                 let new_row = self.max_row;
                 if !shift {
-                    self.selection.move_to(CellCoord::new(new_row, self.selection.active.col));
+                    self.selection
+                        .move_to(CellCoord::new(new_row, self.selection.active.col));
                 } else {
-                    self.selection.extend_to(CellCoord::new(new_row, self.selection.active.col));
+                    self.selection
+                        .extend_to(CellCoord::new(new_row, self.selection.active.col));
                 }
-                self.scroll.scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
+                self.scroll
+                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
                 return;
             }
             NavigationKey::CtrlLeft => {
                 let new_col = 0;
                 if !shift {
-                    self.selection.move_to(CellCoord::new(self.selection.active.row, new_col));
+                    self.selection
+                        .move_to(CellCoord::new(self.selection.active.row, new_col));
                 } else {
-                    self.selection.extend_to(CellCoord::new(self.selection.active.row, new_col));
+                    self.selection
+                        .extend_to(CellCoord::new(self.selection.active.row, new_col));
                 }
-                self.scroll.scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
+                self.scroll
+                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
                 return;
             }
             NavigationKey::CtrlRight => {
                 let new_col = self.max_col;
                 if !shift {
-                    self.selection.move_to(CellCoord::new(self.selection.active.row, new_col));
+                    self.selection
+                        .move_to(CellCoord::new(self.selection.active.row, new_col));
                 } else {
-                    self.selection.extend_to(CellCoord::new(self.selection.active.row, new_col));
+                    self.selection
+                        .extend_to(CellCoord::new(self.selection.active.row, new_col));
                 }
-                self.scroll.scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
+                self.scroll
+                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
                 return;
             }
         };
 
-        self.selection.move_by(row_delta, col_delta, shift, self.max_row, self.max_col);
-        self.scroll.scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
+        self.selection
+            .move_by(row_delta, col_delta, shift, self.max_row, self.max_col);
+        self.scroll
+            .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
     }
 
     /// Start editing the current cell - initiates TransitionToEdit state
@@ -508,7 +616,10 @@ impl SpreadsheetApp {
 
     /// Returns true if currently in editing mode
     fn is_editing(&self) -> bool {
-        matches!(self.input_mode, InputMode::Editing { .. } | InputMode::TransitionToEdit { .. })
+        matches!(
+            self.input_mode,
+            InputMode::Editing { .. } | InputMode::TransitionToEdit { .. }
+        )
     }
 
     /// Get the cell being edited (if any)
@@ -530,9 +641,11 @@ impl SpreadsheetApp {
         self.formula_bar.editing = false;
 
         if move_down {
-            self.selection.move_by(1, 0, false, self.max_row, self.max_col);
+            self.selection
+                .move_by(1, 0, false, self.max_row, self.max_col);
         } else if move_right {
-            self.selection.move_by(0, 1, false, self.max_row, self.max_col);
+            self.selection
+                .move_by(0, 1, false, self.max_row, self.max_col);
         }
     }
 
@@ -693,7 +806,7 @@ impl SpreadsheetApp {
         self.set_status("New workbook created");
     }
 
-    fn extension_is(path: &PathBuf, ext: &str) -> bool {
+    fn extension_is(path: &Path, ext: &str) -> bool {
         path.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case(ext))
@@ -727,7 +840,7 @@ impl SpreadsheetApp {
         }
     }
 
-    fn load_file(&mut self, path: &PathBuf) {
+    fn load_file(&mut self, path: &Path) {
         #[cfg(feature = "csv")]
         if Self::extension_is(path, "csv") {
             self.load_csv(path);
@@ -736,15 +849,14 @@ impl SpreadsheetApp {
         #[cfg(feature = "xlsx")]
         {
             self.load_xlsx(path);
-            return;
         }
         #[cfg(not(feature = "xlsx"))]
         self.set_status("Excel support not enabled. Rebuild with --features xlsx");
     }
 
-    fn finish_open(&mut self, path: &PathBuf) {
+    fn finish_open(&mut self, path: &Path) {
         self.current_sheet = 0;
-        self.current_file = Some(path.clone());
+        self.current_file = Some(path.to_path_buf());
         self.modified = false;
         self.selection = Selection::default();
         self.scroll = ScrollState::default();
@@ -761,7 +873,7 @@ impl SpreadsheetApp {
     }
 
     #[cfg(feature = "csv")]
-    fn load_csv(&mut self, path: &PathBuf) {
+    fn load_csv(&mut self, path: &Path) {
         let mut loaded = CalcEngine::new();
         match crate::csv_io::read_path(&mut loaded, 0, path) {
             Ok(()) => {
@@ -787,7 +899,7 @@ impl SpreadsheetApp {
     }
 
     #[cfg(feature = "xlsx")]
-    fn load_xlsx(&mut self, path: &PathBuf) {
+    fn load_xlsx(&mut self, path: &Path) {
         match XlsxReader::open(path) {
             Ok(mut reader) => {
                 let sheet_names = reader.sheet_names();
@@ -875,7 +987,7 @@ impl SpreadsheetApp {
         }
     }
 
-    fn save_to_path(&mut self, path: &PathBuf) {
+    fn save_to_path(&mut self, path: &Path) {
         #[cfg(feature = "csv")]
         if Self::extension_is(path, "csv") {
             self.save_csv(path);
@@ -884,17 +996,16 @@ impl SpreadsheetApp {
         #[cfg(feature = "xlsx")]
         {
             self.save_xlsx(path);
-            return;
         }
         #[cfg(not(feature = "xlsx"))]
         self.set_status("Excel support not enabled. Rebuild with --features xlsx");
     }
 
     #[cfg(feature = "csv")]
-    fn save_csv(&mut self, path: &PathBuf) {
+    fn save_csv(&mut self, path: &Path) {
         match crate::csv_io::write_path(&self.engine, self.current_sheet, path) {
             Ok(()) => {
-                self.current_file = Some(path.clone());
+                self.current_file = Some(path.to_path_buf());
                 self.modified = false;
                 let extra = if self.sheet_names.len() > 1 {
                     " (current sheet only)"
@@ -908,7 +1019,7 @@ impl SpreadsheetApp {
     }
 
     #[cfg(feature = "xlsx")]
-    fn save_xlsx(&mut self, path: &PathBuf) {
+    fn save_xlsx(&mut self, path: &Path) {
         let mut writer = XlsxWriter::new();
 
         let charts = self.chart_windows.all_charts();
@@ -926,7 +1037,7 @@ impl SpreadsheetApp {
 
         match writer.save_with_charts(path, &charts) {
             Ok(()) => {
-                self.current_file = Some(path.clone());
+                self.current_file = Some(path.to_path_buf());
                 self.modified = false;
                 let sheet_count = self.sheet_names.len();
                 self.set_status(&format!(
@@ -960,19 +1071,13 @@ impl SpreadsheetApp {
         self.set_status("Chart updated");
     }
 
-    /// Remove a chart
-    fn remove_chart(&mut self, id: ChartId) {
-        self.chart_windows.remove_chart(id);
-        self.chart_data_resolver.invalidate_all();
-        self.modified = true;
-        self.set_status("Chart removed");
-    }
-
     /// Update chart data from spreadsheet cells
     fn update_chart_data(&mut self, id: ChartId) {
         if let Some(window) = self.chart_windows.get_chart(id) {
             let chart = window.chart.clone();
-            let data = self.chart_data_resolver.get_chart_data(&chart, &self.engine);
+            let data = self
+                .chart_data_resolver
+                .get_chart_data(&chart, &self.engine);
             if let Some(window) = self.chart_windows.get_chart_mut(id) {
                 window.set_data(data);
             }
@@ -997,7 +1102,8 @@ impl SpreadsheetApp {
         let selection_range = self.selection.primary_range();
         if selection_range.width() > 1 || selection_range.height() > 1 {
             // Multi-cell selection - use it as the data range
-            self.chart_editor.open_new_with_selection(self.current_sheet, &selection_range);
+            self.chart_editor
+                .open_new_with_selection(self.current_sheet, &selection_range);
         } else {
             // Single cell - open without pre-filled range
             self.chart_editor.open_new(self.current_sheet);
@@ -1043,7 +1149,8 @@ impl eframe::App for SpreadsheetApp {
         // Update formula bar with current cell info
         self.formula_bar.set_cell(self.selection.active);
         if !self.is_editing() {
-            self.formula_bar.set_content(self.get_cell_formula_or_value(self.selection.active));
+            self.formula_bar
+                .set_content(self.get_cell_formula_or_value(self.selection.active));
         }
 
         // Track if formula bar has focus
@@ -1075,11 +1182,17 @@ impl eframe::App for SpreadsheetApp {
                     let can_undo = self.undo_history.can_undo();
                     let can_redo = self.undo_history.can_redo();
 
-                    if ui.add_enabled(can_undo, egui::Button::new("Undo (Cmd+Z)")).clicked() {
+                    if ui
+                        .add_enabled(can_undo, egui::Button::new("Undo (Cmd+Z)"))
+                        .clicked()
+                    {
                         self.undo();
                         ui.close_menu();
                     }
-                    if ui.add_enabled(can_redo, egui::Button::new("Redo (Cmd+Shift+Z)")).clicked() {
+                    if ui
+                        .add_enabled(can_redo, egui::Button::new("Redo (Cmd+Shift+Z)"))
+                        .clicked()
+                    {
                         self.redo();
                         ui.close_menu();
                     }
@@ -1251,14 +1364,14 @@ impl eframe::App for SpreadsheetApp {
             }
 
             // Escape to close help
-            if ctx.input(|i| i.key_pressed(Key::Escape)) {
-                if self.help_panel.visible {
-                    self.help_panel.visible = false;
-                }
+            if ctx.input(|i| i.key_pressed(Key::Escape)) && self.help_panel.visible {
+                self.help_panel.visible = false;
             }
 
             // Delete to clear cell (with undo support)
-            if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace)) && !self.is_editing() {
+            if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace))
+                && !self.is_editing()
+            {
                 let coord = self.selection.active;
                 self.set_cell_content(coord, "");
             }
@@ -1279,7 +1392,10 @@ impl eframe::App for SpreadsheetApp {
             self.undo();
         }
         // Redo: Cmd+Shift+Z or Cmd+Y
-        if ctx.input(|i| i.modifiers.command && (i.modifiers.shift && i.key_pressed(Key::Z) || i.key_pressed(Key::Y))) {
+        if ctx.input(|i| {
+            i.modifiers.command
+                && (i.modifiers.shift && i.key_pressed(Key::Z) || i.key_pressed(Key::Y))
+        }) {
             self.redo();
         }
 
@@ -1314,7 +1430,8 @@ impl eframe::App for SpreadsheetApp {
             if let Some(coord) = grid_response.drag_to {
                 // Extend selection while dragging
                 self.selection.extend_to(coord);
-                self.scroll.scroll_to_cell(coord, &self.grid_config, viewport_size);
+                self.scroll
+                    .scroll_to_cell(coord, &self.grid_config, viewport_size);
             }
 
             // Handle grid clicks (non-drag single click)
@@ -1325,7 +1442,8 @@ impl eframe::App for SpreadsheetApp {
                     self.confirm_edit(false, false);
                 }
                 self.selection.move_to(coord);
-                self.scroll.scroll_to_cell(coord, &self.grid_config, viewport_size);
+                self.scroll
+                    .scroll_to_cell(coord, &self.grid_config, viewport_size);
                 // Request focus on click
                 let grid_id = egui::Id::new("spreadsheet_grid");
                 ctx.memory_mut(|m| m.request_focus(grid_id));
@@ -1340,11 +1458,9 @@ impl eframe::App for SpreadsheetApp {
 
             // Handle F2/Enter to edit (only when formula bar doesn't have focus)
             if !formula_bar_has_focus {
-                if grid_response.edit_cell.is_some() {
-                    if !self.is_editing() {
-                        // Start editing - FSM will handle focus in next pre-render
-                        self.start_editing(None);
-                    }
+                if grid_response.edit_cell.is_some() && !self.is_editing() {
+                    // Start editing - FSM will handle focus in next pre-render
+                    self.start_editing(None);
                 }
 
                 // Handle direct text input (start editing with that character)
@@ -1426,7 +1542,9 @@ mod tests {
             .parse(&displayed)
             .expect("formula bar text must re-parse");
 
-        let snapshot = app.get_cell_content_string(coord).expect("formula snapshot");
+        let snapshot = app
+            .get_cell_content_string(coord)
+            .expect("formula snapshot");
         assert_eq!(snapshot, "=SUM(A1:A2)");
         FormulaParser::new()
             .parse(&snapshot)
@@ -1467,7 +1585,10 @@ mod tests {
         app.load_file(&path);
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(app.engine.get_formula(0, a3).as_deref(), Some("=SUM(A1:A2)"));
+        assert_eq!(
+            app.engine.get_formula(0, a3).as_deref(),
+            Some("=SUM(A1:A2)")
+        );
         assert_eq!(app.engine.get_value(0, a3), CellResult::Value(3.0));
     }
 
@@ -1496,7 +1617,10 @@ mod tests {
         app.load_file(&path);
         let _ = std::fs::remove_file(&path);
 
-        assert_eq!(app.engine.get_formula(0, a3).as_deref(), Some("=SUM(A1:A2)"));
+        assert_eq!(
+            app.engine.get_formula(0, a3).as_deref(),
+            Some("=SUM(A1:A2)")
+        );
         assert_eq!(app.engine.get_value(0, a3), CellResult::Value(3.0));
     }
 
@@ -1506,11 +1630,9 @@ mod tests {
         let mut app = SpreadsheetApp::new();
         app.new_workbook();
         let a1 = CellCoord::new(0, 0);
-        app.engine
-            .set_value(0, a1, CellValueInput::Number(1.0));
+        app.engine.set_value(0, a1, CellValueInput::Number(1.0));
         app.add_sheet();
-        app.engine
-            .set_value(1, a1, CellValueInput::Number(2.0));
+        app.engine.set_value(1, a1, CellValueInput::Number(2.0));
         app.delete_sheet(0);
 
         assert_eq!(app.sheet_names.len(), 1);
