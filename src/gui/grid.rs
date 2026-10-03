@@ -13,6 +13,51 @@ pub const DEFAULT_ROW_HEIGHT: f32 = 22.0;
 pub const HEADER_WIDTH: f32 = 50.0;
 pub const HEADER_HEIGHT: f32 = 24.0;
 
+/// Format a number like Excel's General format: as many decimals as fit in
+/// `max_len` characters, switching to scientific notation when even the
+/// integer part does not fit.
+pub fn format_general(n: f64, max_len: usize) -> String {
+    if n == 0.0 || !n.is_finite() {
+        return if n.is_nan() {
+            "#NUM!".into()
+        } else {
+            "0".into()
+        };
+    }
+    let trim = |s: String| -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
+    };
+
+    // Plain notation, unless the number is too small to show any digit.
+    if n.abs() >= 1e-9 || max_len >= 12 {
+        for decimals in (0..=10).rev() {
+            let s = trim(format!("{n:.decimals$}"));
+            if s.len() <= max_len && s != "0" && s != "-0" {
+                return s;
+            }
+        }
+    }
+
+    // Scientific, e.g. 1.23457E+15.
+    let mut fallback = String::new();
+    for digits in (0..=5).rev() {
+        let raw = format!("{n:.digits$E}");
+        let (mantissa, exp) = raw.split_once('E').unwrap_or((&raw, "0"));
+        let exp: i32 = exp.parse().unwrap_or(0);
+        let sign = if exp < 0 { '-' } else { '+' };
+        let s = format!("{}E{sign}{:02}", trim(mantissa.to_string()), exp.abs());
+        if s.len() <= max_len {
+            return s;
+        }
+        fallback = s;
+    }
+    fallback
+}
+
 /// Configuration for the grid widget
 pub struct GridConfig {
     pub column_widths: Vec<f32>,
@@ -430,15 +475,10 @@ impl<'a> SpreadsheetGrid<'a> {
         let (text, color, align) = match value {
             CellResult::Empty => return,
             CellResult::Value(n) => {
-                // Format number nicely
-                let s = if n.fract() == 0.0 && n.abs() < 1e10 {
-                    format!("{}", *n as i64)
-                } else {
-                    format!("{:.10}", n)
-                        .trim_end_matches('0')
-                        .trim_end_matches('.')
-                        .to_string()
-                };
+                let digit_width =
+                    painter.fonts(|f| f.glyph_width(&egui::FontId::proportional(13.0), '0'));
+                let max_len = (text_rect.width() / digit_width).floor().max(1.0) as usize;
+                let s = format_general(*n, max_len);
                 (s, self.theme.text_number, egui::Align::Max) // Right align numbers
             }
             CellResult::Text(s) => {
@@ -717,4 +757,27 @@ fn column_to_letter(col: u32) -> String {
         n /= 26;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_general;
+
+    #[test]
+    fn general_format_fits_width() {
+        assert_eq!(format_general(1391.6666666666667, 11), "1391.666667");
+        assert_eq!(format_general(0.26, 11), "0.26");
+        assert_eq!(format_general(27400.0, 11), "27400");
+        assert_eq!(format_general(-2.5, 11), "-2.5");
+        assert_eq!(format_general(0.1 + 0.2, 11), "0.3");
+        assert_eq!(format_general(0.0, 11), "0");
+    }
+
+    #[test]
+    fn general_format_switches_to_scientific() {
+        assert_eq!(format_general(1e15, 11), "1E+15");
+        assert_eq!(format_general(123456789012345.0, 11), "1.23457E+14");
+        assert_eq!(format_general(1.5e-12, 11), "1.5E-12");
+        assert_eq!(format_general(12345678901.0, 11), "12345678901");
+    }
 }

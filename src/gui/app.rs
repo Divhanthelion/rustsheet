@@ -9,11 +9,20 @@ use std::path::{Path, PathBuf};
 use super::chart_editor::ChartEditor;
 use super::chart_widget::ChartWindowManager;
 use super::formula_bar::FormulaBar;
-use super::grid::{GridConfig, NavigationKey, ScrollState, SpreadsheetGrid};
+use super::grid::{
+    GridConfig, HEADER_HEIGHT, HEADER_WIDTH, NavigationKey, ScrollState, SpreadsheetGrid,
+};
 use super::help_panel::HelpPanel;
 use super::selection::Selection;
 use super::sheet_tabs::SheetTabs;
 use super::theme::Theme;
+
+/// Modifier key name shown in menu shortcut hints.
+const MOD: &str = if cfg!(target_os = "macos") {
+    "Cmd"
+} else {
+    "Ctrl"
+};
 
 /// Input mode FSM - decouples input handling from render order
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -162,6 +171,10 @@ pub struct SpreadsheetApp {
     current_file: Option<PathBuf>,
     /// Whether the document has unsaved changes
     modified: bool,
+    /// Last title sent to the window
+    window_title: String,
+    /// Screen position of cell A1's top-left corner, from the last frame
+    grid_origin: Option<egui::Pos2>,
     /// Status message to display
     status_message: Option<(String, std::time::Instant)>,
     /// Undo/redo history
@@ -205,6 +218,8 @@ impl SpreadsheetApp {
             max_col: 25,
             current_file: None,
             modified: false,
+            window_title: String::new(),
+            grid_origin: None,
             status_message: None,
             undo_history: UndoHistory::default(),
             chart_windows: ChartWindowManager::new(),
@@ -782,6 +797,47 @@ impl SpreadsheetApp {
         self.modified = true;
     }
 
+    /// Ask whether to save unsaved changes. Returns true when it is safe to
+    /// discard the current workbook (saved, or the user chose not to save).
+    fn confirm_discard(&mut self) -> bool {
+        use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+
+        if !self.modified {
+            return true;
+        }
+        let name = self.document_name();
+        let choice = MessageDialog::new()
+            .set_level(MessageLevel::Warning)
+            .set_title("RustSheet")
+            .set_description(format!("Do you want to save changes to {name}?"))
+            .set_buttons(MessageButtons::YesNoCancel)
+            .show();
+        match choice {
+            MessageDialogResult::Yes => {
+                self.save_file();
+                // Still modified means the save was cancelled or failed.
+                !self.modified
+            }
+            MessageDialogResult::No => true,
+            _ => false,
+        }
+    }
+
+    /// File name shown in the title bar and prompts.
+    fn document_name(&self) -> String {
+        self.current_file
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Untitled".to_string())
+    }
+
+    fn request_new_workbook(&mut self) {
+        if self.confirm_discard() {
+            self.new_workbook();
+        }
+    }
+
     /// Create a new empty workbook
     fn new_workbook(&mut self) {
         self.engine = CalcEngine::new();
@@ -816,18 +872,23 @@ impl SpreadsheetApp {
     fn open_file(&mut self) {
         use rfd::FileDialog;
 
+        if !self.confirm_discard() {
+            return;
+        }
+
         // The first filter is the one selected by default, so lead with every
         // supported format rather than hiding .xlsx behind a CSV-only view.
-        let mut supported: Vec<&str> = Vec::new();
-        #[cfg(feature = "xlsx")]
-        supported.extend(["xlsx", "xls"]);
-        #[cfg(feature = "csv")]
-        supported.push("csv");
+        let supported = [
+            #[cfg(feature = "xlsx")]
+            "xlsx",
+            #[cfg(feature = "csv")]
+            "csv",
+        ];
 
         let mut dialog = FileDialog::new().add_filter("Spreadsheets", &supported);
         #[cfg(feature = "xlsx")]
         {
-            dialog = dialog.add_filter("Excel Files", &["xlsx", "xls"]);
+            dialog = dialog.add_filter("Excel Files", &["xlsx"]);
         }
         #[cfg(feature = "csv")]
         {
@@ -1052,7 +1113,15 @@ impl SpreadsheetApp {
     }
 
     /// Add a new chart
-    fn add_chart(&mut self, chart: ChartDefinition) {
+    fn add_chart(&mut self, mut chart: ChartDefinition) {
+        // Place a new chart just right of its data, like Excel does.
+        let ranges = chart.dependent_ranges();
+        if let (Some(top), Some(right)) = (
+            ranges.iter().map(|r| r.start.row.min(r.end.row)).min(),
+            ranges.iter().map(|r| r.start.col.max(r.end.col)).max(),
+        ) {
+            chart.overlay_area.anchor_cell = (top, right + 1);
+        }
         let id = chart.id;
         self.chart_windows.add_chart(chart.clone());
         self.update_chart_data(id);
@@ -1120,6 +1189,20 @@ impl SpreadsheetApp {
 
 impl eframe::App for SpreadsheetApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.confirm_discard() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        }
+
+        let title = format!(
+            "{}{} - RustSheet",
+            self.document_name(),
+            if self.modified { "*" } else { "" }
+        );
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
+        }
+
         // ======================================================================
         // 1. STATE TRANSITION HANDLING (Pre-Render)
         // Process InputMode transitions BEFORE any UI rendering to ensure
@@ -1160,15 +1243,15 @@ impl eframe::App for SpreadsheetApp {
         TopBottomPanel::top("toolbar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New (Cmd+N)").clicked() {
-                        self.new_workbook();
+                    if ui.button(format!("New ({MOD}+N)")).clicked() {
+                        self.request_new_workbook();
                         ui.close_menu();
                     }
-                    if ui.button("Open (Cmd+O)").clicked() {
+                    if ui.button(format!("Open ({MOD}+O)")).clicked() {
                         self.open_file();
                         ui.close_menu();
                     }
-                    if ui.button("Save (Cmd+S)").clicked() {
+                    if ui.button(format!("Save ({MOD}+S)")).clicked() {
                         self.save_file();
                         ui.close_menu();
                     }
@@ -1183,14 +1266,14 @@ impl eframe::App for SpreadsheetApp {
                     let can_redo = self.undo_history.can_redo();
 
                     if ui
-                        .add_enabled(can_undo, egui::Button::new("Undo (Cmd+Z)"))
+                        .add_enabled(can_undo, egui::Button::new(format!("Undo ({MOD}+Z)")))
                         .clicked()
                     {
                         self.undo();
                         ui.close_menu();
                     }
                     if ui
-                        .add_enabled(can_redo, egui::Button::new("Redo (Cmd+Shift+Z)"))
+                        .add_enabled(can_redo, egui::Button::new(format!("Redo ({MOD}+Y)")))
                         .clicked()
                     {
                         self.redo();
@@ -1282,7 +1365,24 @@ impl eframe::App for SpreadsheetApp {
         self.help_panel.show(ctx);
 
         // Chart windows
-        let chart_response = self.chart_windows.show(ctx);
+        // Charts are placed relative to the grid, which is laid out below;
+        // skip the first frame until its position is known.
+        let chart_response = match self.grid_origin {
+            Some(origin) => {
+                let (config, scroll) = (&self.grid_config, &self.scroll);
+                self.chart_windows.show(ctx, |(row, col)| {
+                    origin
+                        + Vec2::new(
+                            config.column_x(col) - scroll.offset_x,
+                            config.row_y(row) - scroll.offset_y,
+                        )
+                })
+            }
+            None => {
+                ctx.request_repaint();
+                Default::default()
+            }
+        };
 
         // Handle chart window actions
         if let Some(edit_id) = chart_response.edit_requested {
@@ -1377,7 +1477,7 @@ impl eframe::App for SpreadsheetApp {
             }
         }
 
-        // Cmd+key shortcuts work globally
+        // Ctrl (Cmd on macOS) shortcuts work globally
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::S)) {
             self.save_file();
         }
@@ -1385,13 +1485,13 @@ impl eframe::App for SpreadsheetApp {
             self.open_file();
         }
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::N)) {
-            self.new_workbook();
+            self.request_new_workbook();
         }
-        // Undo: Cmd+Z
+        // Undo: Ctrl+Z
         if ctx.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::Z)) {
             self.undo();
         }
-        // Redo: Cmd+Shift+Z or Cmd+Y
+        // Redo: Ctrl+Shift+Z or Ctrl+Y
         if ctx.input(|i| {
             i.modifiers.command
                 && (i.modifiers.shift && i.key_pressed(Key::Z) || i.key_pressed(Key::Y))
@@ -1402,6 +1502,8 @@ impl eframe::App for SpreadsheetApp {
         // Main grid area
         CentralPanel::default().show(ctx, |ui| {
             let viewport_size = ui.available_size();
+            self.grid_origin =
+                Some(ui.available_rect_before_wrap().min + Vec2::new(HEADER_WIDTH, HEADER_HEIGHT));
 
             let grid = SpreadsheetGrid::new(
                 self.current_sheet,
@@ -1508,19 +1610,48 @@ fn formula_bar_text(stored: &str) -> String {
 /// Run the application (native only)
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run() -> Result<(), eframe::Error> {
+    run_with_file(None)
+}
+
+/// Run the application, opening `path` at startup (e.g. from a file association).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_with_file(path: Option<PathBuf>) -> Result<(), eframe::Error> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([1200.0, 800.0])
+        .with_min_inner_size([600.0, 400.0])
+        .with_maximized(true)
+        .with_title("RustSheet");
+    if let Some(icon) = window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([600.0, 400.0])
-            .with_title("RustSheet"),
+        viewport,
         ..Default::default()
     };
 
     eframe::run_native(
         "RustSheet",
         options,
-        Box::new(|_cc| Ok(Box::new(SpreadsheetApp::new()))),
+        Box::new(move |_cc| {
+            let mut app = SpreadsheetApp::new();
+            if let Some(path) = path {
+                app.load_file(&path);
+            }
+            Ok(Box::new(app))
+        }),
     )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn window_icon() -> Option<egui::IconData> {
+    let image = image::load_from_memory(include_bytes!("../../assets/icon-256.png")).ok()?;
+    let rgba = image.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some(egui::IconData {
+        rgba: rgba.into_raw(),
+        width,
+        height,
+    })
 }
 
 #[cfg(test)]

@@ -237,9 +237,9 @@ impl HelpPanel {
         ui.vertical_centered(|ui| {
             ui.add_space(20.0);
             ui.heading(RichText::new("RustSheet").size(24.0).strong());
-            ui.label("High-Performance Spreadsheet Engine");
+            ui.label("A fast spreadsheet with an Excel-compatible formula engine");
             ui.add_space(10.0);
-            ui.label("Version 0.1.0");
+            ui.label(concat!("Version ", env!("CARGO_PKG_VERSION")));
             ui.add_space(20.0);
             ui.separator();
             ui.add_space(10.0);

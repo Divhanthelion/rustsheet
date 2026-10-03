@@ -1,0 +1,13 @@
+# Stand-in for the `webbrowser` crate, which egui-winit always enables.
+# The real crate launches the browser with CreateProcess/cmd.exe, which the
+# Windows App Certification Kit flags as a blocked-executable reference.
+# RustSheet has no hyperlinks, so this stand-in is a no-op. See src/lib.rs.
+[package]
+name = "webbrowser"
+version = "1.0.6"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+path = "src/lib.rs"
