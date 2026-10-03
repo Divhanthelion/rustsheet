@@ -43,6 +43,7 @@ pub(super) enum Command {
     EditNote,
     DeleteNote,
     DataValidation,
+    ConditionalFormatting,
     OpenList,
     Format(FormatAction),
     Theme(ThemeChoice),
@@ -218,6 +219,14 @@ impl SpreadsheetApp {
                     "Merge & Center",
                     "",
                     Command::Format(FormatAction::Merge),
+                    &mut out,
+                );
+                ui.separator();
+                item(
+                    ui,
+                    "Conditional Formatting...",
+                    "",
+                    Command::ConditionalFormatting,
                     &mut out,
                 );
                 ui.separator();
@@ -457,6 +466,7 @@ impl SpreadsheetApp {
             Command::EditNote => self.open_note_editor(),
             Command::DeleteNote => self.delete_note(),
             Command::DataValidation => self.open_validation_dialog(),
+            Command::ConditionalFormatting => self.open_conditional_dialog(),
             Command::OpenList => {
                 let a = self.selection.active;
                 let c = &self.grid_config;

@@ -73,6 +73,7 @@ impl SpreadsheetApp {
         let mut delete = false;
         let title = format!("Note on {}", editor.coord.to_a1());
         egui::Window::new(title)
+            .order(egui::Order::Foreground)
             .id(egui::Id::new("note_editor"))
             .collapsible(false)
             .resizable(false)

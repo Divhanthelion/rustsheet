@@ -635,4 +635,106 @@ mod tests {
         assert_eq!(w.error_message, "Use 1 to 100");
         assert_eq!(find(r("C2:C20")).formula1, "Lists!$A$1:$A$3");
     }
+
+    #[test]
+    fn conditional_formats_round_trip() {
+        use crate::cell::CellRange;
+        use crate::format::Rgb;
+        use crate::format::conditional::{
+            AverageRule, CfRule, CfStyle, Cfvo, ConditionalFormat, TextRule,
+        };
+        use crate::format::validation::CompareOp;
+        let r = |a1: &str| CellRange::from_a1(a1).unwrap();
+        let mut engine = CalcEngine::new();
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(1.0));
+        let bold_red = CfStyle {
+            bold: Some(true),
+            number_format: Some("0.0%".into()),
+            ..CfStyle::preset(0)
+        };
+        let rules = vec![
+            ConditionalFormat {
+                ranges: vec![r("A1:A10"), r("C1:C10")],
+                rule: CfRule::CellIs {
+                    op: CompareOp::Between,
+                    formula1: "1".into(),
+                    formula2: Some("$B$1".into()),
+                    style: bold_red.clone(),
+                },
+                stop_if_true: true,
+            },
+            ConditionalFormat {
+                ranges: vec![r("A1:A10")],
+                rule: CfRule::Text {
+                    rule: TextRule::BeginsWith,
+                    text: "Q\"1".into(),
+                    style: CfStyle::preset(1),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("B1:B10")],
+                rule: CfRule::Top {
+                    bottom: true,
+                    rank: 10,
+                    percent: true,
+                    style: CfStyle::preset(2),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("D1:D10")],
+                rule: CfRule::Average {
+                    rule: AverageRule::EqualOrAbove,
+                    style: CfStyle::preset(3),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("E1:E10")],
+                rule: CfRule::Expression {
+                    formula: "$A1>AVERAGE($A$1:$A$10)".into(),
+                    style: CfStyle::preset(0),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("F1:F10")],
+                rule: CfRule::ColorScale {
+                    stops: vec![
+                        (Cfvo::min(), Rgb(0xF8, 0x69, 0x6B)),
+                        (Cfvo::percentile(50), Rgb(0xFF, 0xEB, 0x84)),
+                        (Cfvo::max(), Rgb(0x63, 0xBE, 0x7B)),
+                    ],
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("G1:G10")],
+                rule: CfRule::DataBar {
+                    min: Cfvo::min(),
+                    max: Cfvo::max(),
+                    color: Rgb(0x5A, 0x8A, 0xC6),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("H1:H10")],
+                rule: CfRule::Duplicate {
+                    unique: true,
+                    style: CfStyle::preset(1),
+                },
+                stop_if_true: false,
+            },
+        ];
+        engine.formatting_mut(0).conditional = rules.clone();
+
+        let path = temp_xlsx("conditional");
+        let mut writer = XlsxWriter::new();
+        writer.add_engine_sheet("Main", &engine, 0).unwrap();
+        writer.save(&path).unwrap();
+        let read = super::read_formatting_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read[0].1.conditional, rules);
+    }
 }

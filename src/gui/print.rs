@@ -173,10 +173,15 @@ pub fn layout(
 
     let formatting = engine.formatting(sheet);
     let default_format = CellFormat::default();
-    let format_of = |c: CellCoord| {
-        formatting
+    // Conditional formatting prints as shown.
+    let format_of = |c: CellCoord| -> std::borrow::Cow<CellFormat> {
+        let base = formatting
             .and_then(|f| f.effective(c))
-            .unwrap_or(&default_format)
+            .unwrap_or(&default_format);
+        match engine.conditional_look(sheet, c) {
+            Some(look) => std::borrow::Cow::Owned(look.apply(base)),
+            None => std::borrow::Cow::Borrowed(base),
+        }
     };
     let merge_of = |c: CellCoord| formatting.and_then(|f| f.merge_at(c));
 
@@ -250,6 +255,22 @@ pub fn layout(
                             color: fill,
                         });
                     }
+                    if let Some((fraction, color)) = engine
+                        .conditional_look(sheet, owner)
+                        .and_then(|l| l.bar)
+                        .filter(|_| owner == coord)
+                    {
+                        let inset = 1.5 * scale;
+                        page.ops.push(Op::Fill {
+                            rect: Rect {
+                                x: cell.x + inset,
+                                y: cell.y + inset,
+                                w: ((cell.w - 2.0 * inset) * fraction as f32).max(0.0),
+                                h: cell.h - 2.0 * inset,
+                            },
+                            color: crate::format::conditional::mix(color, Rgb::WHITE, 0.3),
+                        });
+                    }
                     if setup.gridlines && format.fill.is_none() {
                         if merge.is_none_or(|m| c == m.end.col) {
                             lines.push(((cell.right(), cell.y), (cell.right(), cell.bottom())));
@@ -308,7 +329,7 @@ pub fn layout(
                 let size = DEFAULT_FONT_SIZE.max(1) as f32 * format.font_size_or_default() as f32
                     / DEFAULT_FONT_SIZE as f32
                     * scale;
-                let Some((mut text, number, format_color)) = cell_text(&value, format) else {
+                let Some((mut text, number, format_color)) = cell_text(&value, &format) else {
                     continue;
                 };
                 let inner = rect.w - 2.0 * PADDING;

@@ -573,3 +573,98 @@ fn typed_entries_are_checked_against_validation() {
     app.open_list_popup(egui::Pos2::ZERO);
     assert_eq!(app.list_popup.as_ref().unwrap().items, vec!["Yes", "No"]);
 }
+
+#[test]
+fn conditional_formatting_from_the_dialog() {
+    use crate::format::validation::CompareOp;
+    let mut app = app();
+    for (a1, v) in [("A1", "5"), ("A2", "50"), ("A3", "500")] {
+        put(&mut app, a1, v);
+    }
+    select(&mut app, "A1", "A3");
+    app.open_conditional_dialog();
+    let d = app.cf_dialog.as_mut().unwrap();
+    let editor = d.editor.as_mut().expect("starts with a new rule");
+    assert_eq!(editor.applies_to, "A1:A3");
+    editor.op = CompareOp::Greater;
+    editor.value1 = "10".into();
+    let rule = editor.build().unwrap();
+    app.cf_dialog = None;
+    app.apply_conditional(vec![rule]);
+
+    let look = |app: &SpreadsheetApp, a1: &str| app.engine.conditional_look(0, at(a1));
+    assert!(look(&app, "A1").is_none());
+    assert!(look(&app, "A2").is_some());
+
+    // Inserting a row above moves the rule with its cells.
+    select(&mut app, "A1", "A1");
+    app.insert_lines(Axis::Row);
+    assert!(look(&app, "A3").is_some());
+    app.undo();
+    app.undo();
+    assert!(
+        app.engine
+            .formatting(0)
+            .is_none_or(|f| f.conditional.is_empty())
+    );
+
+    // With a rule on the selection, the dialog opens on the rules list.
+    app.redo();
+    select(&mut app, "A2", "A2");
+    app.open_conditional_dialog();
+    assert!(app.cf_dialog.as_ref().unwrap().editor.is_none());
+}
+
+#[test]
+fn conditional_dialog_draws_every_rule_kind() {
+    use super::conditional_ui::RuleKind;
+    let mut app = app();
+    put(&mut app, "A1", "1");
+    select(&mut app, "A1", "A3");
+    app.open_conditional_dialog();
+    let ctx = egui::Context::default();
+    for kind in [
+        RuleKind::CellValue,
+        RuleKind::Text,
+        RuleKind::Top,
+        RuleKind::Average,
+        RuleKind::Duplicate,
+        RuleKind::Blanks,
+        RuleKind::Errors,
+        RuleKind::Formula,
+        RuleKind::TwoColorScale,
+        RuleKind::ThreeColorScale,
+        RuleKind::DataBar,
+    ] {
+        app.cf_dialog
+            .as_mut()
+            .unwrap()
+            .editor
+            .as_mut()
+            .unwrap()
+            .kind = kind;
+        let _ = ctx.run(Default::default(), |ctx| app.show_conditional_dialog(ctx));
+        assert!(app.cf_dialog.is_some());
+        let rule = app
+            .cf_dialog
+            .as_ref()
+            .unwrap()
+            .editor
+            .as_ref()
+            .unwrap()
+            .build();
+        // Kinds with a value to type say what's missing; the rest are complete.
+        let needs_input = matches!(
+            kind,
+            RuleKind::CellValue | RuleKind::Text | RuleKind::Formula
+        );
+        assert_eq!(rule.is_err(), needs_input, "{kind:?}");
+        if let Ok(rule) = rule {
+            app.cf_dialog.as_mut().unwrap().rules.push(rule);
+        }
+    }
+    // The rules list, with a sample of each.
+    app.cf_dialog.as_mut().unwrap().editor = None;
+    let _ = ctx.run(Default::default(), |ctx| app.show_conditional_dialog(ctx));
+    assert_eq!(app.cf_dialog.as_ref().unwrap().rules.len(), 8);
+}

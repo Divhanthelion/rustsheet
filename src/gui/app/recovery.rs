@@ -202,6 +202,7 @@ impl SpreadsheetApp {
         let mut choice: Option<(usize, bool)> = None;
         let mut discard_all = false;
         egui::Window::new("Recover unsaved work")
+            .order(egui::Order::Foreground)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)

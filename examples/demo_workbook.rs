@@ -6,6 +6,8 @@
 
 use rustsheet::cell::{Axis, CellRange};
 use rustsheet::format::AutoFilter;
+use rustsheet::format::conditional::{CfRule, CfStyle, Cfvo, ConditionalFormat};
+use rustsheet::format::validation::CompareOp;
 use rustsheet::prelude::*;
 use std::collections::BTreeMap;
 
@@ -132,6 +134,29 @@ fn main() {
             range: CellRange::from_a1("A2:F8").unwrap(),
             allowed: BTreeMap::new(),
         });
+        // Data bars for savings, a red-to-green scale for the savings rate.
+        f.conditional = vec![
+            ConditionalFormat {
+                ranges: vec![CellRange::from_a1("D3:D8").unwrap()],
+                rule: CfRule::DataBar {
+                    min: Cfvo::min(),
+                    max: Cfvo::max(),
+                    color: Rgb(0x63, 0x8E, 0xC6),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![CellRange::from_a1("E3:E8").unwrap()],
+                rule: CfRule::ColorScale {
+                    stops: vec![
+                        (Cfvo::min(), Rgb(0xF8, 0x69, 0x6B)),
+                        (Cfvo::percentile(50), Rgb(0xFF, 0xEB, 0x84)),
+                        (Cfvo::max(), Rgb(0x63, 0xBE, 0x7B)),
+                    ],
+                },
+                stop_if_true: false,
+            },
+        ];
     }
 
     let range = |a1: &str| CellRange::from_a1(a1).unwrap();
@@ -248,6 +273,29 @@ fn write_sales(path: &str) {
         f.column_widths.insert(0, 110.0);
         f.column_widths.insert(3, 100.0);
         f.frozen = (1, 0);
+        // Best sellers in green, small orders in red.
+        f.conditional = vec![
+            ConditionalFormat {
+                ranges: vec![CellRange::from_a1("G2:G41").unwrap()],
+                rule: CfRule::Top {
+                    bottom: false,
+                    rank: 5,
+                    percent: false,
+                    style: CfStyle::preset(2),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![CellRange::from_a1("E2:E41").unwrap()],
+                rule: CfRule::CellIs {
+                    op: CompareOp::Less,
+                    formula1: "10".into(),
+                    formula2: None,
+                    style: CfStyle::preset(0),
+                },
+                stop_if_true: false,
+            },
+        ];
         let mut allowed = BTreeMap::new();
         allowed.insert(1, BTreeSet::from(["North".to_string(), "West".to_string()]));
         f.filter = Some(AutoFilter {

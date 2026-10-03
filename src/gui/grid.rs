@@ -8,8 +8,8 @@
 use super::fonts::FontLibrary;
 use super::selection::Selection;
 use super::theme::Theme;
-use crate::calc::CalcEngine;
 use crate::calc::CellResult;
+use crate::calc::{CalcEngine, CfLook};
 use crate::cell::{Axis, CellCoord, CellError, CellRange, MAX_COL, MAX_ROW};
 use crate::format::{
     CellFormat, DEFAULT_FONT_SIZE, HAlign, Rgb, SheetFormatting, VAlign, format_general,
@@ -220,6 +220,27 @@ fn cell_text(value: &CellResult, format: &CellFormat, max_len: usize) -> Option<
 /// A cell's value as shown on screen, e.g. for copying to other apps.
 pub fn display_text(value: &CellResult, format: Option<&CellFormat>) -> String {
     crate::format::display_text(value, format)
+}
+
+/// A conditional-format data bar: `fraction` of the cell, fading into the
+/// background to the right like Excel's gradient bars.
+fn draw_data_bar(painter: &egui::Painter, cell: Rect, fraction: f64, color: Rgb, bg: Color32) {
+    let inner = cell.shrink2(Vec2::new(2.0, 2.0));
+    let bar = Rect::from_min_size(
+        inner.min,
+        Vec2::new(inner.width() * fraction as f32, inner.height()),
+    );
+    let bg = Rgb(bg.r(), bg.g(), bg.b());
+    let solid = to_color32(crate::format::conditional::mix(color, bg, 0.15));
+    let faded = to_color32(crate::format::conditional::mix(color, bg, 0.85));
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(bar.left_top(), solid);
+    mesh.colored_vertex(bar.right_top(), faded);
+    mesh.colored_vertex(bar.right_bottom(), faded);
+    mesh.colored_vertex(bar.left_bottom(), solid);
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    painter.add(mesh);
 }
 
 /// The font a cell draws with, and whether bold or italic must be faked
@@ -980,7 +1001,7 @@ impl<'a> SpreadsheetGrid<'a> {
                     cols.iter().filter(|l| l.frozen == frozen_col).collect();
                 // Borders are drawn last so neighboring fills don't cover them.
                 let mut borders: Vec<[Pos2; 2]> = Vec::new();
-                let mut texts: Vec<(CellCoord, Rect)> = Vec::new();
+                let mut texts: Vec<(CellCoord, Rect, Option<CfLook>)> = Vec::new();
                 let mut drawn_merges: HashSet<(CellCoord, CellCoord)> = HashSet::new();
 
                 // Pass 1: backgrounds, grid lines, borders.
@@ -995,7 +1016,11 @@ impl<'a> SpreadsheetGrid<'a> {
                         // A merge looks like its top-left cell.
                         let owner = merge.map_or(coord, |m| m.start);
                         let format = format_of(owner);
-                        let fill = format.fill;
+                        let look = self.engine.conditional_look(self.sheet_index, owner);
+                        let fill = look
+                            .as_ref()
+                            .and_then(|l| l.style.fill.or(l.scale_fill))
+                            .or(format.fill);
                         let bg = match fill {
                             Some(fill) => to_color32(fill),
                             None if (row.index + col.index) % 2 == 0 => self.theme.cell_bg,
@@ -1037,10 +1062,10 @@ impl<'a> SpreadsheetGrid<'a> {
                         match merge {
                             Some(m) => {
                                 if drawn_merges.insert((m.start, m.end)) {
-                                    texts.push((m.start, self.range_rect(m)));
+                                    texts.push((m.start, self.range_rect(m), look));
                                 }
                             }
-                            None => texts.push((coord, rect)),
+                            None => texts.push((coord, rect, look)),
                         }
                     }
                 }
@@ -1051,7 +1076,10 @@ impl<'a> SpreadsheetGrid<'a> {
                 let filter_header = formatting
                     .and_then(|f| f.filter.as_ref())
                     .map(|f| (f.range.start.row, f.range.start.col..=f.range.end.col));
-                for (coord, mut rect) in texts {
+                for (coord, mut rect, look) in texts {
+                    if let Some((fraction, color)) = look.as_ref().and_then(|l| l.bar) {
+                        draw_data_bar(&p, rect, fraction, color, self.theme.cell_bg);
+                    }
                     if filter_header
                         .as_ref()
                         .is_some_and(|(row, cols)| *row == coord.row && cols.contains(&coord.col))
@@ -1062,7 +1090,8 @@ impl<'a> SpreadsheetGrid<'a> {
                     if matches!(value, CellResult::Empty) {
                         continue;
                     }
-                    let format = format_of(coord);
+                    let styled = look.as_ref().map(|l| l.apply(format_of(coord)));
+                    let format = styled.as_ref().unwrap_or_else(|| format_of(coord));
                     let merged = merge_of(coord).is_some();
                     let room = if merged {
                         rect

@@ -3,7 +3,7 @@ use crate::cell::{CellCoord, CellError};
 use crate::format::{CellFormat, SheetFormatting};
 use crate::formula::{BinaryOp, Expr, FormulaParser, UnaryOp};
 use salsa;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -119,6 +119,10 @@ pub struct CalcEngine {
     sheet_names: Vec<String>,
     /// Cell formats and row/column sizes, by sheet
     formatting: HashMap<u32, SheetFormatting>,
+    /// Bumped on every change to inputs or formatting
+    revision: Cell<u64>,
+    /// Conditional formatting statistics by (sheet, rule index)
+    cf_cache: super::conditional::StatsCache,
 }
 
 impl CalcEngine {
@@ -134,7 +138,23 @@ impl CalcEngine {
             functions: BuiltinFunctions::new(),
             sheet_names: vec!["Sheet1".to_string()],
             formatting: HashMap::new(),
+            revision: Cell::new(0),
+            cf_cache: Default::default(),
         }
+    }
+
+    /// Changes whenever any cell or format changes, for caches of derived
+    /// state.
+    pub fn revision(&self) -> u64 {
+        self.revision.get()
+    }
+
+    fn touch(&self) {
+        self.revision.set(self.revision.get().wrapping_add(1));
+    }
+
+    pub(super) fn cf_cache(&self) -> &super::conditional::StatsCache {
+        &self.cf_cache
     }
 
     /// Set a cell's value (not a formula)
@@ -396,6 +416,7 @@ impl CalcEngine {
     /// Invalidate a cell and all its dependents
     fn invalidate(&mut self, sheet: u32, coord: CellCoord) {
         // Use a worklist algorithm to avoid stack overflow on cyclic dependencies
+        self.touch();
         let mut to_invalidate = vec![(sheet, coord)];
         let mut invalidated = HashSet::new();
 
@@ -459,6 +480,7 @@ impl CalcEngine {
             return;
         }
         self.sheet_names = names;
+        self.touch();
         self.rebind_formulas();
     }
 
@@ -491,6 +513,7 @@ impl CalcEngine {
     }
 
     pub fn formatting_mut(&mut self, sheet: u32) -> &mut SheetFormatting {
+        self.touch();
         self.formatting.entry(sheet).or_default()
     }
 
@@ -512,6 +535,7 @@ impl CalcEngine {
     }
 
     pub(crate) fn all_formatting_mut(&mut self) -> &mut HashMap<u32, SheetFormatting> {
+        self.touch();
         &mut self.formatting
     }
 
@@ -524,6 +548,7 @@ impl CalcEngine {
     /// that put cells back afterwards.
     pub(crate) fn take_all_inputs(&mut self) -> HashMap<(u32, CellCoord), CellInput> {
         let inputs = std::mem::take(&mut self.inputs);
+        self.touch();
         self.formulas.clear();
         self.dependents.clear();
         self.dependencies.clear();
@@ -534,6 +559,7 @@ impl CalcEngine {
 
     /// Drop one sheet's cells and shift higher sheet keys down by one.
     pub fn remove_sheet_and_shift(&mut self, index: u32) {
+        self.touch();
         self.formatting = std::mem::take(&mut self.formatting)
             .into_iter()
             .filter(|&(sheet, _)| sheet != index)

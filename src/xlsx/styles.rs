@@ -5,6 +5,10 @@
 
 use crate::cell::CellCoord;
 use crate::cell::CellRange;
+use crate::format::conditional::{
+    AverageRule, CfRule, CfStyle, Cfvo, CfvoKind, ConditionalFormat, TextRule,
+};
+use crate::format::validation::CompareOp;
 use crate::format::{
     AutoFilter, Borders, CellFormat, HAlign, Rgb, SheetFormatting, VAlign, builtin_number_format,
 };
@@ -90,6 +94,7 @@ pub fn read_formatting<R: Read + Seek>(
         };
         if let Some(xml) = read(&path) {
             formatting.validations = parse_validations(&xml)?;
+            formatting.conditional = parse_conditional(&xml, &styles.dxfs, &theme)?;
         }
         if let Some((_, xml)) = read_rel(&mut read, &path, "/comments") {
             formatting.notes = parse_comments(&xml)?;
@@ -212,7 +217,7 @@ pub(super) fn parse_sqref(s: &str) -> Vec<CellRange> {
 /// extension Excel uses for lists on other sheets
 /// (`<x14:dataValidation><x14:formula1><xm:f>...</xm:f>...<xm:sqref>`).
 fn parse_validations(xml: &str) -> Result<Vec<crate::format::validation::DataValidation>, String> {
-    use crate::format::validation::{CompareOp, DataValidation, ErrorStyle, ValidationKind};
+    use crate::format::validation::{DataValidation, ErrorStyle, ValidationKind};
     let mut reader = Reader::from_str(xml);
     let mut out = Vec::new();
     let mut current: Option<DataValidation> = None;
@@ -306,6 +311,225 @@ fn parse_validations(xml: &str) -> Result<Vec<crate::format::validation::DataVal
         }
     }
     Ok(out)
+}
+
+/// A `<cfRule>` being read.
+struct PendingRule {
+    kind: String,
+    dxf: Option<usize>,
+    priority: i64,
+    operator: String,
+    text: Option<String>,
+    rank: u32,
+    percent: bool,
+    bottom: bool,
+    above: bool,
+    equal: bool,
+    std_dev: bool,
+    stop: bool,
+    formulas: Vec<String>,
+    cfvos: Vec<Cfvo>,
+    colors: Vec<Rgb>,
+}
+
+impl PendingRule {
+    fn new(e: &BytesStart) -> Self {
+        let on = |name: &[u8], default: bool| match attr(e, name).as_deref() {
+            Some("1" | "true") => true,
+            Some("0" | "false") => false,
+            _ => default,
+        };
+        Self {
+            kind: attr(e, b"type").unwrap_or_default(),
+            dxf: attr_num(e, b"dxfId"),
+            priority: attr_num(e, b"priority").unwrap_or(i64::MAX),
+            operator: attr(e, b"operator").unwrap_or_default(),
+            text: attr(e, b"text"),
+            rank: attr_num(e, b"rank").unwrap_or(10),
+            percent: on(b"percent", false),
+            bottom: on(b"bottom", false),
+            above: on(b"aboveAverage", true),
+            equal: on(b"equalAverage", false),
+            std_dev: attr(e, b"stdDev").is_some(),
+            stop: on(b"stopIfTrue", false),
+            formulas: Vec::new(),
+            cfvos: Vec::new(),
+            colors: Vec::new(),
+        }
+    }
+
+    /// The rule with its priority, or `None` for kinds RustSheet doesn't
+    /// draw (icon sets, standard-deviation averages).
+    fn finish(self, ranges: &[CellRange], dxfs: &[CfStyle]) -> Option<(i64, ConditionalFormat)> {
+        if ranges.is_empty() {
+            return None;
+        }
+        let style = self
+            .dxf
+            .and_then(|i| dxfs.get(i))
+            .cloned()
+            .unwrap_or_default();
+        let first = self.formulas.first().cloned();
+        let not = self.kind.starts_with("not");
+        let rule = match self.kind.as_str() {
+            "cellIs" => CfRule::CellIs {
+                op: CompareOp::from_xml(&self.operator),
+                formula1: first?,
+                formula2: self.formulas.get(1).cloned(),
+                style,
+            },
+            kind @ ("containsText" | "notContainsText" | "beginsWith" | "endsWith") => {
+                CfRule::Text {
+                    rule: match kind {
+                        "containsText" => TextRule::Contains,
+                        "notContainsText" => TextRule::NotContains,
+                        "beginsWith" => TextRule::BeginsWith,
+                        _ => TextRule::EndsWith,
+                    },
+                    text: self.text.clone()?,
+                    style,
+                }
+            }
+            "top10" => CfRule::Top {
+                bottom: self.bottom,
+                rank: self.rank.max(1),
+                percent: self.percent,
+                style,
+            },
+            "aboveAverage" if !self.std_dev => CfRule::Average {
+                rule: match (self.above, self.equal) {
+                    (true, false) => AverageRule::Above,
+                    (false, false) => AverageRule::Below,
+                    (true, true) => AverageRule::EqualOrAbove,
+                    (false, true) => AverageRule::EqualOrBelow,
+                },
+                style,
+            },
+            "duplicateValues" | "uniqueValues" => CfRule::Duplicate {
+                unique: self.kind == "uniqueValues",
+                style,
+            },
+            "containsBlanks" | "notContainsBlanks" => CfRule::Blanks { not, style },
+            "containsErrors" | "notContainsErrors" => CfRule::Errors { not, style },
+            // Date periods ("yesterday", "this week") carry an equivalent formula.
+            "expression" | "timePeriod" => CfRule::Expression {
+                formula: first?,
+                style,
+            },
+            "colorScale" if self.cfvos.len() >= 2 && self.colors.len() == self.cfvos.len() => {
+                CfRule::ColorScale {
+                    stops: self.cfvos.into_iter().zip(self.colors).collect(),
+                }
+            }
+            "dataBar" if self.cfvos.len() >= 2 => CfRule::DataBar {
+                min: self.cfvos[0].clone(),
+                max: self.cfvos[1].clone(),
+                color: self.colors.first().copied().unwrap_or(DATA_BAR_BLUE),
+            },
+            _ => return None,
+        };
+        Some((
+            self.priority,
+            ConditionalFormat {
+                ranges: ranges.to_vec(),
+                rule,
+                stop_if_true: self.stop,
+            },
+        ))
+    }
+}
+
+const DATA_BAR_BLUE: Rgb = Rgb(0x63, 0x8E, 0xC6);
+
+/// Rules from `<conditionalFormatting sqref><cfRule type dxfId priority>`,
+/// in priority order. Excel 2010 extensions (`extLst`) are skipped: they
+/// repeat data bars with extra styling, or hold icon sets.
+fn parse_conditional(
+    xml: &str,
+    dxfs: &[CfStyle],
+    theme: &Theme,
+) -> Result<Vec<ConditionalFormat>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut found: Vec<(i64, ConditionalFormat)> = Vec::new();
+    let mut ranges: Vec<CellRange> = Vec::new();
+    let mut rule: Option<PendingRule> = None;
+    let mut ext_depth = 0u32;
+    let mut in_formula = false;
+    let mut text = String::new();
+    loop {
+        let event = reader.read_event();
+        match &event {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
+                let empty = matches!(event, Ok(Event::Empty(_)));
+                let name = e.local_name();
+                match name.as_ref() {
+                    b"extLst" => ext_depth += u32::from(!empty),
+                    _ if ext_depth > 0 => {}
+                    b"conditionalFormatting" => {
+                        ranges = attr(e, b"sqref")
+                            .map(|s| parse_sqref(&s))
+                            .unwrap_or_default()
+                    }
+                    b"cfRule" => {
+                        let pending = PendingRule::new(e);
+                        if empty {
+                            found.extend(pending.finish(&ranges, dxfs));
+                        } else {
+                            rule = Some(pending);
+                        }
+                    }
+                    b"formula" if !empty => {
+                        in_formula = true;
+                        text.clear();
+                    }
+                    b"cfvo" => {
+                        if let Some(p) = &mut rule {
+                            let kind = CfvoKind::from_xml(&attr(e, b"type").unwrap_or_default());
+                            // Lowest/highest carry a meaningless val="0".
+                            let value = match kind {
+                                CfvoKind::Min | CfvoKind::Max => String::new(),
+                                _ => attr(e, b"val").unwrap_or_default(),
+                            };
+                            p.cfvos.push(Cfvo { kind, value });
+                        }
+                    }
+                    b"color" => {
+                        if let Some(p) = &mut rule {
+                            p.colors
+                                .push(parse_color(e, theme).unwrap_or(DATA_BAR_BLUE));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(t)) if in_formula => {
+                text.push_str(&t.decode().map_err(|e| e.to_string())?)
+            }
+            Ok(Event::GeneralRef(r)) if in_formula => text.push_str(&entity_text(r)),
+            Ok(Event::End(e)) => match e.local_name().as_ref() {
+                b"extLst" => ext_depth = ext_depth.saturating_sub(1),
+                _ if ext_depth > 0 => {}
+                b"formula" => {
+                    in_formula = false;
+                    if let Some(p) = &mut rule {
+                        p.formulas.push(std::mem::take(&mut text));
+                    }
+                }
+                b"cfRule" => {
+                    if let Some(p) = rule.take() {
+                        found.extend(p.finish(&ranges, dxfs));
+                    }
+                }
+                b"conditionalFormatting" => ranges.clear(),
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("XML error in conditional formats: {e}")),
+            _ => {}
+        }
+    }
+    found.sort_by_key(|(priority, _)| *priority);
+    Ok(found.into_iter().map(|(_, cf)| cf).collect())
 }
 
 /// Notes from a comments part: `<comment ref="A1" authorId="0"><text>...`.
@@ -489,6 +713,8 @@ struct Font {
 #[derive(Default)]
 struct StyleTable {
     xfs: Vec<CellFormat>,
+    /// Conditional formatting styles, indexed by a rule's `dxfId`
+    dxfs: Vec<CfStyle>,
 }
 
 fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
@@ -499,6 +725,7 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
         Fills,
         Borders,
         CellXfs,
+        Dxfs,
         Other,
     }
     let mut section = Section::None;
@@ -522,11 +749,19 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
     let mut fill: Option<Rgb> = None;
     let mut solid_or_pattern = false;
     let mut border = Borders::default();
+    // Conditional formats: fills use bgColor, and only some properties are set.
+    let mut dxfs: Vec<CfStyle> = Vec::new();
+    let mut dxf = CfStyle::default();
+    let (mut dxf_in_font, mut dxf_no_fill) = (false, false);
+    let (mut dxf_fg, mut dxf_bg): (Option<Rgb>, Option<Rgb>) = (None, None);
 
     walk(xml, |name, e, _| {
         match (name, e) {
             (b"numFmt", Some(e)) => {
                 if let (Some(id), Some(code)) = (attr_num(e, b"numFmtId"), attr(e, b"formatCode")) {
+                    if section == Section::Dxfs {
+                        dxf.number_format = Some(code.clone());
+                    }
                     num_fmts.insert(id, code);
                 }
             }
@@ -534,10 +769,36 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
             (b"fills", Some(_)) => section = Section::Fills,
             (b"borders", Some(_)) => section = Section::Borders,
             (b"cellXfs", Some(_)) => section = Section::CellXfs,
-            // Named styles and conditional-format styles also hold xf/font/fill.
-            (b"cellStyleXfs" | b"dxfs" | b"cellStyles" | b"tableStyles" | b"colors", Some(_)) => {
+            (b"dxfs", Some(_)) => section = Section::Dxfs,
+            // Named styles also hold xf/font/fill.
+            (b"cellStyleXfs" | b"cellStyles" | b"tableStyles" | b"colors", Some(_)) => {
                 section = Section::Other
             }
+
+            (b"dxf", Some(_)) if section == Section::Dxfs => {
+                dxf = CfStyle::default();
+                (dxf_no_fill, dxf_fg, dxf_bg) = (false, None, None);
+            }
+            (b"dxf", None) if section == Section::Dxfs => {
+                if !dxf_no_fill {
+                    dxf.fill = dxf_bg.or(dxf_fg);
+                }
+                dxfs.push(std::mem::take(&mut dxf));
+            }
+            (b"font", Some(_)) if section == Section::Dxfs => dxf_in_font = true,
+            (b"font", None) if section == Section::Dxfs => dxf_in_font = false,
+            (b"b", Some(e)) if section == Section::Dxfs => dxf.bold = Some(flag(e)),
+            (b"i", Some(e)) if section == Section::Dxfs => dxf.italic = Some(flag(e)),
+            (b"u", Some(e)) if section == Section::Dxfs => dxf.underline = Some(flag(e)),
+            (b"strike", Some(e)) if section == Section::Dxfs => dxf.strikethrough = Some(flag(e)),
+            (b"color", Some(e)) if section == Section::Dxfs && dxf_in_font => {
+                dxf.font_color = parse_color(e, theme)
+            }
+            (b"patternFill", Some(e)) if section == Section::Dxfs => {
+                dxf_no_fill = attr(e, b"patternType").as_deref() == Some("none")
+            }
+            (b"fgColor", Some(e)) if section == Section::Dxfs => dxf_fg = parse_color(e, theme),
+            (b"bgColor", Some(e)) if section == Section::Dxfs => dxf_bg = parse_color(e, theme),
             (b"fonts" | b"fills" | b"borders" | b"cellXfs" | b"cellStyleXfs" | b"dxfs", None) => {
                 section = Section::None
             }
@@ -643,7 +904,7 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
             }
         })
         .collect();
-    Ok(StyleTable { xfs })
+    Ok(StyleTable { xfs, dxfs })
 }
 
 fn parse_sheet(xml: &str, styles: &StyleTable) -> Result<SheetFormatting, String> {
@@ -828,6 +1089,86 @@ mod tests {
         assert_eq!(money.font_color, Some(Rgb(255, 0, 0)));
         assert_eq!(money.number_format.as_deref(), Some("\"$\"#,##0.00"));
         assert_eq!(styles.xfs[3].number_format.as_deref(), Some("m/d/yyyy"));
+
+        assert_eq!(styles.dxfs.len(), 1);
+        assert_eq!(styles.dxfs[0].bold, Some(true));
+        assert_eq!(styles.dxfs[0].italic, None);
+        assert_eq!(styles.dxfs[0].fill, Some(Rgb(0, 0xFF, 0)));
+    }
+
+    #[test]
+    fn reads_conditional_formats() {
+        let dxfs = vec![CfStyle::preset(0), CfStyle::preset(2)];
+        let xml = r##"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+  xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">
+  <sheetData/>
+  <conditionalFormatting sqref="A1:A10 C1:C10">
+    <cfRule type="cellIs" dxfId="0" priority="3" operator="between"><formula>1</formula><formula>$B$1</formula></cfRule>
+    <cfRule type="containsText" dxfId="1" priority="1" operator="containsText" text="a&amp;b"><formula>NOT(ISERROR(SEARCH("a&amp;b",A1)))</formula></cfRule>
+  </conditionalFormatting>
+  <conditionalFormatting sqref="B1:B5">
+    <cfRule type="top10" dxfId="1" priority="2" rank="3" bottom="1" stopIfTrue="1"/>
+    <cfRule type="aboveAverage" dxfId="0" priority="4" aboveAverage="0" equalAverage="1"/>
+    <cfRule type="colorScale" priority="5"><colorScale><cfvo type="min"/><cfvo type="percentile" val="50"/><cfvo type="max"/>
+      <color rgb="FFF8696B"/><color rgb="FFFFEB84"/><color theme="4"/></colorScale></cfRule>
+    <cfRule type="dataBar" priority="6"><dataBar><cfvo type="min"/><cfvo type="max"/><color rgb="FF638EC6"/></dataBar>
+      <extLst><ext uri="{B025F937-C7B1-47D3-B67F-A62EFF666E3E}"><x14:id>{1}</x14:id></ext></extLst></cfRule>
+    <cfRule type="iconSet" priority="7"><iconSet><cfvo type="percent" val="0"/></iconSet></cfRule>
+  </conditionalFormatting>
+  <extLst><ext><x14:conditionalFormattings><x14:conditionalFormatting>
+    <x14:cfRule type="expression" priority="8"><xm:f>TRUE</xm:f></x14:cfRule>
+  </x14:conditionalFormatting></x14:conditionalFormattings></ext></extLst>
+</worksheet>"##;
+        let rules = parse_conditional(xml, &dxfs, &default_theme()).unwrap();
+        assert_eq!(rules.len(), 6, "icon sets and x14 rules are skipped");
+        assert_eq!(
+            rules[0].rule,
+            CfRule::Text {
+                rule: TextRule::Contains,
+                text: "a&b".into(),
+                style: CfStyle::preset(2),
+            }
+        );
+        assert_eq!(rules[0].ranges.len(), 2);
+        assert!(rules[1].stop_if_true);
+        assert!(matches!(
+            rules[1].rule,
+            CfRule::Top {
+                bottom: true,
+                rank: 3,
+                percent: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            rules[2].rule,
+            CfRule::CellIs {
+                op: CompareOp::Between,
+                formula1: "1".into(),
+                formula2: Some("$B$1".into()),
+                style: CfStyle::preset(0),
+            }
+        );
+        assert!(matches!(
+            rules[3].rule,
+            CfRule::Average {
+                rule: AverageRule::EqualOrBelow,
+                ..
+            }
+        ));
+        let CfRule::ColorScale { stops } = &rules[4].rule else {
+            panic!("expected a color scale");
+        };
+        assert_eq!(stops.len(), 3);
+        assert_eq!(stops[1].0, Cfvo::percentile(50));
+        assert_eq!(stops[2].1, Rgb(0x44, 0x72, 0xC4));
+        assert!(matches!(
+            rules[5].rule,
+            CfRule::DataBar {
+                color: DATA_BAR_BLUE,
+                ..
+            }
+        ));
     }
 
     #[test]

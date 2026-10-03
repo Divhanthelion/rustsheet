@@ -20,6 +20,7 @@ use super::sheet_tabs::SheetTabs;
 use super::theme::Theme;
 
 mod commands;
+mod conditional_ui;
 #[cfg(test)]
 mod feature_tests;
 mod fill;
@@ -38,6 +39,7 @@ use crate::format::{
 };
 use crate::formula::FormulaParser;
 use commands::Command;
+use conditional_ui::CfDialog;
 use eframe::egui::RichText;
 use find::FindDialog;
 use notes::NoteEditor;
@@ -300,6 +302,8 @@ pub struct SpreadsheetApp {
     note_editor: Option<NoteEditor>,
     /// Data Validation dialog, when open
     validation_dialog: Option<ValidationDialog>,
+    /// Conditional Formatting dialog, when open
+    cf_dialog: Option<CfDialog>,
     /// A validation list's drop-down, when open
     list_popup: Option<ListPopup>,
     /// Text to put back in the editor after a rejected entry
@@ -389,6 +393,7 @@ impl SpreadsheetApp {
             find_dialog: None,
             note_editor: None,
             validation_dialog: None,
+            cf_dialog: None,
             list_popup: None,
             retry_text: None,
             #[cfg(test)]
@@ -2496,6 +2501,7 @@ impl SpreadsheetApp {
         self.show_find_dialog(ctx);
         self.show_note_editor(ctx);
         self.show_validation_dialog(ctx);
+        self.show_conditional_dialog(ctx);
         self.show_list_popup(ctx);
         self.show_input_message(ctx);
         self.show_filter_popup(ctx);

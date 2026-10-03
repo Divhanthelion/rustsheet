@@ -19,21 +19,33 @@ impl CalcEngine {
     /// Evaluate a validation operand for `coord`: a number, a date typed
     /// like 2026-01-31, or a formula whose relative references are relative
     /// to the rule's top-left cell.
-    fn operand(&self, sheet: u32, dv: &DataValidation, text: &str, coord: CellCoord) -> CellResult {
+    pub(super) fn operand_value(
+        &self,
+        sheet: u32,
+        origin: CellCoord,
+        text: &str,
+        coord: CellCoord,
+    ) -> CellResult {
         let t = text.trim();
         if let Some((n, _)) = parse_typed_number(t) {
             return CellResult::Value(n);
         }
-        let Some(expr) = self.relative_expr(dv, t, coord) else {
+        let Some(expr) = self.relative_formula(origin, t, coord) else {
             return CellResult::Error(crate::cell::CellError::Value);
         };
         self.evaluate_expr(sheet, &expr)
     }
 
-    fn relative_expr(&self, dv: &DataValidation, formula: &str, coord: CellCoord) -> Option<Expr> {
+    /// Parse `formula`, written for `origin`, and move its relative
+    /// references to `coord`.
+    pub(super) fn relative_formula(
+        &self,
+        origin: CellCoord,
+        formula: &str,
+        coord: CellCoord,
+    ) -> Option<Expr> {
         let text = formula.trim().trim_start_matches('=');
         let mut expr = FormulaParser::new().parse(&format!("={text}")).ok()?;
-        let origin = dv.origin();
         expr.offset_references(
             coord.row as i64 - origin.row as i64,
             coord.col as i64 - origin.col as i64,
@@ -46,7 +58,7 @@ impl CalcEngine {
         if let Some(items) = dv.literal_items() {
             return items;
         }
-        let Some(mut expr) = self.relative_expr(dv, &dv.formula1, dv.origin()) else {
+        let Some(mut expr) = self.relative_formula(dv.origin(), &dv.formula1, dv.origin()) else {
             return Vec::new();
         };
         let mut found = None;
@@ -96,11 +108,11 @@ impl CalcEngine {
             _ => None,
         };
         let compare = |v: f64| -> bool {
-            let a = num(self.operand(sheet, dv, &dv.formula1, coord));
+            let a = num(self.operand_value(sheet, dv.origin(), &dv.formula1, coord));
             let b = dv
                 .formula2
                 .as_deref()
-                .map(|f| num(self.operand(sheet, dv, f, coord)));
+                .map(|f| num(self.operand_value(sheet, dv.origin(), f, coord)));
             match (a, b) {
                 (Some(a), Some(Some(b))) => dv.operator.test(v, a, b),
                 (Some(a), None) if !dv.operator.needs_second() => dv.operator.test(v, a, a),
@@ -133,7 +145,7 @@ impl CalcEngine {
             }
             ValidationKind::Custom => {
                 match self
-                    .relative_expr(dv, &dv.formula1, coord)
+                    .relative_formula(dv.origin(), &dv.formula1, coord)
                     .map(|e| self.evaluate_expr(sheet, &e))
                 {
                     Some(CellResult::Bool(b)) => b,

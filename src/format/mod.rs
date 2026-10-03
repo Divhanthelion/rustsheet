@@ -4,6 +4,7 @@
 //! `CalcEngine`, and is independent of cell values: clearing a cell keeps its
 //! format, as in Excel.
 
+pub mod conditional;
 mod input;
 mod number;
 pub mod validation;
@@ -189,6 +190,8 @@ pub struct SheetFormatting {
     pub notes: BTreeMap<CellCoord, Note>,
     /// Data validation rules; where they overlap, the last one applies
     pub validations: Vec<validation::DataValidation>,
+    /// Conditional formatting rules, highest priority first
+    pub conditional: Vec<conditional::ConditionalFormat>,
 }
 
 impl SheetFormatting {
@@ -263,6 +266,7 @@ impl SheetFormatting {
             .filter_map(|(c, n)| Some((edit.map_coord(c)?, n)))
             .collect();
         validation::apply_line_edit(&mut self.validations, edit);
+        conditional::apply_line_edit(&mut self.conditional, edit);
         match edit.axis {
             Axis::Row => {
                 map_keys(&mut self.row_formats, edit);

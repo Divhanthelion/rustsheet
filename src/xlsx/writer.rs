@@ -149,6 +149,9 @@ impl XlsxWriter {
                     )?;
                 }
             }
+            for cf in &formatting.conditional {
+                add_conditional_format(worksheet, cf)?;
+            }
             for (coord, note) in &formatting.notes {
                 let mut n = rust_xlsxwriter::Note::new(&note.text);
                 if let Some(author) = &note.author {
@@ -558,6 +561,231 @@ fn to_xlsx_validation(
         v = v.clone().set_error_message(&dv.error_message).unwrap_or(v);
     }
     Some(v)
+}
+
+/// Add one conditional formatting rule. Rules are added in priority order;
+/// rust_xlsxwriter numbers them that way, grouped by range.
+fn add_conditional_format(
+    worksheet: &mut Worksheet,
+    cf: &crate::format::conditional::ConditionalFormat,
+) -> Result<(), XlsxWriteError> {
+    use crate::format::conditional::{AverageRule, CfRule, CfStyle, Cfvo, CfvoKind, TextRule};
+    use crate::format::validation::CompareOp;
+    use rust_xlsxwriter::{
+        ConditionalFormat2ColorScale, ConditionalFormat3ColorScale, ConditionalFormatAverage,
+        ConditionalFormatAverageRule as Avg, ConditionalFormatBlank, ConditionalFormatCell,
+        ConditionalFormatCellRule as C, ConditionalFormatDataBar, ConditionalFormatDuplicate,
+        ConditionalFormatError, ConditionalFormatFormula, ConditionalFormatText,
+        ConditionalFormatTextRule as T, ConditionalFormatTop, ConditionalFormatTopRule as Top,
+        ConditionalFormatType as V, ConditionalFormatValue, Formula,
+    };
+    let Some(first) = cf.ranges.first().copied() else {
+        return Ok(());
+    };
+    let multi = (cf.ranges.len() > 1).then(|| {
+        cf.ranges
+            .iter()
+            .map(|r| r.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    let f = |s: &str| Formula::new(s.trim_start_matches('='));
+    let dxf = |s: &CfStyle| {
+        let mut format = Format::new();
+        if s.bold == Some(true) {
+            format = format.set_bold();
+        }
+        if s.italic == Some(true) {
+            format = format.set_italic();
+        }
+        if s.underline == Some(true) {
+            format = format.set_underline(FormatUnderline::Single);
+        }
+        if s.strikethrough == Some(true) {
+            format = format.set_font_strikethrough();
+        }
+        if let Some(c) = s.font_color {
+            format = format.set_font_color(Color::RGB(c.to_u32()));
+        }
+        if let Some(c) = s.fill {
+            format = format.set_background_color(Color::RGB(c.to_u32()));
+        }
+        if let Some(code) = &s.number_format {
+            format = format.set_num_format(code);
+        }
+        format
+    };
+    // A scale point other than the lowest/highest value.
+    let point = |v: &Cfvo| -> Option<(V, ConditionalFormatValue)> {
+        let num = v.value.trim().parse::<f64>().ok();
+        Some(match v.kind {
+            CfvoKind::Min | CfvoKind::Max => return None,
+            CfvoKind::Percent => (V::Percent, num?.into()),
+            CfvoKind::Percentile => (V::Percentile, num?.into()),
+            CfvoKind::Number => match num {
+                Some(n) => (V::Number, n.into()),
+                None => (V::Formula, f(&v.value).into()),
+            },
+            CfvoKind::Formula => (V::Formula, f(&v.value).into()),
+        })
+    };
+    macro_rules! add {
+        ($rule:expr) => {{
+            let mut rule = $rule.set_stop_if_true(cf.stop_if_true);
+            if let Some(m) = &multi {
+                rule = rule.set_multi_range(m.as_str());
+            }
+            worksheet.add_conditional_format(
+                first.start.row,
+                col_num(first.start.col)?,
+                first.end.row,
+                col_num(first.end.col)?,
+                &rule,
+            )?;
+        }};
+    }
+    match &cf.rule {
+        CfRule::CellIs {
+            op,
+            formula1,
+            formula2,
+            style,
+        } => {
+            let (a, b) = (f(formula1), f(formula2.as_deref().unwrap_or(formula1)));
+            let rule = match op {
+                CompareOp::Between => C::Between(a, b),
+                CompareOp::NotBetween => C::NotBetween(a, b),
+                CompareOp::Equal => C::EqualTo(a),
+                CompareOp::NotEqual => C::NotEqualTo(a),
+                CompareOp::Greater => C::GreaterThan(a),
+                CompareOp::Less => C::LessThan(a),
+                CompareOp::GreaterOrEqual => C::GreaterThanOrEqualTo(a),
+                CompareOp::LessOrEqual => C::LessThanOrEqualTo(a),
+            };
+            add!(
+                ConditionalFormatCell::new()
+                    .set_rule(rule)
+                    .set_format(dxf(style))
+            )
+        }
+        CfRule::Text { rule, text, style } => {
+            let rule = match rule {
+                TextRule::Contains => T::Contains(text.clone()),
+                TextRule::NotContains => T::DoesNotContain(text.clone()),
+                TextRule::BeginsWith => T::BeginsWith(text.clone()),
+                TextRule::EndsWith => T::EndsWith(text.clone()),
+            };
+            add!(
+                ConditionalFormatText::new()
+                    .set_rule(rule)
+                    .set_format(dxf(style))
+            )
+        }
+        CfRule::Top {
+            bottom,
+            rank,
+            percent,
+            style,
+        } => {
+            let n = (*rank).clamp(1, if *percent { 100 } else { 1000 }) as u16;
+            let rule = match (bottom, percent) {
+                (false, false) => Top::Top(n),
+                (true, false) => Top::Bottom(n),
+                (false, true) => Top::TopPercent(n),
+                (true, true) => Top::BottomPercent(n),
+            };
+            add!(
+                ConditionalFormatTop::new()
+                    .set_rule(rule)
+                    .set_format(dxf(style))
+            )
+        }
+        CfRule::Average { rule, style } => {
+            let rule = match rule {
+                AverageRule::Above => Avg::AboveAverage,
+                AverageRule::Below => Avg::BelowAverage,
+                AverageRule::EqualOrAbove => Avg::EqualOrAboveAverage,
+                AverageRule::EqualOrBelow => Avg::EqualOrBelowAverage,
+            };
+            add!(
+                ConditionalFormatAverage::new()
+                    .set_rule(rule)
+                    .set_format(dxf(style))
+            )
+        }
+        CfRule::Duplicate { unique, style } => {
+            let mut rule = ConditionalFormatDuplicate::new().set_format(dxf(style));
+            if *unique {
+                rule = rule.invert();
+            }
+            add!(rule)
+        }
+        CfRule::Blanks { not, style } => {
+            let mut rule = ConditionalFormatBlank::new().set_format(dxf(style));
+            if *not {
+                rule = rule.invert();
+            }
+            add!(rule)
+        }
+        CfRule::Errors { not, style } => {
+            let mut rule = ConditionalFormatError::new().set_format(dxf(style));
+            if *not {
+                rule = rule.invert();
+            }
+            add!(rule)
+        }
+        CfRule::Expression { formula, style } => {
+            add!(
+                ConditionalFormatFormula::new()
+                    .set_rule(f(formula))
+                    .set_format(dxf(style))
+            )
+        }
+        CfRule::ColorScale { stops } => match stops.as_slice() {
+            [(lo, lo_color), (hi, hi_color)] => {
+                let mut rule = ConditionalFormat2ColorScale::new()
+                    .set_minimum_color(Color::RGB(lo_color.to_u32()))
+                    .set_maximum_color(Color::RGB(hi_color.to_u32()));
+                if let Some((kind, value)) = point(lo) {
+                    rule = rule.set_minimum(kind, value);
+                }
+                if let Some((kind, value)) = point(hi) {
+                    rule = rule.set_maximum(kind, value);
+                }
+                add!(rule)
+            }
+            [(lo, lo_color), (mid, mid_color), (hi, hi_color)] => {
+                let mut rule = ConditionalFormat3ColorScale::new()
+                    .set_minimum_color(Color::RGB(lo_color.to_u32()))
+                    .set_midpoint_color(Color::RGB(mid_color.to_u32()))
+                    .set_maximum_color(Color::RGB(hi_color.to_u32()));
+                if let Some((kind, value)) = point(lo) {
+                    rule = rule.set_minimum(kind, value);
+                }
+                if let Some((kind, value)) = point(mid) {
+                    rule = rule.set_midpoint(kind, value);
+                }
+                if let Some((kind, value)) = point(hi) {
+                    rule = rule.set_maximum(kind, value);
+                }
+                add!(rule)
+            }
+            _ => {}
+        },
+        CfRule::DataBar { min, max, color } => {
+            let mut rule = ConditionalFormatDataBar::new()
+                .set_fill_color(Color::RGB(color.to_u32()))
+                .set_border_color(Color::RGB(color.to_u32()));
+            if let Some((kind, value)) = point(min) {
+                rule = rule.set_minimum(kind, value);
+            }
+            if let Some((kind, value)) = point(max) {
+                rule = rule.set_maximum(kind, value);
+            }
+            add!(rule)
+        }
+    }
+    Ok(())
 }
 
 fn col_num(col: u32) -> Result<u16, XlsxWriteError> {

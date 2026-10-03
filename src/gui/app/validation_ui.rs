@@ -275,6 +275,7 @@ impl SpreadsheetApp {
         let mut keep = true;
         let mut action: Option<Option<DataValidation>> = None;
         egui::Window::new("Data Validation")
+            .order(egui::Order::Foreground)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
