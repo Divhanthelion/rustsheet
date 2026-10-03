@@ -132,6 +132,23 @@ impl XlsxWriter {
             for &row in &formatting.hidden_rows {
                 worksheet.set_row_hidden(row)?;
             }
+            for dv in &formatting.validations {
+                if let Some(v) = to_xlsx_validation(dv) {
+                    let first = dv.ranges[0];
+                    let mut v = v;
+                    if dv.ranges.len() > 1 {
+                        let all: Vec<String> = dv.ranges.iter().map(|r| r.to_string()).collect();
+                        v = v.set_multi_range(all.join(" "));
+                    }
+                    worksheet.add_data_validation(
+                        first.start.row,
+                        col_num(first.start.col)?,
+                        first.end.row,
+                        col_num(first.end.col)?,
+                        &v,
+                    )?;
+                }
+            }
             for (coord, note) in &formatting.notes {
                 let mut n = rust_xlsxwriter::Note::new(&note.text);
                 if let Some(author) = &note.author {
@@ -477,6 +494,70 @@ impl FormatCache {
             .or_insert_with(|| to_xlsx_format(f))
             .clone()
     }
+}
+
+/// A rust_xlsxwriter validation for a rule; `None` if it has no ranges.
+fn to_xlsx_validation(
+    dv: &crate::format::validation::DataValidation,
+) -> Option<rust_xlsxwriter::DataValidation> {
+    use crate::format::validation::{CompareOp, ErrorStyle, ValidationKind};
+    use rust_xlsxwriter::{
+        DataValidation, DataValidationErrorStyle, DataValidationRule as R, Formula,
+    };
+    if dv.ranges.is_empty() {
+        return None;
+    }
+    let f = |s: &str| Formula::new(s.trim_start_matches('='));
+    let a = f(&dv.formula1);
+    let b = f(dv.formula2.as_deref().unwrap_or(&dv.formula1));
+    let rule = match dv.operator {
+        CompareOp::Between => R::Between(a, b),
+        CompareOp::NotBetween => R::NotBetween(a, b),
+        CompareOp::Equal => R::EqualTo(a),
+        CompareOp::NotEqual => R::NotEqualTo(a),
+        CompareOp::Greater => R::GreaterThan(a),
+        CompareOp::Less => R::LessThan(a),
+        CompareOp::GreaterOrEqual => R::GreaterThanOrEqualTo(a),
+        CompareOp::LessOrEqual => R::LessThanOrEqualTo(a),
+    };
+    let mut v = DataValidation::new();
+    v = match dv.kind {
+        ValidationKind::Any => v.allow_any_value(),
+        ValidationKind::Whole => v.allow_whole_number_formula(rule),
+        ValidationKind::Decimal => v.allow_decimal_number_formula(rule),
+        ValidationKind::Date => v.allow_date_formula(rule),
+        ValidationKind::Time => v.allow_time_formula(rule),
+        ValidationKind::TextLength => v.allow_text_length_formula(rule),
+        ValidationKind::Custom => v.allow_custom(f(&dv.formula1)),
+        ValidationKind::List => match dv.literal_items() {
+            Some(items) => v.allow_list_strings(&items).ok()?,
+            None => v.allow_list_formula(f(&dv.formula1)),
+        },
+    };
+    v = v
+        .ignore_blank(dv.allow_blank)
+        .show_dropdown(dv.dropdown)
+        .show_input_message(dv.show_input)
+        .show_error_message(dv.show_error)
+        .set_error_style(match dv.error_style {
+            ErrorStyle::Stop => DataValidationErrorStyle::Stop,
+            ErrorStyle::Warning => DataValidationErrorStyle::Warning,
+            ErrorStyle::Information => DataValidationErrorStyle::Information,
+        });
+    // Titles and messages have Excel's length limits; skip ones that don't fit.
+    if !dv.input_title.is_empty() {
+        v = v.clone().set_input_title(&dv.input_title).unwrap_or(v);
+    }
+    if !dv.input_message.is_empty() {
+        v = v.clone().set_input_message(&dv.input_message).unwrap_or(v);
+    }
+    if !dv.error_title.is_empty() {
+        v = v.clone().set_error_title(&dv.error_title).unwrap_or(v);
+    }
+    if !dv.error_message.is_empty() {
+        v = v.clone().set_error_message(&dv.error_message).unwrap_or(v);
+    }
+    Some(v)
 }
 
 fn col_num(col: u32) -> Result<u16, XlsxWriteError> {

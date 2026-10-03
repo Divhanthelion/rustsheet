@@ -88,6 +88,9 @@ pub fn read_formatting<R: Read + Seek>(
             Some(xml) => parse_sheet(&xml, &styles)?,
             None => SheetFormatting::default(),
         };
+        if let Some(xml) = read(&path) {
+            formatting.validations = parse_validations(&xml)?;
+        }
         if let Some((_, xml)) = read_rel(&mut read, &path, "/comments") {
             formatting.notes = parse_comments(&xml)?;
         }
@@ -194,6 +197,115 @@ pub(super) fn entity_text(e: &quick_xml::events::BytesRef) -> String {
         Ok("apos") => "'".into(),
         _ => String::new(),
     }
+}
+
+/// A space-separated list of ranges or cells ("A1:A10 C3").
+pub(super) fn parse_sqref(s: &str) -> Vec<CellRange> {
+    s.split_whitespace()
+        .filter_map(|r| {
+            CellRange::from_a1(r).or_else(|| CellCoord::from_a1(r).map(CellRange::single))
+        })
+        .collect()
+}
+
+/// `<dataValidation type sqref operator ...><formula1>...`, and the x14
+/// extension Excel uses for lists on other sheets
+/// (`<x14:dataValidation><x14:formula1><xm:f>...</xm:f>...<xm:sqref>`).
+fn parse_validations(xml: &str) -> Result<Vec<crate::format::validation::DataValidation>, String> {
+    use crate::format::validation::{CompareOp, DataValidation, ErrorStyle, ValidationKind};
+    let mut reader = Reader::from_str(xml);
+    let mut out = Vec::new();
+    let mut current: Option<DataValidation> = None;
+    // Which text we're collecting: 1, 2 = formulas, 3 = x14 sqref
+    let mut target = 0u8;
+    let mut text = String::new();
+    let flag = |e: &BytesStart, name: &[u8], default: bool| match attr(e, name).as_deref() {
+        Some("1" | "true") => true,
+        Some("0" | "false") => false,
+        _ => default,
+    };
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.local_name().as_ref() {
+                b"dataValidation" => {
+                    let kind = match attr(&e, b"type").as_deref() {
+                        Some("whole") => ValidationKind::Whole,
+                        Some("decimal") => ValidationKind::Decimal,
+                        Some("list") => ValidationKind::List,
+                        Some("date") => ValidationKind::Date,
+                        Some("time") => ValidationKind::Time,
+                        Some("textLength") => ValidationKind::TextLength,
+                        Some("custom") => ValidationKind::Custom,
+                        _ => ValidationKind::Any,
+                    };
+                    current = Some(DataValidation {
+                        ranges: attr(&e, b"sqref")
+                            .map(|s| parse_sqref(&s))
+                            .unwrap_or_default(),
+                        kind,
+                        operator: CompareOp::from_xml(&attr(&e, b"operator").unwrap_or_default()),
+                        allow_blank: flag(&e, b"allowBlank", false),
+                        // Excel's attribute is inverted: showDropDown="1" hides it.
+                        dropdown: !flag(&e, b"showDropDown", false),
+                        show_input: flag(&e, b"showInputMessage", false),
+                        input_title: attr(&e, b"promptTitle").unwrap_or_default(),
+                        input_message: attr(&e, b"prompt").unwrap_or_default(),
+                        show_error: flag(&e, b"showErrorMessage", false),
+                        error_style: match attr(&e, b"errorStyle").as_deref() {
+                            Some("warning") => ErrorStyle::Warning,
+                            Some("information") => ErrorStyle::Information,
+                            _ => ErrorStyle::Stop,
+                        },
+                        error_title: attr(&e, b"errorTitle").unwrap_or_default(),
+                        error_message: attr(&e, b"error").unwrap_or_default(),
+                        ..Default::default()
+                    });
+                }
+                b"formula1" => {
+                    target = 1;
+                    text.clear();
+                }
+                b"formula2" => {
+                    target = 2;
+                    text.clear();
+                }
+                b"sqref" => {
+                    target = 3;
+                    text.clear();
+                }
+                _ => {}
+            },
+            Ok(Event::Text(t)) if target != 0 => {
+                text.push_str(&t.decode().map_err(|e| e.to_string())?)
+            }
+            Ok(Event::GeneralRef(r)) if target != 0 => text.push_str(&entity_text(&r)),
+            Ok(Event::End(e)) => match e.local_name().as_ref() {
+                b"formula1" | b"formula2" | b"sqref" => {
+                    if let Some(dv) = &mut current {
+                        let value = std::mem::take(&mut text);
+                        match target {
+                            1 => dv.formula1 = value,
+                            2 => dv.formula2 = Some(value),
+                            _ => dv.ranges = parse_sqref(&value),
+                        }
+                    }
+                    target = 0;
+                }
+                b"dataValidation" => {
+                    if let Some(dv) = current.take() {
+                        if !dv.ranges.is_empty() {
+                            out.push(dv);
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("XML error in validations: {e}")),
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// Notes from a comments part: `<comment ref="A1" authorId="0"><text>...`.

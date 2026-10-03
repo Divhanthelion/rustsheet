@@ -42,6 +42,8 @@ pub(super) enum Command {
     InsertChart,
     EditNote,
     DeleteNote,
+    DataValidation,
+    OpenList,
     Format(FormatAction),
     Theme(ThemeChoice),
     Help,
@@ -256,6 +258,14 @@ impl SpreadsheetApp {
                     .is_some_and(|f| f.filter.is_some());
                 let label = if on { "Remove Filter" } else { "Filter" };
                 item(ui, label, "Ctrl+Shift+L", Command::ToggleFilter, &mut out);
+                ui.separator();
+                item(
+                    ui,
+                    "Data Validation...",
+                    "",
+                    Command::DataValidation,
+                    &mut out,
+                );
             });
 
             ui.menu_button("View", |ui| {
@@ -345,6 +355,9 @@ impl SpreadsheetApp {
         }
         if take(cmd, Key::Z) {
             return Some(Command::Undo);
+        }
+        if take(Modifiers::ALT, Key::ArrowDown) {
+            return Some(Command::OpenList);
         }
         if take(Modifiers::SHIFT, Key::F2) {
             return Some(Command::EditNote);
@@ -443,6 +456,14 @@ impl SpreadsheetApp {
             Command::InsertChart => self.open_new_chart_editor(),
             Command::EditNote => self.open_note_editor(),
             Command::DeleteNote => self.delete_note(),
+            Command::DataValidation => self.open_validation_dialog(),
+            Command::OpenList => {
+                let a = self.selection.active;
+                let c = &self.grid_config;
+                let pos = self.cell_screen_pos(a)
+                    + Vec2::new(-c.column_width(a.col), c.row_height(a.row));
+                self.open_list_popup(pos);
+            }
             Command::Format(action) => self.handle_format_action(action),
             Command::Theme(choice) => {
                 self.settings.theme = choice;

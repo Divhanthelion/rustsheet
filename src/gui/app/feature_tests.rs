@@ -513,3 +513,63 @@ fn notes_undo_copy_sort_and_move_with_rows() {
 fn text_value(s: &str) -> CellResult {
     CellResult::Text(s.into())
 }
+
+#[test]
+fn typed_entries_are_checked_against_validation() {
+    use crate::format::validation::{CompareOp, DataValidation, ErrorStyle, ValidationKind};
+    let mut app = app();
+    app.engine
+        .formatting_mut(0)
+        .validations
+        .push(DataValidation {
+            ranges: vec![CellRange::from_a1("A1:A9").unwrap()],
+            kind: ValidationKind::Whole,
+            operator: CompareOp::Between,
+            formula1: "1".into(),
+            formula2: Some("10".into()),
+            ..Default::default()
+        });
+    let type_in = |app: &mut SpreadsheetApp, a1: &str, text: &str| {
+        app.selection.move_to(at(a1));
+        app.input_mode = InputMode::Editing { cell: at(a1) };
+        app.edit_buffer = text.into();
+        app.confirm_edit(true, false);
+    };
+
+    type_in(&mut app, "A1", "5");
+    assert_eq!(val(&app, "A1"), CellResult::Value(5.0));
+
+    // Stop + Retry: the entry is undone and editing resumes with the text.
+    app.alert_answer = Some(validation_ui::AlertAnswer::Retry);
+    type_in(&mut app, "A2", "50");
+    assert_eq!(val(&app, "A2"), CellResult::Empty);
+    assert_eq!(app.retry_text.as_deref(), Some("50"));
+    assert!(matches!(app.input_mode, InputMode::TransitionToEdit { .. }));
+    app.retry_text = None;
+    app.input_mode = InputMode::Navigation;
+
+    // Cancel undoes it; nothing lands in the undo history.
+    app.alert_answer = Some(validation_ui::AlertAnswer::Cancel);
+    type_in(&mut app, "A3", "abc");
+    assert_eq!(val(&app, "A3"), CellResult::Empty);
+
+    // A warning the user accepts keeps the value.
+    app.engine.formatting_mut(0).validations[0].error_style = ErrorStyle::Warning;
+    app.alert_answer = Some(validation_ui::AlertAnswer::Keep);
+    type_in(&mut app, "A4", "99");
+    assert_eq!(val(&app, "A4"), CellResult::Value(99.0));
+
+    // Choosing from a list popup writes the item.
+    app.engine
+        .formatting_mut(0)
+        .validations
+        .push(DataValidation {
+            ranges: vec![CellRange::from_a1("B1").unwrap()],
+            kind: ValidationKind::List,
+            formula1: "\"Yes,No\"".into(),
+            ..Default::default()
+        });
+    app.selection.move_to(at("B1"));
+    app.open_list_popup(egui::Pos2::ZERO);
+    assert_eq!(app.list_popup.as_ref().unwrap().items, vec!["Yes", "No"]);
+}

@@ -6,6 +6,7 @@
 
 mod input;
 mod number;
+pub mod validation;
 
 pub use input::parse_typed_number;
 pub use number::{
@@ -186,6 +187,8 @@ pub struct SheetFormatting {
     pub filter: Option<AutoFilter>,
     /// Notes, by cell
     pub notes: BTreeMap<CellCoord, Note>,
+    /// Data validation rules; where they overlap, the last one applies
+    pub validations: Vec<validation::DataValidation>,
 }
 
 impl SheetFormatting {
@@ -259,6 +262,7 @@ impl SheetFormatting {
             .into_iter()
             .filter_map(|(c, n)| Some((edit.map_coord(c)?, n)))
             .collect();
+        validation::apply_line_edit(&mut self.validations, edit);
         match edit.axis {
             Axis::Row => {
                 map_keys(&mut self.row_formats, edit);

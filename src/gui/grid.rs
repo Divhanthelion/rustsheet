@@ -502,6 +502,8 @@ pub struct GridResponse {
     pub scroll_to: Option<Vec2>,
     /// The pointer rests on a cell with a note: (cell, where to show it)
     pub hovered_note: Option<(CellCoord, Pos2)>,
+    /// The active cell's validation drop-down was clicked: where to open it
+    pub validation_dropdown: Option<Pos2>,
 }
 
 /// Navigation keys
@@ -807,6 +809,7 @@ impl<'a> SpreadsheetGrid<'a> {
             self.resize_handles(ui, grid_id, grid_rect, &rows, &cols, &mut response);
             self.filter_buttons(ui, grid_id, &painter, &cols, &mut response);
             self.fill_handle(ui, grid_id, &painter, &mut response);
+            self.validation_button(ui, grid_id, &painter, &mut response);
             self.scrollbars(ui, grid_id, grid_rect, &painter, &mut response);
 
             // Handle drag for multi-cell selection
@@ -1635,6 +1638,61 @@ impl<'a> SpreadsheetGrid<'a> {
                 "Filter or sort"
             });
         }
+    }
+
+    /// A drop-down button beside the active cell when it has a list rule.
+    fn validation_button(
+        &self,
+        ui: &mut Ui,
+        grid_id: egui::Id,
+        painter: &egui::Painter,
+        response: &mut GridResponse,
+    ) {
+        use crate::format::validation::ValidationKind;
+        if !self.fill_handle {
+            return;
+        }
+        let active = self.selection.active;
+        let Some(rule) = self.engine.validation_at(self.sheet_index, active) else {
+            return;
+        };
+        if rule.kind != ValidationKind::List || !rule.dropdown {
+            return;
+        }
+        let range = self
+            .formatting()
+            .and_then(|f| f.merge_at(active))
+            .unwrap_or(CellRange::single(active));
+        let cell = self.range_rect(range);
+        let button = Rect::from_min_size(
+            Pos2::new(cell.right() + 1.0, cell.top()),
+            Vec2::new(16.0, cell.height().min(22.0)),
+        );
+        if !self.data.contains(button.center()) {
+            return;
+        }
+        let r = ui.interact(button, grid_id.with("validation_list"), Sense::click());
+        let bg = if r.hovered() {
+            self.theme.selection_bg
+        } else {
+            self.theme.header_bg
+        };
+        painter.rect_filled(button, 2.0, bg);
+        painter.rect_stroke(button, 2.0, self.theme.grid_stroke(), StrokeKind::Inside);
+        let c = button.center();
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                c + Vec2::new(-4.0, -2.0),
+                c + Vec2::new(4.0, -2.0),
+                c + Vec2::new(0.0, 3.0),
+            ],
+            self.theme.header_text,
+            Stroke::NONE,
+        ));
+        if r.clicked() {
+            response.validation_dropdown = Some(cell.left_bottom());
+        }
+        r.on_hover_text("Choose from the list (Alt+Down)");
     }
 
     /// The small square at the selection's corner that drags to fill.

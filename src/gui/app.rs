@@ -28,6 +28,7 @@ mod notes;
 mod printing;
 mod recovery;
 mod sheet_ops;
+mod validation_ui;
 
 use super::fonts::FontLibrary;
 use super::grid::fit_row_height;
@@ -44,6 +45,7 @@ use printing::PrintDialog;
 use recovery::{Recoverable, Recovery};
 use sheet_ops::{FilterPopup, SortDialog, WorkbookState};
 use std::collections::{HashMap, HashSet};
+use validation_ui::{ListPopup, ValidationDialog};
 
 /// Modifier key name shown in menu shortcut hints.
 const MOD: &str = if cfg!(target_os = "macos") {
@@ -296,6 +298,15 @@ pub struct SpreadsheetApp {
     find_dialog: Option<FindDialog>,
     /// Note editor, when open
     note_editor: Option<NoteEditor>,
+    /// Data Validation dialog, when open
+    validation_dialog: Option<ValidationDialog>,
+    /// A validation list's drop-down, when open
+    list_popup: Option<ListPopup>,
+    /// Text to put back in the editor after a rejected entry
+    retry_text: Option<String>,
+    /// Tests answer validation alerts without a dialog
+    #[cfg(test)]
+    alert_answer: Option<validation_ui::AlertAnswer>,
     /// Export/Print options, when open
     print_dialog: Option<PrintDialog>,
     /// Page setup from the last export or print
@@ -377,6 +388,11 @@ impl SpreadsheetApp {
             sort_dialog: None,
             find_dialog: None,
             note_editor: None,
+            validation_dialog: None,
+            list_popup: None,
+            retry_text: None,
+            #[cfg(test)]
+            alert_answer: None,
             print_dialog: None,
             last_page_setup: Default::default(),
             fill_target: None,
@@ -1357,10 +1373,13 @@ impl SpreadsheetApp {
         // Use editing_cell if in Editing state, otherwise fall back to selection.active
         let coord = self.editing_cell().unwrap_or(self.selection.active);
         let content = self.edit_buffer.clone();
-        self.set_cell_content(coord, &content);
         self.input_mode = InputMode::Navigation;
         self.edit_buffer.clear();
         self.formula_bar.editing = false;
+        // A rejected entry (data validation) goes back to editing.
+        if !self.commit_typed(coord, &content) {
+            return;
+        }
 
         if move_down {
             self.selection
@@ -2046,7 +2065,9 @@ impl SpreadsheetApp {
             let active_cell = self.selection.active;
 
             // Initialize edit buffer
-            let initial_text = if let Some(c) = initial_char {
+            let initial_text = if let Some(text) = self.retry_text.take() {
+                text
+            } else if let Some(c) = initial_char {
                 c.to_string()
             } else {
                 self.get_cell_formula_or_value(active_cell)
@@ -2304,6 +2325,9 @@ impl SpreadsheetApp {
                     self.show_note_popup(ctx, coord, pos);
                 }
             }
+            if let Some(pos) = grid_response.validation_dropdown {
+                self.open_list_popup(pos);
+            }
             if let Some((col, pos)) = grid_response.filter_button {
                 self.open_filter_popup(col, pos);
             }
@@ -2471,6 +2495,9 @@ impl SpreadsheetApp {
         self.show_recovery_prompt(ctx);
         self.show_find_dialog(ctx);
         self.show_note_editor(ctx);
+        self.show_validation_dialog(ctx);
+        self.show_list_popup(ctx);
+        self.show_input_message(ctx);
         self.show_filter_popup(ctx);
         self.show_sort_dialog(ctx);
         self.show_print_dialog(ctx);

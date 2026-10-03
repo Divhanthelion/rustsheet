@@ -572,4 +572,67 @@ mod tests {
         assert_eq!(filter.range, r("A1:A4"));
         assert!(filter.allowed[&0].contains("Tea"));
     }
+
+    #[test]
+    fn validation_roundtrip_through_xlsx() {
+        use crate::cell::CellRange;
+        use crate::format::validation::{CompareOp, DataValidation, ErrorStyle, ValidationKind};
+
+        let mut engine = CalcEngine::new();
+        engine.set_sheet_names(vec!["Main".into(), "Lists".into()]);
+        let r = |a1: &str| CellRange::from_a1(a1).unwrap();
+        let list = DataValidation {
+            ranges: vec![r("A2:A20")],
+            kind: ValidationKind::List,
+            formula1: "\"Small,Medium,Large\"".into(),
+            input_title: "Size".into(),
+            input_message: "Pick a size".into(),
+            ..Default::default()
+        };
+        let whole = DataValidation {
+            ranges: vec![r("B2:B20"), r("D2:D5")],
+            kind: ValidationKind::Whole,
+            operator: CompareOp::Between,
+            formula1: "1".into(),
+            formula2: Some("100".into()),
+            error_style: ErrorStyle::Warning,
+            error_title: "Out of range".into(),
+            error_message: "Use 1 to 100".into(),
+            ..Default::default()
+        };
+        let from_sheet = DataValidation {
+            ranges: vec![r("C2:C20")],
+            kind: ValidationKind::List,
+            formula1: "Lists!$A$1:$A$3".into(),
+            ..Default::default()
+        };
+        engine.formatting_mut(0).validations =
+            vec![list.clone(), whole.clone(), from_sheet.clone()];
+
+        let path = temp_xlsx("validation");
+        let mut writer = XlsxWriter::new();
+        writer.add_engine_sheet("Main", &engine, 0).unwrap();
+        writer.add_engine_sheet("Lists", &engine, 1).unwrap();
+        writer.save(&path).unwrap();
+        let read = super::read_formatting_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let got = &read[0].1.validations;
+        assert_eq!(got.len(), 3, "{got:?}");
+        let find = |range: CellRange| got.iter().find(|v| v.ranges.contains(&range)).unwrap();
+        let l = find(r("A2:A20"));
+        assert_eq!(l.kind, ValidationKind::List);
+        assert_eq!(l.literal_items().unwrap(), vec!["Small", "Medium", "Large"]);
+        assert_eq!(l.input_message, "Pick a size");
+        assert!(l.dropdown);
+        let w = find(r("B2:B20"));
+        assert_eq!(w.ranges, vec![r("B2:B20"), r("D2:D5")]);
+        assert_eq!(
+            (w.formula1.as_str(), w.formula2.as_deref()),
+            ("1", Some("100"))
+        );
+        assert_eq!(w.error_style, ErrorStyle::Warning);
+        assert_eq!(w.error_message, "Use 1 to 100");
+        assert_eq!(find(r("C2:C20")).formula1, "Lists!$A$1:$A$3");
+    }
 }
