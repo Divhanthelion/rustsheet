@@ -26,6 +26,7 @@
 - **Charts**: line, bar, scatter, area, pie and doughnut, saved into the workbook.
 - **Excel files**: read and write values, formulas, formatting, column widths, row heights and charts in `.xlsx`.
 - **CSV**: import and export, formulas included.
+- **Copy and paste** within RustSheet (formulas follow their new position, formats come along) and with Excel, Google Sheets or any app that copies tab-separated text. Cut and paste moves cells.
 - **Undo/redo**, formula autocomplete, light and dark themes, keyboard navigation that works like Excel's.
 
 ### Excel compatibility notes
@@ -78,6 +79,8 @@ Needs the Windows 10/11 SDK. See [packaging/windows/STORE.md](packaging/windows/
 |------|--------|
 | Ctrl+N / Ctrl+O / Ctrl+S | New / Open / Save |
 | Ctrl+Z / Ctrl+Y | Undo / Redo |
+| Ctrl+C / Ctrl+X / Ctrl+V | Copy / Cut / Paste |
+| Delete | Clear the selected cells |
 | Ctrl+B / Ctrl+I / Ctrl+U | Bold / Italic / Underline |
 | F2 or type | Edit the active cell |
 | Enter / Tab | Confirm and move down / right |

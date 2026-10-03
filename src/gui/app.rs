@@ -11,8 +11,9 @@ use super::chart_widget::ChartWindowManager;
 use super::format_bar::{self, BorderPreset, FormatAction};
 use super::formula_bar::FormulaBar;
 use super::grid::{
-    DEFAULT_COLUMN_WIDTH, DEFAULT_ROW_HEIGHT, GridConfig, HEADER_HEIGHT, HEADER_WIDTH,
-    NavigationKey, ResizeAxis, ScrollState, SpreadsheetGrid, fit_column_width,
+    ContextAction, DEFAULT_COLUMN_WIDTH, DEFAULT_ROW_HEIGHT, GridConfig, HEADER_HEIGHT,
+    HEADER_WIDTH, NavigationKey, ResizeAxis, ScrollState, SpreadsheetGrid, display_text,
+    fit_column_width,
 };
 use super::help_panel::HelpPanel;
 use super::selection::Selection;
@@ -21,6 +22,8 @@ use super::theme::Theme;
 use crate::format::{
     Borders, CellFormat, format_general, format_number, is_date_format, parse_typed_number,
 };
+use crate::formula::FormulaParser;
+use std::collections::{HashMap, HashSet};
 
 /// Modifier key name shown in menu shortcut hints.
 const MOD: &str = if cfg!(target_os = "macos") {
@@ -87,6 +90,69 @@ enum UndoAction {
     },
     /// Several actions undone and redone together
     Group(Vec<UndoAction>),
+}
+
+/// Cells copied or cut inside RustSheet. When the system clipboard still
+/// holds `text`, pasting uses these (formulas and formats); any other
+/// clipboard text is pasted as values.
+struct ClipboardCells {
+    sheet: u32,
+    origin: CellCoord,
+    rows: u32,
+    cols: u32,
+    /// By (row, col) offset from `origin`: content as typed, and format
+    cells: HashMap<(u32, u32), (Option<String>, Option<CellFormat>)>,
+    text: String,
+    /// Cut cells move on paste instead of being copied
+    cut: bool,
+}
+
+/// One clipboard field: quoted like Excel when it holds a tab, newline or quote.
+fn tsv_field(s: &str) -> String {
+    if s.contains(['\t', '\n', '\r', '"']) {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// Parse tab-separated clipboard text (Excel, Sheets, etc.) into rows.
+fn parse_tsv(text: &str) -> Vec<Vec<String>> {
+    let text = text.replace("\r\n", "\n");
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    let mut rows = vec![Vec::new()];
+    let mut field = String::new();
+    let mut chars = text.chars().peekable();
+    let mut at_field_start = true;
+    let mut in_quotes = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if at_field_start => in_quotes = true,
+            '"' if in_quotes => {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            }
+            '\t' if !in_quotes => {
+                rows.last_mut().unwrap().push(std::mem::take(&mut field));
+                at_field_start = true;
+                continue;
+            }
+            '\n' if !in_quotes => {
+                rows.last_mut().unwrap().push(std::mem::take(&mut field));
+                rows.push(Vec::new());
+                at_field_start = true;
+                continue;
+            }
+            _ => field.push(c),
+        }
+        at_field_start = false;
+    }
+    rows.last_mut().unwrap().push(field);
+    rows
 }
 
 /// Snapshot of a cell's state for undo/redo
@@ -193,6 +259,11 @@ pub struct SpreadsheetApp {
     modified: bool,
     /// Last title sent to the window
     window_title: String,
+    /// Cells last copied or cut in this app
+    clipboard: Option<ClipboardCells>,
+    /// While true, chart refreshes wait until the batch ends
+    batching: bool,
+    charts_dirty: bool,
     /// Size of the column or row being resized, before the drag began
     resize_origin: Option<(ResizeAxis, u32, Option<f32>)>,
     /// Screen position of cell A1's top-left corner, from the last frame
@@ -241,6 +312,9 @@ impl SpreadsheetApp {
             current_file: None,
             modified: false,
             window_title: String::new(),
+            clipboard: None,
+            batching: false,
+            charts_dirty: false,
             resize_origin: None,
             grid_origin: None,
             status_message: None,
@@ -376,12 +450,17 @@ impl SpreadsheetApp {
 
     /// Get cell content as a string for undo/redo snapshots
     fn get_cell_content_string(&self, coord: CellCoord) -> Option<String> {
-        if let Some(formula) = self.engine.get_formula(self.current_sheet, coord) {
+        self.cell_content_string(self.current_sheet, coord)
+    }
+
+    /// A cell's content as it would be typed, or `None` when empty.
+    fn cell_content_string(&self, sheet: u32, coord: CellCoord) -> Option<String> {
+        if let Some(formula) = self.engine.get_formula(sheet, coord) {
             return Some(formula_bar_text(&formula));
         }
 
         // Otherwise get the value
-        match self.engine.get_value(self.current_sheet, coord) {
+        match self.engine.get_value(sheet, coord) {
             CellResult::Empty => None,
             CellResult::Value(n) => Some(n.to_string()),
             CellResult::Text(s) => Some(s),
@@ -392,6 +471,12 @@ impl SpreadsheetApp {
 
     /// Set cell content from user input (with undo support)
     fn set_cell_content(&mut self, coord: CellCoord, content: &str) {
+        let action = self.set_cell_content_action(coord, content);
+        self.undo_history.push(action);
+    }
+
+    /// Set cell content as if typed, returning the undo action for it.
+    fn set_cell_content_action(&mut self, coord: CellCoord, content: &str) -> UndoAction {
         let content = content.trim();
         let sheet = self.current_sheet;
 
@@ -439,7 +524,7 @@ impl SpreadsheetApp {
             }
             _ => None,
         };
-        let action = match typed_format {
+        match typed_format {
             Some(code) => {
                 let mut new_format = old_format.clone().unwrap_or_default();
                 new_format.number_format = Some(code.to_string());
@@ -454,8 +539,7 @@ impl SpreadsheetApp {
                 ])
             }
             None => content_action,
-        };
-        self.undo_history.push(action);
+        }
     }
 
     /// Apply a cell content string (used by undo/redo)
@@ -570,6 +654,342 @@ impl SpreadsheetApp {
                     }
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Clipboard
+    // ------------------------------------------------------------------
+
+    /// Run many cell changes, refreshing charts once at the end.
+    fn batch<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        self.batching = true;
+        let out = f(self);
+        self.batching = false;
+        if std::mem::take(&mut self.charts_dirty) {
+            self.refresh_all_charts();
+        }
+        out
+    }
+
+    /// Copy (or cut) the selection: displayed values go to the system
+    /// clipboard as tab-separated text; formulas and formats stay here.
+    fn copy_selection(&mut self, ctx: &egui::Context, cut: bool) {
+        let sheet = self.current_sheet;
+        let range = self.selection.primary_range();
+        let mut cells = HashMap::new();
+        let mut lines = Vec::new();
+        for row in range.start.row..=range.end.row {
+            let mut fields = Vec::new();
+            for col in range.start.col..=range.end.col {
+                let coord = CellCoord::new(row, col);
+                let format = self.engine.cell_format(sheet, coord).cloned();
+                let value = self.engine.get_value(sheet, coord);
+                fields.push(tsv_field(&display_text(&value, format.as_ref())));
+                let content = self.cell_content_string(sheet, coord);
+                if content.is_some() || format.is_some() {
+                    cells.insert(
+                        (row - range.start.row, col - range.start.col),
+                        (content, format),
+                    );
+                }
+            }
+            lines.push(fields.join("\t"));
+        }
+        let text = lines.join("\r\n") + "\r\n";
+        ctx.copy_text(text.clone());
+        let count = (range.end.row - range.start.row + 1) * (range.end.col - range.start.col + 1);
+        self.clipboard = Some(ClipboardCells {
+            sheet,
+            origin: range.start,
+            rows: range.end.row - range.start.row + 1,
+            cols: range.end.col - range.start.col + 1,
+            cells,
+            text,
+            cut,
+        });
+        let noun = if count == 1 { "cell" } else { "cells" };
+        self.set_status(&if cut {
+            format!("Cut {count} {noun}; paste to move them")
+        } else {
+            format!("Copied {count} {noun}")
+        });
+    }
+
+    /// Paste clipboard text at the selection.
+    fn paste_text(&mut self, text: &str) {
+        let normalize = |t: &str| t.replace("\r\n", "\n").trim_end_matches('\n').to_string();
+        let ours = self
+            .clipboard
+            .as_ref()
+            .is_some_and(|c| normalize(&c.text) == normalize(text));
+        if ours {
+            if let Some(clip) = self.clipboard.take() {
+                self.paste_cells(&clip);
+                if !clip.cut {
+                    self.clipboard = Some(clip);
+                }
+            }
+        } else {
+            self.paste_values(text);
+        }
+    }
+
+    /// Top-left corners to paste a `rows` x `cols` block at. A single cell
+    /// fills the whole selection, as in Excel.
+    fn paste_targets(&self, rows: u32, cols: u32) -> Vec<CellCoord> {
+        let range = self.selection.primary_range();
+        if rows == 1 && cols == 1 {
+            (range.start.row..=range.end.row)
+                .flat_map(|r| (range.start.col..=range.end.col).map(move |c| CellCoord::new(r, c)))
+                .collect()
+        } else {
+            vec![range.start]
+        }
+    }
+
+    /// Paste cells copied in this app, keeping formulas and formats.
+    fn paste_cells(&mut self, clip: &ClipboardCells) {
+        let sheet = self.current_sheet;
+        let targets = self.paste_targets(clip.rows, clip.cols);
+        let parser = FormulaParser::new();
+        let actions = self.batch(|app| {
+            let mut actions = Vec::new();
+            let mut format_changes = Vec::new();
+            let mut written = HashSet::new();
+            for origin in &targets {
+                for r in 0..clip.rows {
+                    for c in 0..clip.cols {
+                        let dest = CellCoord::new(origin.row + r, origin.col + c);
+                        let (content, format) =
+                            clip.cells.get(&(r, c)).cloned().unwrap_or((None, None));
+                        // Copied formulas follow their new position; cut ones keep
+                        // their references, as in Excel.
+                        let content = match content {
+                            Some(f) if f.starts_with('=') && !clip.cut => {
+                                let src = CellCoord::new(clip.origin.row + r, clip.origin.col + c);
+                                let rows = dest.row as i64 - src.row as i64;
+                                let cols = dest.col as i64 - src.col as i64;
+                                match parser.parse(&f) {
+                                    Ok(mut expr) if rows != 0 || cols != 0 => {
+                                        expr.offset_references(rows, cols);
+                                        Some(format!("={expr}"))
+                                    }
+                                    _ => Some(f),
+                                }
+                            }
+                            other => other,
+                        };
+                        app.put_cell(
+                            sheet,
+                            dest,
+                            content,
+                            format,
+                            &mut actions,
+                            &mut format_changes,
+                        );
+                        written.insert(dest);
+                    }
+                }
+            }
+            if !format_changes.is_empty() {
+                actions.push(UndoAction::Format {
+                    sheet,
+                    changes: format_changes,
+                });
+            }
+
+            // Moving: clear what was left behind at the source.
+            if clip.cut {
+                let mut source_formats = Vec::new();
+                for &(r, c) in clip.cells.keys() {
+                    let src = CellCoord::new(clip.origin.row + r, clip.origin.col + c);
+                    if clip.sheet != sheet || !written.contains(&src) {
+                        app.put_cell(
+                            clip.sheet,
+                            src,
+                            None,
+                            None,
+                            &mut actions,
+                            &mut source_formats,
+                        );
+                    }
+                }
+                if !source_formats.is_empty() {
+                    actions.push(UndoAction::Format {
+                        sheet: clip.sheet,
+                        changes: source_formats,
+                    });
+                }
+            }
+            actions
+        });
+
+        if targets.len() == 1 {
+            let start = targets[0];
+            self.selection.move_to(start);
+            self.selection.extend_to(CellCoord::new(
+                start.row + clip.rows - 1,
+                start.col + clip.cols - 1,
+            ));
+        }
+        self.finish_paste(actions);
+    }
+
+    /// Write one cell's content and format, recording undo steps.
+    fn put_cell(
+        &mut self,
+        sheet: u32,
+        coord: CellCoord,
+        content: Option<String>,
+        format: Option<CellFormat>,
+        actions: &mut Vec<UndoAction>,
+        format_changes: &mut Vec<(CellCoord, Option<CellFormat>, Option<CellFormat>)>,
+    ) {
+        // Format first, so a Text (@) format applies to the content.
+        let old_format = self.engine.cell_format(sheet, coord).cloned();
+        if old_format != format {
+            self.engine
+                .set_cell_format(sheet, coord, format.clone().unwrap_or_default());
+            format_changes.push((coord, old_format, format));
+        }
+        let old_value = self.cell_content_string(sheet, coord);
+        if old_value != content {
+            self.apply_cell_content(sheet, coord, content.as_deref());
+            let old_value = old_value.map(|input| CellSnapshot { input });
+            actions.push(match content {
+                Some(input) => UndoAction::CellChange {
+                    sheet,
+                    coord,
+                    old_value,
+                    new_value: Some(CellSnapshot { input }),
+                },
+                None => UndoAction::CellClear {
+                    sheet,
+                    coord,
+                    old_value,
+                },
+            });
+        }
+    }
+
+    /// Paste text from another app: each field is entered as if typed.
+    fn paste_values(&mut self, text: &str) {
+        let rows = parse_tsv(text);
+        let height = rows.len() as u32;
+        let width = rows.iter().map(Vec::len).max().unwrap_or(0) as u32;
+        if height == 0 || width == 0 {
+            return;
+        }
+        let targets = self.paste_targets(height, width);
+        let actions = self.batch(|app| {
+            let mut actions = Vec::new();
+            for origin in &targets {
+                for (r, row) in rows.iter().enumerate() {
+                    for (c, field) in row.iter().enumerate() {
+                        let dest = CellCoord::new(origin.row + r as u32, origin.col + c as u32);
+                        let unchanged = app.get_cell_content_string(dest).as_deref().unwrap_or("")
+                            == field.trim();
+                        if !unchanged {
+                            actions.push(app.set_cell_content_action(dest, field));
+                        }
+                    }
+                }
+            }
+            actions
+        });
+        if targets.len() == 1 {
+            let start = targets[0];
+            self.selection.move_to(start);
+            self.selection.extend_to(CellCoord::new(
+                start.row + height - 1,
+                start.col + width - 1,
+            ));
+        }
+        self.finish_paste(actions);
+    }
+
+    fn finish_paste(&mut self, actions: Vec<UndoAction>) {
+        if actions.is_empty() {
+            return;
+        }
+        self.undo_history.push(UndoAction::Group(actions));
+        self.modified = true;
+        self.set_status("Pasted");
+    }
+
+    /// Edit > Paste and the right-click menu read the clipboard directly;
+    /// Ctrl+V arrives as an egui paste event instead.
+    fn paste_from_system_clipboard(&mut self) {
+        match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+            Ok(text) if !text.is_empty() => self.paste_text(&text),
+            _ => self.set_status("Nothing to paste"),
+        }
+    }
+
+    /// Clear the contents (not formats) of every selected cell.
+    fn delete_selection(&mut self) {
+        let sheet = self.current_sheet;
+        let range = self.selection.primary_range();
+        let in_range = |c: &CellCoord| {
+            (range.start.row..=range.end.row).contains(&c.row)
+                && (range.start.col..=range.end.col).contains(&c.col)
+        };
+        let coords: Vec<CellCoord> = self
+            .engine
+            .iter_sheet_inputs(sheet)
+            .map(|(coord, _)| coord)
+            .filter(in_range)
+            .collect();
+        if coords.is_empty() {
+            return;
+        }
+        let actions = self.batch(|app| {
+            coords
+                .into_iter()
+                .map(|coord| app.set_cell_content_action(coord, ""))
+                .collect::<Vec<_>>()
+        });
+        self.undo_history.push(UndoAction::Group(actions));
+    }
+
+    /// Ctrl+C / X / V arrive as egui events. Text fields (formula bar,
+    /// dialogs) handle their own, so act only when the grid or nothing has focus.
+    fn handle_clipboard_events(&mut self, ctx: &egui::Context) {
+        let grid_id = egui::Id::new("spreadsheet_grid");
+        let grid_has_keys = ctx.memory(|m| m.focused()).is_none_or(|id| id == grid_id);
+        if self.is_editing() || !grid_has_keys {
+            return;
+        }
+        let events: Vec<egui::Event> = ctx.input(|i| {
+            i.events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_)
+                    )
+                })
+                .cloned()
+                .collect()
+        });
+        for event in events {
+            match event {
+                egui::Event::Copy => self.copy_selection(ctx, false),
+                egui::Event::Cut => self.copy_selection(ctx, true),
+                egui::Event::Paste(text) => self.paste_text(&text),
+                _ => {}
+            }
+        }
+    }
+
+    fn handle_context_action(&mut self, ctx: &egui::Context, action: ContextAction) {
+        match action {
+            ContextAction::Cut => self.copy_selection(ctx, true),
+            ContextAction::Copy => self.copy_selection(ctx, false),
+            ContextAction::Paste => self.paste_from_system_clipboard(),
+            ContextAction::ClearContents => self.delete_selection(),
+            ContextAction::ClearFormatting => self.handle_format_action(FormatAction::Clear),
         }
     }
 
@@ -1353,6 +1773,10 @@ impl SpreadsheetApp {
 
     /// Refresh all chart data (called after cell edits)
     fn refresh_all_charts(&mut self) {
+        if self.batching {
+            self.charts_dirty = true;
+            return;
+        }
         // Mark resolver as needing refresh
         self.chart_data_resolver.invalidate_all();
 
@@ -1478,6 +1902,22 @@ impl eframe::App for SpreadsheetApp {
                     {
                         self.redo();
                         ui.close_menu();
+                    }
+                    ui.separator();
+                    let items = [
+                        (format!("Cut ({MOD}+X)"), ContextAction::Cut),
+                        (format!("Copy ({MOD}+C)"), ContextAction::Copy),
+                        (format!("Paste ({MOD}+V)"), ContextAction::Paste),
+                        (
+                            "Clear Contents (Del)".to_string(),
+                            ContextAction::ClearContents,
+                        ),
+                    ];
+                    for (label, action) in items {
+                        if ui.button(label).clicked() {
+                            self.handle_context_action(ctx, action);
+                            ui.close_menu();
+                        }
                     }
                 });
 
@@ -1706,13 +2146,16 @@ impl eframe::App for SpreadsheetApp {
                 self.help_panel.visible = false;
             }
 
-            // Delete to clear cell (with undo support)
+            // Delete clears every selected cell (with undo support)
             if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace))
                 && !self.is_editing()
             {
-                let coord = self.selection.active;
-                self.set_cell_content(coord, "");
+                self.delete_selection();
             }
+        }
+
+        if !formula_bar_has_focus {
+            self.handle_clipboard_events(ctx);
         }
 
         // Ctrl (Cmd on macOS) shortcuts work globally
@@ -1765,6 +2208,16 @@ impl eframe::App for SpreadsheetApp {
             );
 
             let grid_response = grid.show(ui);
+
+            // Right-click outside the selection selects that cell first.
+            if let Some(coord) = grid_response.right_clicked_cell {
+                if !self.selection.contains(coord) {
+                    self.selection.move_to(coord);
+                }
+            }
+            if let Some(action) = grid_response.context_action {
+                self.handle_context_action(ctx, action);
+            }
 
             // Column and row resizing; one undo step per drag
             if let Some((axis, index, size)) = grid_response.resize {
@@ -1947,7 +2400,7 @@ fn window_icon() -> Option<egui::IconData> {
 mod tests {
     use super::*;
     use crate::calc::CellValueInput;
-    use crate::formula::FormulaParser;
+    use crate::cell::CellError;
 
     #[test]
     fn displayed_formula_reparses() {
@@ -2237,5 +2690,266 @@ mod tests {
             app.engine.get_value(0, CellCoord::from_a1("B1").unwrap()),
             CellResult::Value(1234.5)
         );
+    }
+
+    fn cell(app: &SpreadsheetApp, a1: &str) -> CellResult {
+        app.engine
+            .get_value(app.current_sheet, CellCoord::from_a1(a1).unwrap())
+    }
+
+    fn put(app: &mut SpreadsheetApp, a1: &str, content: &str) {
+        app.set_cell_content(CellCoord::from_a1(a1).unwrap(), content);
+    }
+
+    /// What the system clipboard would hand back for the last copy.
+    fn clipboard_text(app: &SpreadsheetApp) -> String {
+        app.clipboard.as_ref().unwrap().text.clone()
+    }
+
+    #[test]
+    fn tsv_round_trips_awkward_fields() {
+        let fields = ["plain", "tab\there", "two\nlines", "say \"hi\""];
+        let line: Vec<String> = fields.iter().map(|f| tsv_field(f)).collect();
+        let text = line.join("\t") + "\r\n";
+        assert_eq!(parse_tsv(&text), vec![fields.map(String::from).to_vec()]);
+        assert_eq!(
+            parse_tsv("a\tb\r\nc\td\r\n"),
+            vec![
+                vec!["a".to_string(), "b".into()],
+                vec!["c".into(), "d".into()]
+            ]
+        );
+        assert_eq!(
+            parse_tsv("x\t\ty"),
+            vec![vec!["x".to_string(), "".into(), "y".into()]]
+        );
+    }
+
+    #[test]
+    fn copy_paste_shifts_formulas_and_keeps_formats() {
+        let ctx = egui::Context::default();
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        put(&mut app, "A1", "5");
+        put(&mut app, "B1", "=A1*2");
+        put(&mut app, "A2", "7");
+        put(&mut app, "B2", "=$A$1+A2");
+        select(&mut app, "A1", "B2");
+        app.handle_format_action(FormatAction::ToggleBold);
+        app.copy_selection(&ctx, false);
+        // The system clipboard gets what is on screen.
+        assert_eq!(clipboard_text(&app), "5\t10\r\n7\t12\r\n");
+
+        select(&mut app, "C4", "C4");
+        let text = clipboard_text(&app);
+        app.paste_text(&text);
+        assert_eq!(
+            app.engine
+                .get_formula(0, CellCoord::from_a1("D4").unwrap())
+                .as_deref(),
+            Some("=(C4*2)")
+        );
+        // =$A$1+C5: the absolute part stays, the relative part moves.
+        assert_eq!(cell(&app, "D5"), CellResult::Value(12.0));
+        assert!(format_of(&app, "D5").bold);
+        // The pasted block is selected.
+        assert_eq!(
+            app.selection.primary_range(),
+            CellRange::from_a1("C4:D5").unwrap()
+        );
+
+        // One undo removes the whole paste.
+        app.undo();
+        assert_eq!(cell(&app, "D4"), CellResult::Empty);
+        assert!(!format_of(&app, "C4").bold);
+        app.redo();
+        assert_eq!(cell(&app, "C4"), CellResult::Value(5.0));
+    }
+
+    #[test]
+    fn formulas_pushed_off_the_sheet_become_ref_errors() {
+        let ctx = egui::Context::default();
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        put(&mut app, "B2", "=A1");
+        select(&mut app, "B2", "B2");
+        app.copy_selection(&ctx, false);
+        select(&mut app, "A1", "A1");
+        let text = clipboard_text(&app);
+        app.paste_text(&text);
+        assert_eq!(cell(&app, "A1"), CellResult::Error(CellError::Ref));
+    }
+
+    #[test]
+    fn cut_paste_moves_cells_without_rewriting_references() {
+        let ctx = egui::Context::default();
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        put(&mut app, "A1", "3");
+        put(&mut app, "A2", "=A1+1");
+        select(&mut app, "A2", "A2");
+        app.handle_format_action(FormatAction::ToggleItalic);
+        app.copy_selection(&ctx, true);
+        select(&mut app, "C5", "C5");
+        let text = clipboard_text(&app);
+        app.paste_text(&text);
+
+        assert_eq!(cell(&app, "C5"), CellResult::Value(4.0));
+        assert_eq!(
+            app.engine
+                .get_formula(0, CellCoord::from_a1("C5").unwrap())
+                .as_deref(),
+            Some("=A1+1")
+        );
+        assert!(format_of(&app, "C5").italic);
+        assert_eq!(cell(&app, "A2"), CellResult::Empty);
+        assert!(!format_of(&app, "A2").italic);
+        // A cut pastes once.
+        assert!(app.clipboard.is_none());
+
+        app.undo();
+        assert_eq!(cell(&app, "A2"), CellResult::Value(4.0));
+        assert!(format_of(&app, "A2").italic);
+        assert_eq!(cell(&app, "C5"), CellResult::Empty);
+    }
+
+    #[test]
+    fn one_copied_cell_fills_the_selection() {
+        let ctx = egui::Context::default();
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        put(&mut app, "A1", "1");
+        put(&mut app, "B1", "=A1*10");
+        select(&mut app, "B1", "B1");
+        app.copy_selection(&ctx, false);
+        put(&mut app, "A2", "2");
+        put(&mut app, "A3", "3");
+        select(&mut app, "B2", "B3");
+        let text = clipboard_text(&app);
+        app.paste_text(&text);
+        assert_eq!(cell(&app, "B2"), CellResult::Value(20.0));
+        assert_eq!(cell(&app, "B3"), CellResult::Value(30.0));
+    }
+
+    #[test]
+    fn text_from_other_apps_is_entered_as_typed() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        put(&mut app, "A1", "old");
+        select(&mut app, "A1", "A1");
+        // Excel copies displayed values, tab-separated, with CRLF lines.
+        app.paste_text("Item\tCost\r\nTea\t$4.50\r\nShare\t12%\r\n\"two\nlines\"\t=1+1\r\n");
+        assert_eq!(cell(&app, "A1"), CellResult::Text("Item".into()));
+        assert_eq!(cell(&app, "B2"), CellResult::Value(4.5));
+        assert_eq!(
+            format_of(&app, "B2").number_format.as_deref(),
+            Some("$#,##0.00")
+        );
+        assert_eq!(cell(&app, "B3"), CellResult::Value(0.12));
+        assert_eq!(cell(&app, "A4"), CellResult::Text("two\nlines".into()));
+        assert_eq!(cell(&app, "B4"), CellResult::Value(2.0));
+
+        app.undo();
+        assert_eq!(cell(&app, "A1"), CellResult::Text("old".into()));
+        assert_eq!(cell(&app, "B2"), CellResult::Empty);
+        assert!(format_of(&app, "B2").number_format.is_none());
+    }
+
+    #[test]
+    fn delete_clears_the_whole_selection_but_keeps_formats() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        for (a1, v) in [("A1", "1"), ("B1", "2"), ("A2", "=A1+B1"), ("C3", "keep")] {
+            put(&mut app, a1, v);
+        }
+        select(&mut app, "A1", "B2");
+        app.handle_format_action(FormatAction::ToggleBold);
+        app.delete_selection();
+        for a1 in ["A1", "B1", "A2"] {
+            assert_eq!(cell(&app, a1), CellResult::Empty, "{a1}");
+        }
+        assert_eq!(cell(&app, "C3"), CellResult::Text("keep".into()));
+        assert!(format_of(&app, "A1").bold);
+
+        app.undo();
+        assert_eq!(cell(&app, "A2"), CellResult::Value(3.0));
+        assert_eq!(
+            app.engine
+                .get_formula(0, CellCoord::from_a1("A2").unwrap())
+                .as_deref(),
+            Some("=A1+B1")
+        );
+    }
+
+    #[test]
+    fn stale_internal_clipboard_is_ignored() {
+        let ctx = egui::Context::default();
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        put(&mut app, "A1", "=1+1");
+        select(&mut app, "A1", "A1");
+        app.copy_selection(&ctx, false);
+        // Something else was copied since: paste that text, not the formula.
+        select(&mut app, "B1", "B1");
+        app.paste_text("hello");
+        assert_eq!(cell(&app, "B1"), CellResult::Text("hello".into()));
+    }
+
+    /// Run one egui frame with `events`, `focus` holding keyboard focus.
+    fn frame_with(
+        app: &mut SpreadsheetApp,
+        events: Vec<egui::Event>,
+        focus: &str,
+    ) -> egui::FullOutput {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        ctx.run(input, |ctx| {
+            ctx.memory_mut(|m| m.request_focus(egui::Id::new(focus)));
+            app.handle_clipboard_events(ctx);
+        })
+    }
+
+    #[test]
+    fn keyboard_copy_and_paste_reach_the_grid() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        put(&mut app, "A1", "42");
+        select(&mut app, "A1", "A1");
+
+        let out = frame_with(&mut app, vec![egui::Event::Copy], "spreadsheet_grid");
+        let copied: Vec<&String> = out
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                egui::OutputCommand::CopyText(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(copied, vec!["42\r\n"]);
+
+        select(&mut app, "B2", "B2");
+        frame_with(
+            &mut app,
+            vec![egui::Event::Paste("42\n".into())],
+            "spreadsheet_grid",
+        );
+        assert_eq!(cell(&app, "B2"), CellResult::Value(42.0));
+    }
+
+    #[test]
+    fn keyboard_paste_is_left_to_a_focused_text_field() {
+        let mut app = SpreadsheetApp::new();
+        app.new_workbook();
+        select(&mut app, "A1", "A1");
+        frame_with(
+            &mut app,
+            vec![egui::Event::Paste("oops".into())],
+            "sheet_rename_box",
+        );
+        assert_eq!(cell(&app, "A1"), CellResult::Empty);
     }
 }
