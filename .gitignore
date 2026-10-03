@@ -3,6 +3,8 @@
 # Ignore markdown files except README
 *.md
 !README.md
+!PRIVACY.md
+!packaging/**/*.md
 
 # Generated files
 test_output.xlsx

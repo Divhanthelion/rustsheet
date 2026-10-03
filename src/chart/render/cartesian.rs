@@ -2,7 +2,7 @@
 //!
 //! Supports Line, Bar, Scatter, Area, and Combo charts.
 
-use eframe::egui::{self, Color32, Rect, RichText, Ui, Vec2};
+use eframe::egui::{self, Color32, Rect, RichText, Stroke, Ui, Vec2};
 use egui_plot::{Bar, BarChart, Corner, Legend, Line, Plot, PlotPoints, Points, Polygon};
 
 use crate::chart::{
@@ -140,7 +140,13 @@ impl CartesianRenderer {
                     .iter()
                     .zip(series.y_values.iter())
                     .filter(|(_, y)| !y.is_nan())
-                    .map(|(&x, &y)| Bar::new(x + offset, y).width(effective_bar_width))
+                    .map(|(&x, &y)| {
+                        // Solid fill; egui_plot's default is a faint tint.
+                        Bar::new(x + offset, y)
+                            .width(effective_bar_width)
+                            .fill(color)
+                            .stroke(Stroke::new(1.0_f32, color))
+                    })
                     .collect();
 
                 BarChart::new(bars).name(&series.name).color(color)
