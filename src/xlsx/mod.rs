@@ -431,6 +431,7 @@ mod tests {
             italic: true,
             underline: true,
             font_size: Some(14),
+            font_name: Some("Georgia".into()),
             font_color: Some(Rgb(0x1F, 0x4E, 0x79)),
             fill: Some(Rgb(0xFF, 0xF2, 0xCC)),
             h_align: HAlign::Center,

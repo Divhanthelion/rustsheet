@@ -28,6 +28,7 @@ mod printing;
 mod recovery;
 mod sheet_ops;
 
+use super::fonts::FontLibrary;
 use super::grid::fit_row_height;
 use super::settings::{Settings, ThemeChoice};
 use crate::format::{
@@ -292,6 +293,8 @@ pub struct SpreadsheetApp {
     last_viewport: Vec2,
     /// Theme and recent files
     settings: Settings,
+    /// Installed fonts, for cells that name one
+    fonts: FontLibrary,
     /// Which theme is applied (true = dark)
     dark_mode: Option<bool>,
     /// This session's autosave
@@ -365,6 +368,7 @@ impl SpreadsheetApp {
             fill_target: None,
             last_viewport: Vec2::new(1200.0, 800.0),
             settings: Settings::in_memory(),
+            fonts: FontLibrary::empty(),
             dark_mode: None,
             recovery: None,
             recoverable: Vec::new(),
@@ -1234,6 +1238,7 @@ impl SpreadsheetApp {
                 self.apply_format(|_, _, f| f.number_format = code.clone());
             }
             FormatAction::Clear => self.apply_format(|_, _, f| *f = CellFormat::default()),
+            FormatAction::FontName(name) => self.apply_format(|_, _, f| f.font_name = name.clone()),
             FormatAction::ToggleWrap => {
                 let on = !current.wrap;
                 self.apply_format(|_, _, f| f.wrap = on);
@@ -1967,6 +1972,7 @@ impl SpreadsheetApp {
             self.dark_mode = Some(dark);
         }
         self.tick_recovery(ctx);
+        self.fonts.begin_frame(ctx);
 
         let title = format!(
             "{}{} - RustSheet",
@@ -2026,9 +2032,10 @@ impl SpreadsheetApp {
 
         // Formatting toolbar
         let active_format = self.active_format();
+        let font_families = self.fonts.families().to_vec();
         TopBottomPanel::top("format_bar").show(ctx, |ui| {
             ui.add_space(2.0);
-            if let Some(action) = format_bar::show(ui, &active_format) {
+            if let Some(action) = format_bar::show(ui, &active_format, &font_families) {
                 format_action = Some(action);
             }
             ui.add_space(2.0);
@@ -2205,7 +2212,8 @@ impl SpreadsheetApp {
             )
             .with_used_extent(used)
             .with_fill_handle(!self.is_editing())
-            .with_fill_preview(fill_preview);
+            .with_fill_preview(fill_preview)
+            .with_fonts(&self.fonts);
 
             let grid_response = grid.show(ui);
 
@@ -2253,6 +2261,7 @@ impl SpreadsheetApp {
                 let height = fit_row_height(
                     ctx,
                     &self.engine,
+                    Some(&self.fonts),
                     &self.grid_config,
                     self.current_sheet,
                     row,
@@ -2303,7 +2312,13 @@ impl SpreadsheetApp {
                 }
             }
             if let Some(col) = grid_response.autofit_column {
-                if let Some(width) = fit_column_width(ctx, &self.engine, self.current_sheet, col) {
+                if let Some(width) = fit_column_width(
+                    ctx,
+                    &self.engine,
+                    Some(&self.fonts),
+                    self.current_sheet,
+                    col,
+                ) {
                     let axis = ResizeAxis::Column;
                     let old = self.current_size(axis, col);
                     self.set_size(self.current_sheet, axis, col, Some(width));
@@ -2450,6 +2465,7 @@ pub fn run_with_file(path: Option<PathBuf>) -> Result<(), eframe::Error> {
         Box::new(move |_cc| {
             let mut app = SpreadsheetApp::new();
             app.settings = Settings::load();
+            app.fonts = FontLibrary::scan_in_background();
             app.recoverable = recovery::find_recoverable();
             app.recovery = Recovery::new();
             if let Some(path) = path {

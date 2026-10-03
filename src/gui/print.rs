@@ -60,6 +60,8 @@ pub struct TextBox {
     pub clip: Rect,
     pub text: String,
     pub size: f32,
+    /// Font family for printing; `None` is the default
+    pub font_name: Option<String>,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
@@ -350,6 +352,7 @@ pub fn layout(
                     clip,
                     text,
                     size,
+                    font_name: format.font_name.clone(),
                     bold: format.bold,
                     italic: format.italic,
                     underline: format.underline,
@@ -804,7 +807,7 @@ pub fn print(doc_name: &str, layout_for: impl Fn((f32, f32)) -> Vec<Page>) -> Re
                 return Err("The print job couldn't be started".into());
             }
             SetBkMode(dc, TRANSPARENT as i32);
-            let face = wide("Segoe UI");
+            let default_face = wide("Segoe UI");
             for page in &pages {
                 if StartPage(dc) <= 0 {
                     break;
@@ -831,6 +834,9 @@ pub fn print(doc_name: &str, layout_for: impl Fn((f32, f32)) -> Vec<Page>) -> Re
                             DeleteObject(pen);
                         }
                         Op::Text(t) => {
+                            let face = t.font_name.as_deref().map(wide);
+                            let face_ptr =
+                                face.as_ref().map_or(default_face.as_ptr(), |f| f.as_ptr());
                             let font = CreateFontW(
                                 -py(t.size),
                                 0,
@@ -845,7 +851,7 @@ pub fn print(doc_name: &str, layout_for: impl Fn((f32, f32)) -> Vec<Page>) -> Re
                                 0,
                                 ANTIALIASED_QUALITY as u32,
                                 0,
-                                face.as_ptr(),
+                                face_ptr,
                             );
                             let old = SelectObject(dc, font);
                             SetTextColor(dc, color(t.color));

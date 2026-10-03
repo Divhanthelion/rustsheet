@@ -86,6 +86,7 @@ fn main() {
     style(&mut e, "A1", &|f| {
         f.bold = true;
         f.font_size = Some(16);
+        f.font_name = Some("Georgia".into());
         f.h_align = HAlign::Center;
         f.v_align = rustsheet::format::VAlign::Center;
     });

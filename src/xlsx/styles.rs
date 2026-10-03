@@ -235,6 +235,7 @@ struct Font {
     underline: bool,
     strikethrough: bool,
     size: Option<f64>,
+    name: Option<String>,
     color: Option<Rgb>,
 }
 
@@ -302,6 +303,7 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
             (b"u", Some(e)) if section == Section::Fonts => font.underline = flag(e),
             (b"strike", Some(e)) if section == Section::Fonts => font.strikethrough = flag(e),
             (b"sz", Some(e)) if section == Section::Fonts => font.size = attr_num(e, b"val"),
+            (b"name", Some(e)) if section == Section::Fonts => font.name = attr(e, b"val"),
             (b"color", Some(e)) if section == Section::Fonts => font.color = parse_color(e, theme),
 
             (b"fill", Some(_)) if section == Section::Fills => {
@@ -361,6 +363,7 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
 
     // Sizes matching the workbook's default font count as default.
     let default_size = fonts.first().and_then(|f| f.size);
+    let default_name = fonts.first().and_then(|f| f.name.clone());
     let xfs = xfs
         .into_iter()
         .map(|xf| {
@@ -374,6 +377,11 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
                     .size
                     .filter(|&s| Some(s) != default_size)
                     .map(|s| s.round().clamp(1.0, 255.0) as u8),
+                // The workbook's own default font counts as no font name.
+                font_name: font
+                    .name
+                    .clone()
+                    .filter(|n| Some(n) != default_name.as_ref()),
                 // Black text is the default; leave it to the theme so it reads in dark mode.
                 font_color: font.color.filter(|&c| c != Rgb::BLACK),
                 fill: fills.get(xf.fill).copied().flatten(),

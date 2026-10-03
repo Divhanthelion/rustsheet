@@ -494,6 +494,9 @@ fn to_xlsx_format(f: &CellFormat) -> Format {
     if let Some(size) = f.font_size {
         format = format.set_font_size(size as f64);
     }
+    if let Some(name) = &f.font_name {
+        format = format.set_font_name(name);
+    }
     if let Some(color) = f.font_color {
         format = format.set_font_color(Color::RGB(color.to_u32()));
     }

@@ -11,7 +11,7 @@ license = "MIT"
 default = ["xlsx", "gui", "csv"]
 xlsx = ["dep:calamine", "dep:rust_xlsxwriter", "dep:zip", "dep:serde_json", "dep:quick-xml"]
 csv = ["dep:csv"]
-gui = ["dep:eframe", "dep:egui_extras", "dep:egui_plot", "dep:image", "dep:rfd", "dep:arboard", "dep:serde_json", "dep:ttf-parser", "dep:flate2", "dep:epaint_default_fonts", "dep:windows-sys"]
+gui = ["dep:eframe", "dep:egui_extras", "dep:egui_plot", "dep:image", "dep:rfd", "dep:arboard", "dep:serde_json", "dep:ttf-parser", "dep:flate2", "dep:epaint_default_fonts", "dep:windows-sys", "dep:fontdb"]
 web = ["dep:eframe", "dep:egui_extras", "dep:egui_plot", "dep:image", "dep:wasm-bindgen", "dep:console_error_panic_hook", "dep:web-sys", "dep:wasm-bindgen-futures", "dep:getrandom"]
 gpu = ["dep:wgpu", "dep:glyphon", "dep:cosmic-text", "dep:bytemuck", "dep:raw-window-handle"]
 wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:console_error_panic_hook", "wgpu?/webgpu", "wgpu?/webgl"]
@@ -53,7 +53,7 @@ tokio = { version = "1.0", features = ["rt-multi-thread", "sync"], optional = tr
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "accesskit"], optional = true }
 egui_extras = { version = "0.31", features = ["all_loaders"], optional = true }
 egui_plot = { version = "0.31", optional = true }
-image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 rfd = { version = "0.15", optional = true }
 # Clipboard reads for Edit > Paste (egui-winit already links it for Ctrl+V)
 arboard = { version = "3.6", optional = true, default-features = false }
@@ -61,6 +61,8 @@ arboard = { version = "3.6", optional = true, default-features = false }
 ttf-parser = { version = "0.25", optional = true }
 flate2 = { version = "1", optional = true }
 epaint_default_fonts = { version = "0.31", optional = true }
+# Installed fonts, for cells that name one (Arial, Calibri, ...)
+fontdb = { version = "0.23", optional = true, default-features = false, features = ["fs", "std"] }
 
 # Web-specific
 web-sys = { version = "0.3", optional = true, features = ["console", "Window", "Document", "Element", "HtmlCanvasElement"] }

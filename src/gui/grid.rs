@@ -5,6 +5,7 @@
 //! / [`SpreadsheetGrid::row_top`] and their inverses, so freezing, hidden
 //! lines and custom sizes are handled in one place.
 
+use super::fonts::FontLibrary;
 use super::selection::Selection;
 use super::theme::Theme;
 use crate::calc::CalcEngine;
@@ -221,10 +222,33 @@ pub fn display_text(value: &CellResult, format: Option<&CellFormat>) -> String {
     crate::format::display_text(value, format)
 }
 
-fn font_for(format: &CellFormat) -> egui::FontId {
-    egui::FontId::proportional(
-        CELL_FONT_SIZE * format.font_size_or_default() as f32 / DEFAULT_FONT_SIZE as f32,
-    )
+/// The font a cell draws with, and whether bold or italic must be faked
+/// (egui's bundled font has neither; installed fonts usually have both).
+struct CellFont {
+    id: egui::FontId,
+    fake_bold: bool,
+    fake_italic: bool,
+}
+
+fn cell_font(format: &CellFormat, library: Option<&FontLibrary>) -> CellFont {
+    let size = CELL_FONT_SIZE * format.font_size_or_default() as f32 / DEFAULT_FONT_SIZE as f32;
+    let named = format
+        .font_name
+        .as_deref()
+        .zip(library)
+        .and_then(|(name, lib)| lib.resolve(name, format.bold, format.italic));
+    match named {
+        Some(r) => CellFont {
+            id: egui::FontId::new(size, r.family),
+            fake_bold: format.bold && !r.bold,
+            fake_italic: format.italic && !r.italic,
+        },
+        None => CellFont {
+            id: egui::FontId::proportional(size),
+            fake_bold: format.bold,
+            fake_italic: format.italic,
+        },
+    }
 }
 
 fn to_color32(c: Rgb) -> Color32 {
@@ -236,6 +260,7 @@ fn layout_text(
     fonts: &egui::text::Fonts,
     text: String,
     format: &CellFormat,
+    font: &CellFont,
     color: Color32,
     wrap_width: Option<f32>,
 ) -> std::sync::Arc<egui::Galley> {
@@ -249,9 +274,9 @@ fn layout_text(
     let mut job = egui::text::LayoutJob::single_section(
         text,
         egui::TextFormat {
-            font_id: font_for(format),
+            font_id: font.id.clone(),
             color,
-            italics: format.italic,
+            italics: font.fake_italic,
             underline: line(format.underline),
             strikethrough: line(format.strikethrough),
             ..Default::default()
@@ -267,6 +292,7 @@ fn layout_text(
 pub fn fit_column_width(
     ctx: &egui::Context,
     engine: &CalcEngine,
+    library: Option<&FontLibrary>,
     sheet: u32,
     col: u32,
 ) -> Option<f32> {
@@ -287,8 +313,9 @@ pub fn fit_column_width(
                     .unwrap_or(&default_format);
                 let value = engine.get_value(sheet, coord);
                 let text = cell_text(&value, format, 11)?;
-                let galley = layout_text(fonts, text.text, format, Color32::WHITE, None);
-                let bold_extra = if format.bold { 1.0 } else { 0.0 };
+                let font = cell_font(format, library);
+                let galley = layout_text(fonts, text.text, format, &font, Color32::WHITE, None);
+                let bold_extra = if font.fake_bold { 1.0 } else { 0.0 };
                 Some(galley.size().x + bold_extra + 3.0 * PADDING)
             })
             .reduce(f32::max)
@@ -301,6 +328,7 @@ pub fn fit_column_width(
 pub fn fit_row_height(
     ctx: &egui::Context,
     engine: &CalcEngine,
+    library: Option<&FontLibrary>,
     config: &GridConfig,
     sheet: u32,
     row: u32,
@@ -324,7 +352,8 @@ pub fn fit_row_height(
                 let wrap = format
                     .wrap
                     .then(|| config.column_width(coord.col) - 2.0 * PADDING);
-                let galley = layout_text(fonts, text.text, format, Color32::WHITE, wrap);
+                let font = cell_font(format, library);
+                let galley = layout_text(fonts, text.text, format, &font, Color32::WHITE, wrap);
                 Some(galley.size().y + 2.0 * PADDING)
             })
             .reduce(f32::max)
@@ -521,6 +550,8 @@ pub struct SpreadsheetGrid<'a> {
     fill_handle: bool,
     /// Cells the fill handle would fill, outlined while dragging
     fill_preview: Option<CellRange>,
+    /// Installed fonts, for cells that name one
+    fonts: Option<&'a FontLibrary>,
     /// Screen rect of the data area, set at the start of `show`
     data: Rect,
 }
@@ -544,6 +575,7 @@ impl<'a> SpreadsheetGrid<'a> {
             used: CellCoord::new(0, 0),
             fill_handle: true,
             fill_preview: None,
+            fonts: None,
             data: Rect::NOTHING,
         }
     }
@@ -556,6 +588,11 @@ impl<'a> SpreadsheetGrid<'a> {
 
     pub fn with_fill_handle(mut self, show: bool) -> Self {
         self.fill_handle = show;
+        self
+    }
+
+    pub fn with_fonts(mut self, fonts: &'a FontLibrary) -> Self {
+        self.fonts = Some(fonts);
         self
     }
 
@@ -1082,7 +1119,8 @@ impl<'a> SpreadsheetGrid<'a> {
     ) {
         let text_rect = cell.shrink(PADDING);
         let room = room.shrink2(Vec2::new(PADDING, 0.0));
-        let font = font_for(format);
+        let cell_font = cell_font(format, self.fonts);
+        let font = cell_font.id.clone();
 
         let digit_width = painter.fonts(|f| f.glyph_width(&font, '0'));
         let max_len = (text_rect.width() / digit_width).floor().max(1.0) as usize;
@@ -1113,12 +1151,14 @@ impl<'a> SpreadsheetGrid<'a> {
         };
 
         let wrap = format.wrap.then_some(text_rect.width());
-        let mut galley = painter.fonts(|f| layout_text(f, text.text, format, color, wrap));
+        let mut galley =
+            painter.fonts(|f| layout_text(f, text.text, format, &cell_font, color, wrap));
         // Numbers never spill into neighbors; like Excel, show #### instead.
         if text.kind == TextKind::Number && galley.size().x > text_rect.width() {
             let hash_width = painter.fonts(|f| f.glyph_width(&font, '#')).max(1.0);
             let count = (text_rect.width() / hash_width).floor().max(1.0) as usize;
-            galley = painter.fonts(|f| layout_text(f, "#".repeat(count), format, color, None));
+            galley = painter
+                .fonts(|f| layout_text(f, "#".repeat(count), format, &cell_font, color, None));
         }
 
         let size = galley.size();
@@ -1140,7 +1180,7 @@ impl<'a> SpreadsheetGrid<'a> {
             .intersect(Rect::from_x_y_ranges(room.x_range(), cell.y_range()));
         let p = painter.with_clip_rect(clip.intersect(painter.clip_rect()));
         let pos = Pos2::new(x, y);
-        if format.bold {
+        if cell_font.fake_bold {
             // egui's bundled fonts have no bold face; overdraw to embolden.
             p.galley(pos + Vec2::new(0.6, 0.0), galley.clone(), color);
         }

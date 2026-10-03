@@ -121,6 +121,8 @@ pub struct CellFormat {
     pub strikethrough: bool,
     /// Font size in points; `None` is [`DEFAULT_FONT_SIZE`].
     pub font_size: Option<u8>,
+    /// Font family, e.g. "Arial"; `None` is the workbook's default font.
+    pub font_name: Option<String>,
     /// Text color; `None` follows the theme.
     pub font_color: Option<Rgb>,
     /// Solid background fill.
