@@ -3,8 +3,9 @@ name = "rustsheet"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "High-performance spreadsheet engine in Rust"
-license = "MIT OR Apache-2.0"
+description = "A fast, native spreadsheet with an Excel-compatible formula engine"
+repository = "https://github.com/Divhanthelion/rustsheet"
+license = "MIT"
 
 [features]
 default = ["xlsx", "gui", "csv"]
@@ -70,6 +71,9 @@ raw-window-handle = { version = "0.6", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [dev-dependencies]
 criterion = "0.5"

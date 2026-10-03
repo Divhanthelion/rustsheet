@@ -1,3 +1,9 @@
+// Release builds are GUI apps: no console window on Windows.
+#![cfg_attr(
+    all(feature = "gui", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use rustsheet::prelude::*;
 
 fn main() {
@@ -11,8 +17,14 @@ fn main() {
             return;
         }
 
-        println!("Starting RustSheet GUI...");
-        if let Err(e) = rustsheet::gui::app::run() {
+        // A file to open, e.g. passed by Explorer for an associated .xlsx/.csv.
+        let file = args
+            .iter()
+            .skip(1)
+            .find(|a| !a.starts_with("--"))
+            .map(std::path::PathBuf::from);
+
+        if let Err(e) = rustsheet::gui::app::run_with_file(file) {
             eprintln!("Error running GUI: {}", e);
             std::process::exit(1);
         }
