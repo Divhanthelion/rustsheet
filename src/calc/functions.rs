@@ -535,7 +535,7 @@ impl BuiltinFunctions {
         values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = values.len() / 2;
 
-        if values.len() % 2 == 0 {
+        if values.len().is_multiple_of(2) {
             CellResult::Value((values[mid - 1] + values[mid]) / 2.0)
         } else {
             CellResult::Value(values[mid])
@@ -767,7 +767,7 @@ impl BuiltinFunctions {
     }
 
     fn eval_ifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        if args.len() < 2 || args.len() % 2 != 0 {
+        if args.len() < 2 || !args.len().is_multiple_of(2) {
             return CellResult::Error(CellError::Value);
         }
 
@@ -787,7 +787,7 @@ impl BuiltinFunctions {
         }
 
         let expr_val = self.eval_arg(&args[0], sheet, engine);
-        let has_default = args.len() % 2 == 0;
+        let has_default = args.len().is_multiple_of(2);
         let pairs_end = if has_default {
             args.len() - 1
         } else {
@@ -1646,7 +1646,7 @@ impl BuiltinFunctions {
     }
 
     fn eval_sumifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        if args.len() < 3 || args.len() % 2 == 0 {
+        if args.len() < 3 || args.len().is_multiple_of(2) {
             return CellResult::Error(CellError::Value);
         }
         let (sum_range, sum_sheet) = match self.bind_range(&args[0], sheet, engine) {
@@ -1681,7 +1681,7 @@ impl BuiltinFunctions {
     }
 
     fn eval_countifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        if args.len() < 2 || args.len() % 2 != 0 {
+        if args.len() < 2 || !args.len().is_multiple_of(2) {
             return CellResult::Error(CellError::Value);
         }
         let (first_range, _) = match self.bind_range(&args[0], sheet, engine) {
@@ -1703,7 +1703,7 @@ impl BuiltinFunctions {
     }
 
     fn eval_averageifs(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        if args.len() < 3 || args.len() % 2 == 0 {
+        if args.len() < 3 || args.len().is_multiple_of(2) {
             return CellResult::Error(CellError::Value);
         }
         let (avg_range, avg_sheet) = match self.bind_range(&args[0], sheet, engine) {
@@ -1754,7 +1754,7 @@ impl BuiltinFunctions {
         expected_w: u32,
         expected_h: u32,
     ) -> Result<Vec<bool>, CellResult> {
-        if pairs.len() < 2 || pairs.len() % 2 != 0 {
+        if pairs.len() < 2 || !pairs.len().is_multiple_of(2) {
             return Err(CellResult::Error(CellError::Value));
         }
         let mut mask = vec![true; expected_len];
