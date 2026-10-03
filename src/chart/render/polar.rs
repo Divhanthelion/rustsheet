@@ -420,7 +420,7 @@ impl ChartRenderer for PolarRenderer {
                 ui.painter().add(egui::Shape::circle_stroke(
                     slice_center,
                     outer_radius,
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 60)),
+                    Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(255, 255, 255, 60)),
                 ));
             }
 

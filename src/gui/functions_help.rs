@@ -49,7 +49,7 @@ impl FunctionCategory {
 
 /// Get all function definitions
 pub fn get_all_functions() -> &'static [FunctionInfo] {
-    &FUNCTIONS
+    FUNCTIONS
 }
 
 /// Get functions matching a prefix (for autocomplete)

@@ -124,12 +124,11 @@ impl HelpPanel {
                                 }
                             }
                             // Filter by search
-                            if !self.search_text.is_empty() {
-                                if !f.name.contains(&search_upper)
-                                    && !f.description.to_uppercase().contains(&search_upper)
-                                {
-                                    return false;
-                                }
+                            if !self.search_text.is_empty()
+                                && !f.name.contains(&search_upper)
+                                && !f.description.to_uppercase().contains(&search_upper)
+                            {
+                                return false;
                             }
                             true
                         })

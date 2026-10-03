@@ -6,8 +6,7 @@ use eframe::egui::{self, Color32, Rect, RichText, Ui, Vec2};
 use egui_plot::{Bar, BarChart, Corner, Legend, Line, Plot, PlotPoints, Points, Polygon};
 
 use crate::chart::{
-    ChartDefinition, ChartKind, ChartStyle, LegendPosition, LineStyle, ResolvedChartData,
-    ResolvedSeriesData,
+    ChartDefinition, ChartKind, ChartStyle, LegendPosition, ResolvedChartData, ResolvedSeriesData,
 };
 
 use super::{ChartRenderer, to_color32};
@@ -38,18 +37,8 @@ impl CartesianRenderer {
         }
     }
 
-    /// Map LineStyle to egui_plot line width (0.0 = invisible)
-    fn line_width_for_style(style: &LineStyle, base_width: f32) -> f32 {
-        match style {
-            LineStyle::Solid => base_width,
-            LineStyle::Dashed => base_width,
-            LineStyle::Dotted => base_width,
-            LineStyle::None => 0.0,
-        }
-    }
-
     /// Build PlotPoints from series data
-    fn build_plot_points(series: &ResolvedSeriesData) -> PlotPoints {
+    fn build_plot_points(series: &ResolvedSeriesData) -> PlotPoints<'_> {
         let points: Vec<[f64; 2]> = series
             .x_values
             .iter()

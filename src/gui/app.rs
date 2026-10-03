@@ -4,7 +4,7 @@ use crate::calc::{CalcEngine, CellResult, CellValueInput};
 use crate::cell::{CellCoord, StringPool};
 use crate::chart::{ChartDataResolver, ChartDefinition, ChartId};
 use eframe::egui::{self, CentralPanel, Key, TopBottomPanel, Vec2};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::chart_editor::ChartEditor;
 use super::chart_widget::ChartWindowManager;
@@ -16,20 +16,15 @@ use super::sheet_tabs::SheetTabs;
 use super::theme::Theme;
 
 /// Input mode FSM - decouples input handling from render order
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum InputMode {
     /// Standard navigation mode; Grid captures focus
+    #[default]
     Navigation,
     /// Transition frame; Focus is being transferred to editor
     TransitionToEdit { initial_char: Option<char> },
     /// Editing mode; FormulaBar captures focus
     Editing { cell: CellCoord },
-}
-
-impl Default for InputMode {
-    fn default() -> Self {
-        Self::Navigation
-    }
 }
 
 /// Per-sheet state that gets saved/restored when switching sheets
@@ -811,7 +806,7 @@ impl SpreadsheetApp {
         self.set_status("New workbook created");
     }
 
-    fn extension_is(path: &PathBuf, ext: &str) -> bool {
+    fn extension_is(path: &Path, ext: &str) -> bool {
         path.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| e.eq_ignore_ascii_case(ext))
@@ -845,7 +840,7 @@ impl SpreadsheetApp {
         }
     }
 
-    fn load_file(&mut self, path: &PathBuf) {
+    fn load_file(&mut self, path: &Path) {
         #[cfg(feature = "csv")]
         if Self::extension_is(path, "csv") {
             self.load_csv(path);
@@ -854,15 +849,14 @@ impl SpreadsheetApp {
         #[cfg(feature = "xlsx")]
         {
             self.load_xlsx(path);
-            return;
         }
         #[cfg(not(feature = "xlsx"))]
         self.set_status("Excel support not enabled. Rebuild with --features xlsx");
     }
 
-    fn finish_open(&mut self, path: &PathBuf) {
+    fn finish_open(&mut self, path: &Path) {
         self.current_sheet = 0;
-        self.current_file = Some(path.clone());
+        self.current_file = Some(path.to_path_buf());
         self.modified = false;
         self.selection = Selection::default();
         self.scroll = ScrollState::default();
@@ -879,7 +873,7 @@ impl SpreadsheetApp {
     }
 
     #[cfg(feature = "csv")]
-    fn load_csv(&mut self, path: &PathBuf) {
+    fn load_csv(&mut self, path: &Path) {
         let mut loaded = CalcEngine::new();
         match crate::csv_io::read_path(&mut loaded, 0, path) {
             Ok(()) => {
@@ -905,7 +899,7 @@ impl SpreadsheetApp {
     }
 
     #[cfg(feature = "xlsx")]
-    fn load_xlsx(&mut self, path: &PathBuf) {
+    fn load_xlsx(&mut self, path: &Path) {
         match XlsxReader::open(path) {
             Ok(mut reader) => {
                 let sheet_names = reader.sheet_names();
@@ -993,7 +987,7 @@ impl SpreadsheetApp {
         }
     }
 
-    fn save_to_path(&mut self, path: &PathBuf) {
+    fn save_to_path(&mut self, path: &Path) {
         #[cfg(feature = "csv")]
         if Self::extension_is(path, "csv") {
             self.save_csv(path);
@@ -1002,17 +996,16 @@ impl SpreadsheetApp {
         #[cfg(feature = "xlsx")]
         {
             self.save_xlsx(path);
-            return;
         }
         #[cfg(not(feature = "xlsx"))]
         self.set_status("Excel support not enabled. Rebuild with --features xlsx");
     }
 
     #[cfg(feature = "csv")]
-    fn save_csv(&mut self, path: &PathBuf) {
+    fn save_csv(&mut self, path: &Path) {
         match crate::csv_io::write_path(&self.engine, self.current_sheet, path) {
             Ok(()) => {
-                self.current_file = Some(path.clone());
+                self.current_file = Some(path.to_path_buf());
                 self.modified = false;
                 let extra = if self.sheet_names.len() > 1 {
                     " (current sheet only)"
@@ -1026,7 +1019,7 @@ impl SpreadsheetApp {
     }
 
     #[cfg(feature = "xlsx")]
-    fn save_xlsx(&mut self, path: &PathBuf) {
+    fn save_xlsx(&mut self, path: &Path) {
         let mut writer = XlsxWriter::new();
 
         let charts = self.chart_windows.all_charts();
@@ -1044,7 +1037,7 @@ impl SpreadsheetApp {
 
         match writer.save_with_charts(path, &charts) {
             Ok(()) => {
-                self.current_file = Some(path.clone());
+                self.current_file = Some(path.to_path_buf());
                 self.modified = false;
                 let sheet_count = self.sheet_names.len();
                 self.set_status(&format!(
@@ -1076,14 +1069,6 @@ impl SpreadsheetApp {
         }
         self.modified = true;
         self.set_status("Chart updated");
-    }
-
-    /// Remove a chart
-    fn remove_chart(&mut self, id: ChartId) {
-        self.chart_windows.remove_chart(id);
-        self.chart_data_resolver.invalidate_all();
-        self.modified = true;
-        self.set_status("Chart removed");
     }
 
     /// Update chart data from spreadsheet cells
@@ -1379,10 +1364,8 @@ impl eframe::App for SpreadsheetApp {
             }
 
             // Escape to close help
-            if ctx.input(|i| i.key_pressed(Key::Escape)) {
-                if self.help_panel.visible {
-                    self.help_panel.visible = false;
-                }
+            if ctx.input(|i| i.key_pressed(Key::Escape)) && self.help_panel.visible {
+                self.help_panel.visible = false;
             }
 
             // Delete to clear cell (with undo support)
@@ -1475,11 +1458,9 @@ impl eframe::App for SpreadsheetApp {
 
             // Handle F2/Enter to edit (only when formula bar doesn't have focus)
             if !formula_bar_has_focus {
-                if grid_response.edit_cell.is_some() {
-                    if !self.is_editing() {
-                        // Start editing - FSM will handle focus in next pre-render
-                        self.start_editing(None);
-                    }
+                if grid_response.edit_cell.is_some() && !self.is_editing() {
+                    // Start editing - FSM will handle focus in next pre-render
+                    self.start_editing(None);
                 }
 
                 // Handle direct text input (start editing with that character)

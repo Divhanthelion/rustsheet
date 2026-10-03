@@ -16,7 +16,6 @@ fn main() {
             eprintln!("Error running GUI: {}", e);
             std::process::exit(1);
         }
-        return;
     }
 
     // If GUI is not enabled, run CLI demo

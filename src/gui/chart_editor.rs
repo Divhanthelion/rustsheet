@@ -5,10 +5,7 @@
 use eframe::egui::{self, Color32, Context, Id, RichText, Ui, Vec2, Window};
 
 use crate::cell::CellRange;
-use crate::chart::{
-    AxisConfig, ChartDefinition, ChartId, ChartKind, ChartSeries, ChartStyle, LegendConfig,
-    LegendPosition,
-};
+use crate::chart::{ChartDefinition, ChartId, ChartKind, ChartSeries, LegendPosition};
 
 /// Wizard step
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,7 +271,7 @@ impl ChartEditor {
                     };
                     series.color = Some(config.color);
                     if i == 0 {
-                        series.x_range = x_range.clone();
+                        series.x_range = x_range;
                     }
                     chart.series.push(series);
                 }
@@ -352,23 +349,21 @@ impl ChartEditor {
                         let is_last_step = self.step.next().is_none();
                         let button_text = if is_last_step { "Create" } else { "Next >" };
 
-                        if ui.button(button_text).clicked() {
-                            if self.validate_step() {
-                                if let Some(next) = self.step.next() {
-                                    self.step = next;
-                                    self.error_message = None;
+                        if ui.button(button_text).clicked() && self.validate_step() {
+                            if let Some(next) = self.step.next() {
+                                self.step = next;
+                                self.error_message = None;
+                            } else {
+                                // Finish - build and return chart
+                                if let Some(chart) = self.build_chart() {
+                                    response.chart = Some(chart);
+                                    response.is_edit = self.editing_id.is_some();
+                                    self.open = false;
                                 } else {
-                                    // Finish - build and return chart
-                                    if let Some(chart) = self.build_chart() {
-                                        response.chart = Some(chart);
-                                        response.is_edit = self.editing_id.is_some();
-                                        self.open = false;
-                                    } else {
-                                        self.error_message = Some(
-                                            "Failed to create chart. Check your data ranges."
-                                                .to_string(),
-                                        );
-                                    }
+                                    self.error_message = Some(
+                                        "Failed to create chart. Check your data ranges."
+                                            .to_string(),
+                                    );
                                 }
                             }
                         }
@@ -515,10 +510,8 @@ impl ChartEditor {
                     ui.label(format!("Series {}:", i + 1));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if series_count > 1 {
-                            if ui.small_button("Remove").clicked() {
-                                to_remove = Some(i);
-                            }
+                        if series_count > 1 && ui.small_button("Remove").clicked() {
+                            to_remove = Some(i);
                         }
                     });
                 });

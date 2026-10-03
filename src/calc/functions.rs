@@ -3148,6 +3148,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is a rounding result, not PI
     fn roundup_rounddown_negative() {
         let mut engine = CalcEngine::new();
         engine

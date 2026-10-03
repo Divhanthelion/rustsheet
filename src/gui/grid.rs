@@ -639,16 +639,14 @@ impl<'a> SpreadsheetGrid<'a> {
         }
 
         // Draw selection border (only if multi-cell)
-        if range.width() > 1 || range.height() > 1 {
-            if sel_rect.intersects(data_rect) {
-                let clipped = sel_rect.intersect(data_rect);
-                painter.rect_stroke(
-                    clipped,
-                    0.0,
-                    self.theme.selection_stroke(),
-                    StrokeKind::Outside,
-                );
-            }
+        if (range.width() > 1 || range.height() > 1) && sel_rect.intersects(data_rect) {
+            let clipped = sel_rect.intersect(data_rect);
+            painter.rect_stroke(
+                clipped,
+                0.0,
+                self.theme.selection_stroke(),
+                StrokeKind::Outside,
+            );
         }
     }
 

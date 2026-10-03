@@ -20,6 +20,7 @@ pub struct FormulaBar {
 }
 
 /// Autocomplete popup state
+#[derive(Default)]
 pub struct AutocompleteState {
     /// Whether autocomplete popup is visible
     pub visible: bool,
@@ -29,17 +30,6 @@ pub struct AutocompleteState {
     pub selected_index: usize,
     /// Position in content where the function name starts
     pub trigger_position: usize,
-}
-
-impl Default for AutocompleteState {
-    fn default() -> Self {
-        Self {
-            visible: false,
-            suggestions: Vec::new(),
-            selected_index: 0,
-            trigger_position: 0,
-        }
-    }
 }
 
 impl FormulaBar {
@@ -109,7 +99,7 @@ impl FormulaBar {
 
         let prefix = &self.content[start..cursor_pos.min(self.content.len())];
 
-        if prefix.len() >= 1 && prefix.chars().all(|c| c.is_alphabetic() || c == '_') {
+        if !prefix.is_empty() && prefix.chars().all(|c| c.is_alphabetic() || c == '_') {
             let suggestions = functions_help::get_matching_functions(prefix);
 
             if !suggestions.is_empty() {
@@ -227,10 +217,8 @@ impl FormulaBar {
 
             // Handle focus and editing state
             // Only auto-start editing if user clicked on the text field (not if focus was set programmatically)
-            if edit_response.gained_focus() && edit_response.clicked() {
-                if !self.editing {
-                    self.start_editing();
-                }
+            if edit_response.gained_focus() && edit_response.clicked() && !self.editing {
+                self.start_editing();
             }
         });
 
@@ -316,7 +304,7 @@ impl FormulaBar {
 
     fn show_autocomplete_popup(&mut self, ui: &mut Ui) {
         // Copy suggestions to avoid borrow issues
-        let suggestions: Vec<_> = self.autocomplete.suggestions.iter().copied().collect();
+        let suggestions: Vec<_> = self.autocomplete.suggestions.to_vec();
         let selected_index = self.autocomplete.selected_index;
         let mut clicked_index: Option<usize> = None;
 

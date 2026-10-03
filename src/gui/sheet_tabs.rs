@@ -86,7 +86,7 @@ impl<'a> SheetTabs<'a> {
                     ui.painter().rect_stroke(
                         rect,
                         rounding,
-                        Stroke::new(1.0, self.theme.selection_border),
+                        Stroke::new(1.0_f32, self.theme.selection_border),
                         StrokeKind::Outside,
                     );
                     // Draw bottom line to "connect" to grid
@@ -95,7 +95,7 @@ impl<'a> SheetTabs<'a> {
                             Pos2::new(rect.left() + 1.0, rect.bottom()),
                             Pos2::new(rect.right() - 1.0, rect.bottom()),
                         ],
-                        Stroke::new(2.0, bg_color),
+                        Stroke::new(2.0_f32, bg_color),
                     );
                 }
 
@@ -131,11 +131,9 @@ impl<'a> SheetTabs<'a> {
                         // For now, just close the menu - rename UI would need more work
                         ui.close_menu();
                     }
-                    if self.sheet_names.len() > 1 {
-                        if ui.button("Delete").clicked() {
-                            response.delete_sheet = Some(index as u32);
-                            ui.close_menu();
-                        }
+                    if self.sheet_names.len() > 1 && ui.button("Delete").clicked() {
+                        response.delete_sheet = Some(index as u32);
+                        ui.close_menu();
                     }
                 });
             }
