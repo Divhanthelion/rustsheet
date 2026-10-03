@@ -463,3 +463,53 @@ fn saves_are_atomic_and_leave_no_temp_files() {
     assert_eq!(val(&back, "A1"), text("v2"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn note(text: &str) -> crate::format::Note {
+    crate::format::Note {
+        text: text.into(),
+        author: None,
+    }
+}
+
+#[test]
+fn notes_undo_copy_sort_and_move_with_rows() {
+    let mut app = app();
+    put(&mut app, "A1", "b");
+    put(&mut app, "A2", "a");
+    app.selection.move_to(at("A1"));
+    app.set_note(at("A1"), Some(note("check")));
+    assert_eq!(
+        app.note_at(at("A1")).map(|n| n.text.as_str()),
+        Some("check")
+    );
+    app.undo();
+    assert!(app.note_at(at("A1")).is_none());
+    app.redo();
+
+    // Copy and paste carries the note.
+    let ctx = egui::Context::default();
+    select(&mut app, "A1", "A1");
+    app.copy_selection(&ctx, false);
+    select(&mut app, "C5", "C5");
+    let text = app.clipboard.as_ref().unwrap().text.clone();
+    app.paste_text(&text);
+    assert!(app.note_at(at("C5")).is_some());
+    app.undo();
+    assert!(app.note_at(at("C5")).is_none());
+
+    // Sorting moves the note with its row ("b" sorts after "a").
+    select(&mut app, "A1", "A2");
+    app.quick_sort(true);
+    assert_eq!(val(&app, "A2"), text_value("b"));
+    assert!(app.note_at(at("A2")).is_some());
+    assert!(app.note_at(at("A1")).is_none());
+
+    // Inserting a row above moves it down.
+    select(&mut app, "A1", "A1");
+    app.insert_lines(Axis::Row);
+    assert!(app.note_at(at("A3")).is_some());
+}
+
+fn text_value(s: &str) -> CellResult {
+    CellResult::Text(s.into())
+}

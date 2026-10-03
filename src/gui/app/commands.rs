@@ -40,6 +40,8 @@ pub(super) enum Command {
     FreezeFirstColumn,
     Unfreeze,
     InsertChart,
+    EditNote,
+    DeleteNote,
     Format(FormatAction),
     Theme(ThemeChoice),
     Help,
@@ -58,6 +60,8 @@ impl From<ContextAction> for Command {
             ContextAction::Delete(axis) => Command::Delete(axis),
             ContextAction::Hide(axis) => Command::Hide(axis),
             ContextAction::Unhide(axis) => Command::Unhide(axis),
+            ContextAction::EditNote => Command::EditNote,
+            ContextAction::DeleteNote => Command::DeleteNote,
             ContextAction::SortAscending => Command::SortAscending,
             ContextAction::SortDescending => Command::SortDescending,
             ContextAction::ToggleFilter => Command::ToggleFilter,
@@ -167,6 +171,7 @@ impl SpreadsheetApp {
                 item(ui, "Columns", "", Command::Insert(Axis::Column), &mut out);
                 ui.separator();
                 item(ui, "Chart...", "", Command::InsertChart, &mut out);
+                item(ui, "Note", "Shift+F2", Command::EditNote, &mut out);
             });
 
             ui.menu_button("Format", |ui| {
@@ -341,6 +346,9 @@ impl SpreadsheetApp {
         if take(cmd, Key::Z) {
             return Some(Command::Undo);
         }
+        if take(Modifiers::SHIFT, Key::F2) {
+            return Some(Command::EditNote);
+        }
         if take(cmd_shift, Key::L) {
             return Some(Command::ToggleFilter);
         }
@@ -433,6 +441,8 @@ impl SpreadsheetApp {
             Command::FreezeFirstColumn => self.freeze(0, 1),
             Command::Unfreeze => self.freeze(0, 0),
             Command::InsertChart => self.open_new_chart_editor(),
+            Command::EditNote => self.open_note_editor(),
+            Command::DeleteNote => self.delete_note(),
             Command::Format(action) => self.handle_format_action(action),
             Command::Theme(choice) => {
                 self.settings.theme = choice;

@@ -535,6 +535,14 @@ mod tests {
             });
         }
         engine.set_cell_format(0, CellCoord::from_a1("B2").unwrap(), wrapped.clone());
+        let note = crate::format::Note {
+            text: "Check this & that <later>".into(),
+            author: Some("Avery".into()),
+        };
+        engine
+            .formatting_mut(0)
+            .notes
+            .insert(CellCoord::from_a1("A3").unwrap(), note.clone());
 
         let path = temp_xlsx("layout");
         let mut writer = XlsxWriter::new();
@@ -554,6 +562,12 @@ mod tests {
         assert_eq!(f.frozen, (1, 1));
         assert!(f.hidden_columns.contains(&6));
         assert!(f.hidden_rows.contains(&2));
+        let read_note = &f.notes[&CellCoord::from_a1("A3").unwrap()];
+        assert!(
+            read_note.text.contains("Check this & that <later>"),
+            "{read_note:?}"
+        );
+        assert_eq!(read_note.author.as_deref(), Some("Avery"));
         let filter = f.filter.as_ref().unwrap();
         assert_eq!(filter.range, r("A1:A4"));
         assert!(filter.allowed[&0].contains("Tea"));

@@ -375,6 +375,8 @@ pub enum ContextAction {
     Delete(Axis),
     Hide(Axis),
     Unhide(Axis),
+    EditNote,
+    DeleteNote,
     SortAscending,
     SortDescending,
     ToggleFilter,
@@ -498,6 +500,8 @@ pub struct GridResponse {
     pub filter_button: Option<(u32, Pos2)>,
     /// New scroll offsets from the wheel or scrollbars
     pub scroll_to: Option<Vec2>,
+    /// The pointer rests on a cell with a note: (cell, where to show it)
+    pub hovered_note: Option<(CellCoord, Pos2)>,
 }
 
 /// Navigation keys
@@ -837,9 +841,29 @@ impl<'a> SpreadsheetGrid<'a> {
                     response.right_clicked_cell = Some(self.cell_at(pos));
                 }
             }
+            if let Some(pos) = grid_response.hover_pos() {
+                let cell = self.cell_at(pos);
+                let owner = self
+                    .formatting()
+                    .and_then(|f| f.merge_at(cell))
+                    .map_or(cell, |m| m.start);
+                if self
+                    .formatting()
+                    .is_some_and(|f| f.notes.contains_key(&owner))
+                {
+                    let range = self
+                        .formatting()
+                        .and_then(|f| f.merge_at(owner))
+                        .unwrap_or(CellRange::single(owner));
+                    response.hovered_note = Some((owner, self.range_rect(range).right_top()));
+                }
+            }
             let filter_on = self.formatting().is_some_and(|f| f.filter.is_some());
+            let has_note = self
+                .formatting()
+                .is_some_and(|f| f.notes.contains_key(&self.selection.active));
             grid_response.context_menu(|ui| {
-                cell_menu(ui, filter_on, &mut response.context_action);
+                cell_menu(ui, filter_on, has_note, &mut response.context_action);
             });
 
             // The wheel scrolls the grid only when the pointer is over it.
@@ -1048,6 +1072,28 @@ impl<'a> SpreadsheetGrid<'a> {
                 let border_stroke = Stroke::new(1.0_f32, self.theme.text_normal);
                 for line in borders {
                     p.line_segment(line, border_stroke);
+                }
+                // Notes: a small red triangle in the top-right corner.
+                if let Some(notes) = formatting.map(|f| &f.notes).filter(|n| !n.is_empty()) {
+                    for row in &pane_rows {
+                        for col in &pane_cols {
+                            let coord = CellCoord::new(row.index, col.index);
+                            if !notes.contains_key(&coord) {
+                                continue;
+                            }
+                            let range = merge_of(coord).unwrap_or(CellRange::single(coord));
+                            let corner = self.range_rect(range).right_top();
+                            p.add(egui::Shape::convex_polygon(
+                                vec![
+                                    corner,
+                                    corner + Vec2::new(-7.0, 0.0),
+                                    corner + Vec2::new(0.0, 7.0),
+                                ],
+                                Color32::from_rgb(220, 30, 30),
+                                Stroke::NONE,
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1826,7 +1872,7 @@ fn menu_item(
 }
 
 /// Right-click menu on cells.
-fn cell_menu(ui: &mut Ui, filter_on: bool, out: &mut Option<ContextAction>) {
+fn cell_menu(ui: &mut Ui, filter_on: bool, has_note: bool, out: &mut Option<ContextAction>) {
     menu_item(ui, "Cut", "Ctrl+X", ContextAction::Cut, out);
     menu_item(ui, "Copy", "Ctrl+C", ContextAction::Copy, out);
     menu_item(ui, "Paste", "Ctrl+V", ContextAction::Paste, out);
@@ -1870,6 +1916,12 @@ fn cell_menu(ui: &mut Ui, filter_on: bool, out: &mut Option<ContextAction>) {
         ContextAction::ToggleFilter,
         out,
     );
+    ui.separator();
+    let note_label = if has_note { "Edit note" } else { "Insert note" };
+    menu_item(ui, note_label, "Shift+F2", ContextAction::EditNote, out);
+    if has_note {
+        menu_item(ui, "Delete note", "", ContextAction::DeleteNote, out);
+    }
     ui.separator();
     menu_item(
         ui,

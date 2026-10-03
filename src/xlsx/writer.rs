@@ -132,6 +132,13 @@ impl XlsxWriter {
             for &row in &formatting.hidden_rows {
                 worksheet.set_row_hidden(row)?;
             }
+            for (coord, note) in &formatting.notes {
+                let mut n = rust_xlsxwriter::Note::new(&note.text);
+                if let Some(author) = &note.author {
+                    n = n.set_author(author);
+                }
+                worksheet.insert_note(coord.row, col_num(coord.col)?, &n)?;
+            }
             let (rows, cols) = formatting.frozen;
             if rows > 0 || cols > 0 {
                 worksheet.set_freeze_panes(rows, col_num(cols)?)?;

@@ -62,6 +62,20 @@ pub fn read_formatting<R: Read + Seek>(
 
     let targets = parse_rels(&rels);
     let mut out = Vec::new();
+    let read_rel = |read: &mut dyn FnMut(&str) -> Option<String>,
+                    sheet_path: &str,
+                    kind: &str|
+     -> Option<(String, String)> {
+        // xl/worksheets/sheet1.xml -> xl/worksheets/_rels/sheet1.xml.rels
+        let (dir, file) = sheet_path.rsplit_once('/').unwrap_or(("", sheet_path));
+        let rels = read(&format!("{dir}/_rels/{file}.rels"))?;
+        let target = parse_typed_rels(&rels)
+            .into_iter()
+            .find(|(_, t, _)| t.ends_with(kind))
+            .map(|(_, _, target)| resolve_part(dir, &target))?;
+        let xml = read(&target)?;
+        Some((target, xml))
+    };
     for (name, rid) in parse_sheet_list(&workbook)? {
         let Some(target) = targets.get(&rid) else {
             continue;
@@ -70,10 +84,13 @@ pub fn read_formatting<R: Read + Seek>(
             Some(abs) => abs.to_string(),
             None => format!("xl/{target}"),
         };
-        let formatting = match read(&path) {
+        let mut formatting = match read(&path) {
             Some(xml) => parse_sheet(&xml, &styles)?,
             None => SheetFormatting::default(),
         };
+        if let Some((_, xml)) = read_rel(&mut read, &path, "/comments") {
+            formatting.notes = parse_comments(&xml)?;
+        }
         out.push((name, formatting));
     }
     Ok(out)
@@ -128,6 +145,123 @@ fn parse_sheet_list(workbook: &str) -> Result<Vec<(String, String)>, String> {
         }
     })?;
     Ok(sheets)
+}
+
+/// Relationships as (id, type, target).
+fn parse_typed_rels(rels: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let _ = walk(rels, |name, e, _| {
+        if let (b"Relationship", Some(e)) = (name, e) {
+            if let (Some(id), Some(kind), Some(target)) =
+                (attr(e, b"Id"), attr(e, b"Type"), attr(e, b"Target"))
+            {
+                out.push((id, kind, target));
+            }
+        }
+    });
+    out
+}
+
+/// A relationship target relative to `dir` ("../comments1.xml" from
+/// "xl/worksheets" is "xl/comments1.xml"); absolute targets start at the root.
+pub(super) fn resolve_part(dir: &str, target: &str) -> String {
+    if let Some(abs) = target.strip_prefix('/') {
+        return abs.to_string();
+    }
+    let mut parts: Vec<&str> = dir.split('/').filter(|p| !p.is_empty()).collect();
+    for seg in target.split('/') {
+        match seg {
+            ".." => {
+                parts.pop();
+            }
+            "." | "" => {}
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+/// Text of an element, with entity references put back.
+pub(super) fn entity_text(e: &quick_xml::events::BytesRef) -> String {
+    if let Ok(Some(c)) = e.resolve_char_ref() {
+        return c.to_string();
+    }
+    match e.decode().as_deref() {
+        Ok("amp") => "&".into(),
+        Ok("lt") => "<".into(),
+        Ok("gt") => ">".into(),
+        Ok("quot") => "\"".into(),
+        Ok("apos") => "'".into(),
+        _ => String::new(),
+    }
+}
+
+/// Notes from a comments part: `<comment ref="A1" authorId="0"><text>...`.
+fn parse_comments(xml: &str) -> Result<BTreeMap<CellCoord, crate::format::Note>, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut authors: Vec<String> = Vec::new();
+    let mut notes = BTreeMap::new();
+    let mut in_author = false;
+    let mut in_text = false;
+    let mut current: Option<(CellCoord, Option<usize>, String)> = None;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => match e.local_name().as_ref() {
+                b"author" => {
+                    in_author = true;
+                    authors.push(String::new());
+                }
+                b"comment" => {
+                    current = attr(&e, b"ref")
+                        .and_then(|r| CellCoord::from_a1(&r))
+                        .map(|c| (c, attr_num(&e, b"authorId"), String::new()));
+                }
+                b"t" => in_text = true,
+                _ => {}
+            },
+            Ok(Event::End(e)) => match e.local_name().as_ref() {
+                b"author" => in_author = false,
+                b"t" => in_text = false,
+                b"comment" => {
+                    if let Some((coord, author, text)) = current.take() {
+                        let author = author
+                            .and_then(|i| authors.get(i).cloned())
+                            .filter(|a| !a.is_empty());
+                        notes.insert(coord, crate::format::Note { text, author });
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Text(t)) => {
+                let s = t.decode().map_err(|e| e.to_string())?;
+                if in_author {
+                    if let Some(a) = authors.last_mut() {
+                        a.push_str(&s);
+                    }
+                } else if in_text {
+                    if let Some((_, _, text)) = &mut current {
+                        text.push_str(&s);
+                    }
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                let s = entity_text(&r);
+                if in_author {
+                    if let Some(a) = authors.last_mut() {
+                        a.push_str(&s);
+                    }
+                } else if in_text {
+                    if let Some((_, _, text)) = &mut current {
+                        text.push_str(&s);
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("XML error in comments: {e}")),
+            _ => {}
+        }
+    }
+    Ok(notes)
 }
 
 fn parse_rels(rels: &str) -> HashMap<String, String> {

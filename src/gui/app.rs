@@ -24,6 +24,7 @@ mod commands;
 mod feature_tests;
 mod fill;
 mod find;
+mod notes;
 mod printing;
 mod recovery;
 mod sheet_ops;
@@ -38,6 +39,7 @@ use crate::formula::FormulaParser;
 use commands::Command;
 use eframe::egui::RichText;
 use find::FindDialog;
+use notes::NoteEditor;
 use printing::PrintDialog;
 use recovery::{Recoverable, Recovery};
 use sheet_ops::{FilterPopup, SortDialog, WorkbookState};
@@ -116,6 +118,13 @@ enum UndoAction {
     },
     /// The whole workbook before and after a structural edit
     Snapshot(Box<(WorkbookState, WorkbookState)>),
+    /// A cell's note
+    Note {
+        sheet: u32,
+        coord: CellCoord,
+        old: Option<crate::format::Note>,
+        new: Option<crate::format::Note>,
+    },
 }
 
 /// Cells copied or cut inside RustSheet. When the system clipboard still
@@ -128,6 +137,8 @@ struct ClipboardCells {
     cols: u32,
     /// By (row, col) offset from `origin`: content as typed, and format
     cells: HashMap<(u32, u32), (Option<String>, Option<CellFormat>)>,
+    /// Notes, by the same offsets
+    notes: HashMap<(u32, u32), crate::format::Note>,
     text: String,
     /// Cut cells move on paste instead of being copied
     cut: bool,
@@ -283,6 +294,8 @@ pub struct SpreadsheetApp {
     sort_dialog: Option<SortDialog>,
     /// Find and Replace, when open
     find_dialog: Option<FindDialog>,
+    /// Note editor, when open
+    note_editor: Option<NoteEditor>,
     /// Export/Print options, when open
     print_dialog: Option<PrintDialog>,
     /// Page setup from the last export or print
@@ -363,6 +376,7 @@ impl SpreadsheetApp {
             filter_popup: None,
             sort_dialog: None,
             find_dialog: None,
+            note_editor: None,
             print_dialog: None,
             last_page_setup: Default::default(),
             fill_target: None,
@@ -720,6 +734,15 @@ impl SpreadsheetApp {
                 }
                 self.modified = true;
             }
+            UndoAction::Note {
+                sheet,
+                coord,
+                old,
+                new,
+            } => {
+                let note = if forward { new } else { old };
+                self.apply_note(*sheet, *coord, note.clone());
+            }
             UndoAction::Snapshot(states) => {
                 let state = if forward { &states.1 } else { &states.0 };
                 self.restore_workbook_state(state);
@@ -759,6 +782,7 @@ impl SpreadsheetApp {
         let sheet = self.current_sheet;
         let range = self.clamp_to_used_or_self(self.selection.primary_range());
         let mut cells = HashMap::new();
+        let mut notes = HashMap::new();
         let mut lines = Vec::new();
         for row in range.start.row..=range.end.row {
             let mut fields = Vec::new();
@@ -768,11 +792,13 @@ impl SpreadsheetApp {
                 let value = self.engine.get_value(sheet, coord);
                 fields.push(tsv_field(&display_text(&value, format.as_ref())));
                 let content = self.cell_content_string(sheet, coord);
-                if content.is_some() || format.is_some() {
-                    cells.insert(
-                        (row - range.start.row, col - range.start.col),
-                        (content, format),
-                    );
+                let offset = (row - range.start.row, col - range.start.col);
+                let note = self.note_at(coord).cloned();
+                if content.is_some() || format.is_some() || note.is_some() {
+                    cells.insert(offset, (content, format));
+                }
+                if let Some(note) = note {
+                    notes.insert(offset, note);
                 }
             }
             lines.push(fields.join("\t"));
@@ -786,6 +812,7 @@ impl SpreadsheetApp {
             rows: range.end.row - range.start.row + 1,
             cols: range.end.col - range.start.col + 1,
             cells,
+            notes,
             text,
             cut,
         });
@@ -869,6 +896,7 @@ impl SpreadsheetApp {
                             &mut actions,
                             &mut format_changes,
                         );
+                        app.put_note(sheet, dest, clip.notes.get(&(r, c)).cloned(), &mut actions);
                         written.insert(dest);
                     }
                 }
@@ -894,6 +922,7 @@ impl SpreadsheetApp {
                             &mut actions,
                             &mut source_formats,
                         );
+                        app.put_note(clip.sheet, src, None, &mut actions);
                     }
                 }
                 if !source_formats.is_empty() {
@@ -915,6 +944,30 @@ impl SpreadsheetApp {
             ));
         }
         self.finish_paste(actions);
+    }
+
+    /// Set or clear one cell's note, recording an undo step.
+    fn put_note(
+        &mut self,
+        sheet: u32,
+        coord: CellCoord,
+        note: Option<crate::format::Note>,
+        actions: &mut Vec<UndoAction>,
+    ) {
+        let old = self
+            .engine
+            .formatting(sheet)
+            .and_then(|f| f.notes.get(&coord))
+            .cloned();
+        if old != note {
+            self.apply_note(sheet, coord, note.clone());
+            actions.push(UndoAction::Note {
+                sheet,
+                coord,
+                old,
+                new: note,
+            });
+        }
     }
 
     /// Write one cell's content and format, recording undo steps.
@@ -2246,6 +2299,11 @@ impl SpreadsheetApp {
                     self.select_lines(axis, index, index);
                 }
             }
+            if let Some((coord, pos)) = grid_response.hovered_note {
+                if self.note_editor.is_none() {
+                    self.show_note_popup(ctx, coord, pos);
+                }
+            }
             if let Some((col, pos)) = grid_response.filter_button {
                 self.open_filter_popup(col, pos);
             }
@@ -2412,6 +2470,7 @@ impl SpreadsheetApp {
         // Dialogs and popups float above everything.
         self.show_recovery_prompt(ctx);
         self.show_find_dialog(ctx);
+        self.show_note_editor(ctx);
         self.show_filter_popup(ctx);
         self.show_sort_dialog(ctx);
         self.show_print_dialog(ctx);

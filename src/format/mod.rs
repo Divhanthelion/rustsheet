@@ -147,6 +147,13 @@ impl CellFormat {
     }
 }
 
+/// A note (Excel's legacy comment) attached to a cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Note {
+    pub text: String,
+    pub author: Option<String>,
+}
+
 /// An AutoFilter: a header row plus the data below it. Rows whose value in a
 /// filtered column is not in that column's allowed set are hidden.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,6 +184,8 @@ pub struct SheetFormatting {
     /// Rows and columns kept on screen while scrolling: (rows, columns)
     pub frozen: (u32, u32),
     pub filter: Option<AutoFilter>,
+    /// Notes, by cell
+    pub notes: BTreeMap<CellCoord, Note>,
 }
 
 impl SheetFormatting {
@@ -245,6 +254,10 @@ impl SheetFormatting {
         self.cells = std::mem::take(&mut self.cells)
             .into_iter()
             .filter_map(|(c, f)| Some((edit.map_coord(c)?, f)))
+            .collect();
+        self.notes = std::mem::take(&mut self.notes)
+            .into_iter()
+            .filter_map(|(c, n)| Some((edit.map_coord(c)?, n)))
             .collect();
         match edit.axis {
             Axis::Row => {
