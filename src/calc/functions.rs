@@ -1157,7 +1157,7 @@ impl BuiltinFunctions {
         };
 
         match val {
-            CellResult::Value(n) => CellResult::Text(apply_text_format(n, &format)),
+            CellResult::Value(n) => CellResult::Text(crate::format::format_number(n, &format).text),
             CellResult::Text(s) => CellResult::Text(s),
             CellResult::Bool(b) => CellResult::Text(if b { "TRUE".into() } else { "FALSE".into() }),
             CellResult::Empty => CellResult::Text(String::new()),
@@ -2157,7 +2157,7 @@ fn criteria_number(val: &CellResult) -> Option<f64> {
     }
 }
 
-fn apply_text_format(n: f64, format: &str) -> String {
+pub(crate) fn apply_text_format(n: f64, format: &str) -> String {
     if is_date_format(format) {
         return format_date_serial(n, format);
     }
@@ -2414,7 +2414,7 @@ fn rand_simple() -> f64 {
 
 /// Convert year, month, day to Excel serial date number
 /// Excel's epoch is 1900-01-01 = 1 (with the infamous 1900 leap year bug)
-fn date_to_serial(year: i32, month: i32, day: i32) -> f64 {
+pub(crate) fn date_to_serial(year: i32, month: i32, day: i32) -> f64 {
     // Adjust for months outside 1-12
     let mut y = year;
     let mut m = month;
@@ -2458,7 +2458,7 @@ fn date_to_serial(year: i32, month: i32, day: i32) -> f64 {
 }
 
 /// Convert Excel serial date number to (year, month, day)
-fn serial_to_date(serial: f64) -> (i32, i32, i32) {
+pub(crate) fn serial_to_date(serial: f64) -> (i32, i32, i32) {
     let mut days = serial as i32;
 
     // Account for Excel's 1900 leap year bug

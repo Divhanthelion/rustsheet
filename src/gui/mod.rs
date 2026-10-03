@@ -5,6 +5,7 @@
 pub mod app;
 mod chart_editor;
 mod chart_widget;
+mod format_bar;
 mod formula_bar;
 mod functions_help;
 mod grid;

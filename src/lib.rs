@@ -36,6 +36,7 @@
 pub mod calc;
 pub mod cell;
 pub mod chart;
+pub mod format;
 pub mod formula;
 pub mod grid;
 
@@ -65,6 +66,7 @@ pub mod prelude {
         ChartDataResolver, ChartDefinition, ChartId, ChartKind, ChartOverlayArea, ChartSeries,
         ChartStyle, SheetObject, SheetObjectManager,
     };
+    pub use crate::format::{Borders, CellFormat, HAlign, Rgb, SheetFormatting};
     pub use crate::formula::{BinaryOp, Expr, FormulaParser, FunctionCall, UnaryOp};
     pub use crate::grid::{Sheet, SparseGrid};
 

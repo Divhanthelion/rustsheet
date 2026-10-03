@@ -73,6 +73,43 @@ fn main() {
     text(&mut engine, "A11", "Average");
     formula(&mut engine, "D11", "=AVERAGE(D2:D7)");
 
+    // Formatting: a header band, money and percent formats, a totals rule.
+    let style = |engine: &mut CalcEngine, cells: &str, f: &dyn Fn(&mut CellFormat)| {
+        let r = CellRange::from_a1(cells).unwrap();
+        for row in r.start.row..=r.end.row {
+            for col in r.start.col..=r.end.col {
+                let coord = CellCoord::new(row, col);
+                let mut format = engine.cell_format(0, coord).cloned().unwrap_or_default();
+                f(&mut format);
+                engine.set_cell_format(0, coord, format);
+            }
+        }
+    };
+    style(&mut engine, "A1:E1", &|f| {
+        f.bold = true;
+        f.fill = Some(Rgb(0x2E, 0x7D, 0x46));
+        f.font_color = Some(Rgb::WHITE);
+    });
+    style(&mut engine, "B1:E1", &|f| f.h_align = HAlign::Right);
+    style(&mut engine, "B2:D9", &|f| {
+        f.number_format = Some("$#,##0".into())
+    });
+    style(&mut engine, "D11", &|f| {
+        f.number_format = Some("$#,##0.00".into())
+    });
+    style(&mut engine, "E2:E9", &|f| {
+        f.number_format = Some("0%".into())
+    });
+    style(&mut engine, "A9:E9", &|f| {
+        f.bold = true;
+        f.borders = Borders {
+            top: true,
+            ..Borders::NONE
+        };
+    });
+    style(&mut engine, "A10:A11", &|f| f.italic = true);
+    engine.formatting_mut(0).column_widths.insert(0, 96.0);
+
     let range = |a1: &str| CellRange::from_a1(a1).unwrap();
     let chart = ChartDefinition::new(ChartKind::Bar)
         .with_title("Income vs. expenses")

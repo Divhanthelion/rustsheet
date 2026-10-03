@@ -3,12 +3,25 @@ mod chart_reader;
 #[cfg(feature = "xlsx")]
 mod reader;
 #[cfg(feature = "xlsx")]
+mod styles;
+#[cfg(feature = "xlsx")]
 mod writer;
 
 #[cfg(feature = "xlsx")]
 pub use chart_reader::{ChartReadError, ChartReader};
 #[cfg(feature = "xlsx")]
 pub use reader::XlsxReader;
+#[cfg(feature = "xlsx")]
+pub use styles::read_formatting;
+
+/// Read per-sheet formatting from an .xlsx file. See [`read_formatting`].
+#[cfg(feature = "xlsx")]
+pub fn read_formatting_from_path(
+    path: impl AsRef<std::path::Path>,
+) -> Result<Vec<(String, crate::format::SheetFormatting)>, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    read_formatting(std::io::BufReader::new(file))
+}
 #[cfg(feature = "xlsx")]
 pub use writer::{XlsxWriteError, XlsxWriter};
 
@@ -398,6 +411,80 @@ mod tests {
         assert_eq!(
             loaded.get_value(0, CellCoord::from_a1("B2").unwrap()),
             CellResult::Empty
+        );
+    }
+
+    #[test]
+    fn formatting_roundtrip_through_xlsx() {
+        use crate::format::{Borders, CellFormat, HAlign, Rgb};
+
+        let mut engine = CalcEngine::new();
+        engine.set_sheet_names(vec!["Data".into(), "Second".into()]);
+        let a1 = CellCoord::from_a1("A1").unwrap();
+        let b2 = CellCoord::from_a1("B2").unwrap();
+        let c3 = CellCoord::from_a1("C3").unwrap();
+        engine.set_value(0, a1, CellValueInput::Text("Header".into()));
+        engine.set_value(0, b2, CellValueInput::Number(0.256));
+
+        let header = CellFormat {
+            bold: true,
+            italic: true,
+            underline: true,
+            font_size: Some(14),
+            font_color: Some(Rgb(0x1F, 0x4E, 0x79)),
+            fill: Some(Rgb(0xFF, 0xF2, 0xCC)),
+            h_align: HAlign::Center,
+            borders: Borders::ALL,
+            ..Default::default()
+        };
+        let percent = CellFormat {
+            number_format: Some("0.0%".into()),
+            strikethrough: true,
+            ..Default::default()
+        };
+        // A formatted cell with no value.
+        let empty_bottom = CellFormat {
+            borders: Borders {
+                bottom: true,
+                ..Borders::NONE
+            },
+            ..Default::default()
+        };
+        engine.set_cell_format(0, a1, header.clone());
+        engine.set_cell_format(0, b2, percent.clone());
+        engine.set_cell_format(0, c3, empty_bottom.clone());
+        engine.formatting_mut(0).column_widths.insert(0, 160.0);
+        engine.formatting_mut(0).row_heights.insert(0, 44.0);
+        engine.set_cell_format(
+            1,
+            a1,
+            CellFormat {
+                number_format: Some("yyyy-mm-dd".into()),
+                ..Default::default()
+            },
+        );
+
+        let path = temp_xlsx("formatting");
+        let mut writer = XlsxWriter::new();
+        writer.add_engine_sheet("Data", &engine, 0).unwrap();
+        writer.add_engine_sheet("Second", &engine, 1).unwrap();
+        writer.save(&path).unwrap();
+        let read = super::read_formatting_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(read.len(), 2);
+        let (name, data) = &read[0];
+        assert_eq!(name, "Data");
+        assert_eq!(data.get(a1), Some(&header));
+        assert_eq!(data.get(b2), Some(&percent));
+        assert_eq!(data.get(c3), Some(&empty_bottom));
+        let width = data.column_widths.get(&0).copied().unwrap();
+        assert!((width - 160.0).abs() < 2.0, "width {width}");
+        let height = data.row_heights.get(&0).copied().unwrap();
+        assert!((height - 44.0).abs() < 1.5, "height {height}");
+        assert_eq!(
+            read[1].1.get(a1).and_then(|f| f.number_format.as_deref()),
+            Some("yyyy-mm-dd")
         );
     }
 }

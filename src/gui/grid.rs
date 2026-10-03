@@ -5,7 +5,11 @@ use super::theme::Theme;
 use crate::calc::CalcEngine;
 use crate::calc::CellResult;
 use crate::cell::{CellCoord, CellError};
-use eframe::egui::{self, Key, Pos2, Rect, Sense, StrokeKind, Ui, Vec2};
+use crate::format::{
+    CellFormat, DEFAULT_FONT_SIZE, HAlign, Rgb, SheetFormatting, format_general, format_number,
+};
+use eframe::egui::{self, Color32, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
+use std::collections::BTreeMap;
 
 /// Default cell dimensions
 pub const DEFAULT_COLUMN_WIDTH: f32 = 80.0;
@@ -13,122 +17,233 @@ pub const DEFAULT_ROW_HEIGHT: f32 = 22.0;
 pub const HEADER_WIDTH: f32 = 50.0;
 pub const HEADER_HEIGHT: f32 = 24.0;
 
-/// Format a number like Excel's General format: as many decimals as fit in
-/// `max_len` characters, switching to scientific notation when even the
-/// integer part does not fit.
-pub fn format_general(n: f64, max_len: usize) -> String {
-    if n == 0.0 || !n.is_finite() {
-        return if n.is_nan() {
-            "#NUM!".into()
-        } else {
-            "0".into()
-        };
-    }
-    let trim = |s: String| -> String {
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            s
-        }
-    };
+/// Text size of an 11pt (default) cell.
+pub const CELL_FONT_SIZE: f32 = 13.0;
+/// Smallest width or height a drag can resize to.
+const MIN_RESIZE: f32 = 8.0;
+/// Excel's last row and column index.
+const MAX_ROW: u32 = 1_048_575;
+const MAX_COL: u32 = 16_383;
 
-    // Plain notation, unless the number is too small to show any digit.
-    if n.abs() >= 1e-9 || max_len >= 12 {
-        for decimals in (0..=10).rev() {
-            let s = trim(format!("{n:.decimals$}"));
-            if s.len() <= max_len && s != "0" && s != "-0" {
-                return s;
-            }
-        }
-    }
-
-    // Scientific, e.g. 1.23457E+15.
-    let mut fallback = String::new();
-    for digits in (0..=5).rev() {
-        let raw = format!("{n:.digits$E}");
-        let (mantissa, exp) = raw.split_once('E').unwrap_or((&raw, "0"));
-        let exp: i32 = exp.parse().unwrap_or(0);
-        let sign = if exp < 0 { '-' } else { '+' };
-        let s = format!("{}E{sign}{:02}", trim(mantissa.to_string()), exp.abs());
-        if s.len() <= max_len {
-            return s;
-        }
-        fallback = s;
-    }
-    fallback
-}
-
-/// Configuration for the grid widget
+/// Column widths and row heights for the sheet on screen. Only sizes that
+/// differ from the defaults are stored.
+#[derive(Clone, Default)]
 pub struct GridConfig {
-    pub column_widths: Vec<f32>,
-    pub row_heights: Vec<f32>,
-    pub frozen_rows: u32,
-    pub frozen_cols: u32,
-    pub visible_rows: u32,
-    pub visible_cols: u32,
-}
-
-impl Default for GridConfig {
-    fn default() -> Self {
-        Self {
-            column_widths: vec![DEFAULT_COLUMN_WIDTH; 100],
-            row_heights: vec![DEFAULT_ROW_HEIGHT; 1000],
-            frozen_rows: 0,
-            frozen_cols: 0,
-            visible_rows: 50,
-            visible_cols: 26,
-        }
-    }
+    pub column_widths: BTreeMap<u32, f32>,
+    pub row_heights: BTreeMap<u32, f32>,
 }
 
 impl GridConfig {
+    pub fn for_sheet(formatting: Option<&SheetFormatting>) -> Self {
+        formatting
+            .map(|f| Self {
+                column_widths: f.column_widths.clone(),
+                row_heights: f.row_heights.clone(),
+            })
+            .unwrap_or_default()
+    }
+
     pub fn column_width(&self, col: u32) -> f32 {
         self.column_widths
-            .get(col as usize)
+            .get(&col)
             .copied()
             .unwrap_or(DEFAULT_COLUMN_WIDTH)
     }
 
     pub fn row_height(&self, row: u32) -> f32 {
         self.row_heights
-            .get(row as usize)
+            .get(&row)
             .copied()
             .unwrap_or(DEFAULT_ROW_HEIGHT)
     }
 
     /// Get x position of column left edge relative to data area
     pub fn column_x(&self, col: u32) -> f32 {
-        (0..col).map(|c| self.column_width(c)).sum()
+        offset_of(&self.column_widths, DEFAULT_COLUMN_WIDTH, col)
     }
 
     /// Get y position of row top edge relative to data area
     pub fn row_y(&self, row: u32) -> f32 {
-        (0..row).map(|r| self.row_height(r)).sum()
+        offset_of(&self.row_heights, DEFAULT_ROW_HEIGHT, row)
     }
 
     /// Find column at x position
     pub fn column_at_x(&self, x: f32) -> u32 {
-        let mut accum = 0.0;
-        for col in 0..self.visible_cols {
-            accum += self.column_width(col);
-            if accum > x {
-                return col;
-            }
-        }
-        self.visible_cols.saturating_sub(1)
+        index_at(&self.column_widths, DEFAULT_COLUMN_WIDTH, x, MAX_COL)
     }
 
     /// Find row at y position
     pub fn row_at_y(&self, y: f32) -> u32 {
-        let mut accum = 0.0;
-        for row in 0..self.visible_rows {
-            accum += self.row_height(row);
-            if accum > y {
-                return row;
-            }
-        }
-        self.visible_rows.saturating_sub(1)
+        index_at(&self.row_heights, DEFAULT_ROW_HEIGHT, y, MAX_ROW)
     }
+}
+
+/// Start of item `index` when items are `default` long except for `sizes`.
+fn offset_of(sizes: &BTreeMap<u32, f32>, default: f32, index: u32) -> f32 {
+    index as f32 * default
+        + sizes
+            .range(..index)
+            .map(|(_, size)| size - default)
+            .sum::<f32>()
+}
+
+/// The item that contains position `pos`.
+fn index_at(sizes: &BTreeMap<u32, f32>, default: f32, pos: f32, max: u32) -> u32 {
+    if pos <= 0.0 {
+        return 0;
+    }
+    let (mut next_index, mut next_pos) = (0u32, 0.0f32);
+    for (&index, &size) in sizes {
+        let start = next_pos + (index - next_index) as f32 * default;
+        if pos < start {
+            break;
+        }
+        if pos < start + size {
+            return index;
+        }
+        next_index = index + 1;
+        next_pos = start + size;
+    }
+    let index = next_index as f64 + ((pos - next_pos) / default).floor() as f64;
+    (index as u32).min(max)
+}
+
+/// What a cell shows before theme colors are applied.
+struct CellText {
+    text: String,
+    /// Color from the number format, e.g. `[Red]` for negatives.
+    format_color: Option<Rgb>,
+    kind: TextKind,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TextKind {
+    Number,
+    Text,
+    Centered,
+    Error,
+}
+
+/// Format a cell's value for display. `max_len` bounds General numbers.
+fn cell_text(value: &CellResult, format: &CellFormat, max_len: usize) -> Option<CellText> {
+    let plain = |text: String, kind| CellText {
+        text,
+        format_color: None,
+        kind,
+    };
+    Some(match value {
+        CellResult::Empty => return None,
+        CellResult::Value(n) => match &format.number_format {
+            Some(code) => {
+                let formatted = format_number(*n, code);
+                CellText {
+                    text: formatted.text,
+                    format_color: formatted.color,
+                    kind: TextKind::Number,
+                }
+            }
+            None => plain(format_general(*n, max_len), TextKind::Number),
+        },
+        CellResult::Text(s) => plain(s.clone(), TextKind::Text),
+        CellResult::Bool(b) => plain(
+            if *b { "TRUE" } else { "FALSE" }.to_string(),
+            TextKind::Centered,
+        ),
+        CellResult::Error(e) => plain(
+            match e {
+                CellError::DivZero => "#DIV/0!",
+                CellError::Value => "#VALUE!",
+                CellError::Ref => "#REF!",
+                CellError::Name => "#NAME?",
+                CellError::Num => "#NUM!",
+                CellError::NA => "#N/A",
+                CellError::Null => "#NULL!",
+                CellError::Circular => "#CIRC!",
+                CellError::GettingData => "#GETTING_DATA",
+                CellError::Spill => "#SPILL!",
+                CellError::Calc => "#CALC!",
+            }
+            .to_string(),
+            TextKind::Error,
+        ),
+    })
+}
+
+fn font_for(format: &CellFormat) -> egui::FontId {
+    egui::FontId::proportional(
+        CELL_FONT_SIZE * format.font_size_or_default() as f32 / DEFAULT_FONT_SIZE as f32,
+    )
+}
+
+fn to_color32(c: Rgb) -> Color32 {
+    Color32::from_rgb(c.0, c.1, c.2)
+}
+
+/// Lay out a cell's text with its font style.
+fn layout_text(
+    fonts: &egui::text::Fonts,
+    text: String,
+    format: &CellFormat,
+    color: Color32,
+) -> std::sync::Arc<egui::Galley> {
+    let line = |on: bool| {
+        if on {
+            Stroke::new(1.0_f32, color)
+        } else {
+            Stroke::NONE
+        }
+    };
+    let job = egui::text::LayoutJob::single_section(
+        text,
+        egui::TextFormat {
+            font_id: font_for(format),
+            color,
+            italics: format.italic,
+            underline: line(format.underline),
+            strikethrough: line(format.strikethrough),
+            ..Default::default()
+        },
+    );
+    fonts.layout_job(job)
+}
+
+/// Width that fits every value in `col`, for double-clicking a column border.
+pub fn fit_column_width(
+    ctx: &egui::Context,
+    engine: &CalcEngine,
+    sheet: u32,
+    col: u32,
+) -> Option<f32> {
+    let default_format = CellFormat::default();
+    let formatting = engine.formatting(sheet);
+    let coords: Vec<CellCoord> = engine
+        .iter_sheet_inputs(sheet)
+        .map(|(coord, _)| coord)
+        .filter(|coord| coord.col == col)
+        .collect();
+    ctx.fonts(|fonts| {
+        coords
+            .into_iter()
+            .filter_map(|coord| {
+                let format = formatting
+                    .and_then(|f| f.get(coord))
+                    .unwrap_or(&default_format);
+                let value = engine.get_value(sheet, coord);
+                let text = cell_text(&value, format, 11)?;
+                let galley = layout_text(fonts, text.text, format, Color32::WHITE);
+                let bold_extra = if format.bold { 1.0 } else { 0.0 };
+                Some(galley.size().x + bold_extra + 12.0)
+            })
+            .reduce(f32::max)
+    })
+    .map(|w| w.max(MIN_RESIZE * 3.0))
+}
+
+/// Which header border is being dragged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeAxis {
+    Column,
+    Row,
 }
 
 /// Scroll state for the grid
@@ -190,6 +305,12 @@ pub struct GridResponse {
     pub drag_to: Option<CellCoord>,
     /// Drag ended
     pub drag_ended: bool,
+    /// A header border is being dragged: new size for that column or row
+    pub resize: Option<(ResizeAxis, u32, f32)>,
+    /// The resize drag was released
+    pub resize_ended: bool,
+    /// A column border was double-clicked: fit the column to its contents
+    pub autofit_column: Option<u32>,
 }
 
 /// Navigation keys
@@ -304,6 +425,10 @@ impl<'a> SpreadsheetGrid<'a> {
             // Draw selection
             self.draw_selection(&painter, data_rect);
 
+            // Resize handles sit on the header borders. They are added after
+            // the grid's own interaction, so they take the pointer.
+            self.resize_handles(ui, grid_id, grid_rect, viewport_size, &mut response);
+
             // Helper to convert screen position to cell coordinate
             let pos_to_cell = |pos: Pos2| -> Option<CellCoord> {
                 if data_rect.contains(pos) {
@@ -408,8 +533,93 @@ impl<'a> SpreadsheetGrid<'a> {
         response
     }
 
+    fn resize_handles(
+        &self,
+        ui: &mut Ui,
+        grid_id: egui::Id,
+        grid_rect: Rect,
+        viewport_size: Vec2,
+        response: &mut GridResponse,
+    ) {
+        let col_header = Rect::from_min_size(
+            grid_rect.min + Vec2::new(HEADER_WIDTH, 0.0),
+            Vec2::new(viewport_size.x - HEADER_WIDTH, HEADER_HEIGHT),
+        );
+        let first_col = self.scroll.first_visible_col;
+        let mut x = col_header.min.x - (self.scroll.offset_x - self.config.column_x(first_col));
+        for col in first_col..=MAX_COL {
+            if x >= col_header.max.x {
+                break;
+            }
+            let left = x;
+            x += self.config.column_width(col);
+            if x <= col_header.min.x {
+                continue;
+            }
+            let handle = Rect::from_center_size(
+                Pos2::new(x, col_header.center().y),
+                Vec2::new(8.0, HEADER_HEIGHT),
+            );
+            let r = ui.interact(
+                handle,
+                grid_id.with(("col_resize", col)),
+                Sense::click_and_drag(),
+            );
+            if r.hovered() || r.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+            }
+            if r.dragged() {
+                if let Some(p) = r.interact_pointer_pos() {
+                    response.resize = Some((ResizeAxis::Column, col, (p.x - left).max(MIN_RESIZE)));
+                }
+            }
+            if r.drag_stopped() {
+                response.resize_ended = true;
+            }
+            if r.double_clicked() {
+                response.autofit_column = Some(col);
+            }
+        }
+
+        let row_header = Rect::from_min_size(
+            grid_rect.min + Vec2::new(0.0, HEADER_HEIGHT),
+            Vec2::new(HEADER_WIDTH, viewport_size.y - HEADER_HEIGHT),
+        );
+        let first_row = self.scroll.first_visible_row;
+        let mut y = row_header.min.y - (self.scroll.offset_y - self.config.row_y(first_row));
+        for row in first_row..=MAX_ROW {
+            if y >= row_header.max.y {
+                break;
+            }
+            let top = y;
+            y += self.config.row_height(row);
+            if y <= row_header.min.y {
+                continue;
+            }
+            let handle = Rect::from_center_size(
+                Pos2::new(row_header.center().x, y),
+                Vec2::new(HEADER_WIDTH, 6.0),
+            );
+            let r = ui.interact(handle, grid_id.with(("row_resize", row)), Sense::drag());
+            if r.hovered() || r.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeRow);
+            }
+            if r.dragged() {
+                if let Some(p) = r.interact_pointer_pos() {
+                    response.resize = Some((ResizeAxis::Row, row, (p.y - top).max(MIN_RESIZE)));
+                }
+            }
+            if r.drag_stopped() {
+                response.resize_ended = true;
+            }
+        }
+    }
+
     fn draw_cells(&self, painter: &egui::Painter, data_rect: Rect) {
         let clip_rect = data_rect;
+        let formatting = self.engine.formatting(self.sheet_index);
+        // Borders are drawn last so neighboring fills don't cover them.
+        let mut borders: Vec<[Pos2; 2]> = Vec::new();
 
         // Calculate visible cell range
         let start_col = self.scroll.first_visible_col;
@@ -437,28 +647,42 @@ impl<'a> SpreadsheetGrid<'a> {
                 // Only draw if visible
                 if cell_rect.intersects(clip_rect) {
                     let coord = CellCoord::new(row, col);
+                    let format = formatting.and_then(|f| f.get(coord));
 
-                    // Draw cell background (alternate colors)
-                    let bg_color = if (row + col) % 2 == 0 {
-                        self.theme.cell_bg
-                    } else {
-                        self.theme.cell_bg_alt
+                    // Fill, or alternating background. Filled cells hide grid lines, as in Excel.
+                    let fill = format.and_then(|f| f.fill);
+                    let bg_color = match fill {
+                        Some(fill) => to_color32(fill),
+                        None if (row + col) % 2 == 0 => self.theme.cell_bg,
+                        None => self.theme.cell_bg_alt,
                     };
                     painter.rect_filled(cell_rect, 0.0, bg_color);
 
-                    // Draw grid lines
-                    painter.line_segment(
-                        [cell_rect.right_top(), cell_rect.right_bottom()],
-                        self.theme.grid_stroke(),
-                    );
-                    painter.line_segment(
-                        [cell_rect.left_bottom(), cell_rect.right_bottom()],
-                        self.theme.grid_stroke(),
-                    );
+                    if fill.is_none() {
+                        painter.line_segment(
+                            [cell_rect.right_top(), cell_rect.right_bottom()],
+                            self.theme.grid_stroke(),
+                        );
+                        painter.line_segment(
+                            [cell_rect.left_bottom(), cell_rect.right_bottom()],
+                            self.theme.grid_stroke(),
+                        );
+                    }
+
+                    if let Some(b) = format.map(|f| f.borders) {
+                        let r = cell_rect;
+                        let edges = [
+                            (b.top, [r.left_top(), r.right_top()]),
+                            (b.right, [r.right_top(), r.right_bottom()]),
+                            (b.bottom, [r.left_bottom(), r.right_bottom()]),
+                            (b.left, [r.left_top(), r.left_bottom()]),
+                        ];
+                        borders.extend(edges.into_iter().filter(|(on, _)| *on).map(|(_, l)| l));
+                    }
 
                     // Get cell value and render
                     let value = self.engine.get_value(self.sheet_index, coord);
-                    self.draw_cell_content(painter, cell_rect, &value);
+                    self.draw_cell_content(painter, cell_rect, &value, format);
                 }
 
                 x += col_width;
@@ -466,66 +690,74 @@ impl<'a> SpreadsheetGrid<'a> {
 
             y += row_height;
         }
+
+        let border_stroke = Stroke::new(1.0_f32, self.theme.text_normal);
+        for line in borders {
+            painter.line_segment(line, border_stroke);
+        }
     }
 
-    fn draw_cell_content(&self, painter: &egui::Painter, rect: Rect, value: &CellResult) {
+    fn draw_cell_content(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        value: &CellResult,
+        format: Option<&CellFormat>,
+    ) {
         let padding = 4.0;
         let text_rect = rect.shrink(padding);
+        let default_format = CellFormat::default();
+        let format = format.unwrap_or(&default_format);
+        let font = font_for(format);
 
-        let (text, color, align) = match value {
-            CellResult::Empty => return,
-            CellResult::Value(n) => {
-                let digit_width =
-                    painter.fonts(|f| f.glyph_width(&egui::FontId::proportional(13.0), '0'));
-                let max_len = (text_rect.width() / digit_width).floor().max(1.0) as usize;
-                let s = format_general(*n, max_len);
-                (s, self.theme.text_number, egui::Align::Max) // Right align numbers
-            }
-            CellResult::Text(s) => {
-                (s.clone(), self.theme.text_normal, egui::Align::Min) // Left align text
-            }
-            CellResult::Bool(b) => (
-                if *b { "TRUE" } else { "FALSE" }.to_string(),
-                self.theme.text_normal,
-                egui::Align::Center,
-            ),
-            CellResult::Error(e) => {
-                let s = match e {
-                    CellError::DivZero => "#DIV/0!",
-                    CellError::Value => "#VALUE!",
-                    CellError::Ref => "#REF!",
-                    CellError::Name => "#NAME?",
-                    CellError::Num => "#NUM!",
-                    CellError::NA => "#N/A",
-                    CellError::Null => "#NULL!",
-                    CellError::Circular => "#CIRC!",
-                    CellError::GettingData => "#GETTING_DATA",
-                    CellError::Spill => "#SPILL!",
-                    CellError::Calc => "#CALC!",
-                };
-                (s.to_string(), self.theme.text_error, egui::Align::Center)
-            }
+        let digit_width = painter.fonts(|f| f.glyph_width(&font, '0'));
+        let max_len = (text_rect.width() / digit_width).floor().max(1.0) as usize;
+        let Some(cell) = cell_text(value, format, max_len) else {
+            return;
         };
 
-        // Clip text to cell bounds
-        let galley = painter.layout_no_wrap(text, egui::FontId::proportional(13.0), color);
-
-        let text_pos = match align {
-            egui::Align::Min => Pos2::new(
-                text_rect.min.x,
-                text_rect.center().y - galley.size().y / 2.0,
-            ),
-            egui::Align::Center => Pos2::new(
-                text_rect.center().x - galley.size().x / 2.0,
-                text_rect.center().y - galley.size().y / 2.0,
-            ),
-            egui::Align::Max => Pos2::new(
-                text_rect.max.x - galley.size().x,
-                text_rect.center().y - galley.size().y / 2.0,
-            ),
+        // A format color ([Red]) wins over the font color. With a fill and no
+        // font color, pick black or white so the text stays readable.
+        let color = match (cell.format_color, format.font_color, format.fill) {
+            (Some(c), _, _) | (None, Some(c), _) => to_color32(c),
+            (None, None, Some(fill)) if fill.luminance() > 0.5 => Color32::BLACK,
+            (None, None, Some(_)) => Color32::WHITE,
+            (None, None, None) => match cell.kind {
+                TextKind::Number => self.theme.text_number,
+                TextKind::Error => self.theme.text_error,
+                _ => self.theme.text_normal,
+            },
         };
 
-        painter.galley(text_pos, galley, color);
+        let align = match (format.h_align, cell.kind) {
+            (HAlign::Left, _) => egui::Align::Min,
+            (HAlign::Center, _) => egui::Align::Center,
+            (HAlign::Right, _) => egui::Align::Max,
+            (HAlign::General, TextKind::Number) => egui::Align::Max,
+            (HAlign::General, TextKind::Text) => egui::Align::Min,
+            (HAlign::General, _) => egui::Align::Center,
+        };
+
+        let mut galley = painter.fonts(|f| layout_text(f, cell.text, format, color));
+        // Numbers never spill into neighbors; like Excel, show #### instead.
+        if cell.kind == TextKind::Number && galley.size().x > text_rect.width() {
+            let hash_width = painter.fonts(|f| f.glyph_width(&font, '#')).max(1.0);
+            let count = (text_rect.width() / hash_width).floor().max(1.0) as usize;
+            galley = painter.fonts(|f| layout_text(f, "#".repeat(count), format, color));
+        }
+
+        let y = text_rect.center().y - galley.size().y / 2.0;
+        let x = match align {
+            egui::Align::Min => text_rect.min.x,
+            egui::Align::Center => text_rect.center().x - galley.size().x / 2.0,
+            egui::Align::Max => text_rect.max.x - galley.size().x,
+        };
+        let pos = Pos2::new(x, y);
+        if format.bold {
+            // egui's bundled fonts have no bold face; overdraw to embolden.
+            painter.galley(pos + Vec2::new(0.6, 0.0), galley.clone(), color);
+        }
+        painter.galley(pos, galley, color);
     }
 
     fn draw_row_headers(&self, painter: &egui::Painter, rect: Rect) {
@@ -761,23 +993,36 @@ fn column_to_letter(col: u32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_general;
+    use super::*;
 
     #[test]
-    fn general_format_fits_width() {
-        assert_eq!(format_general(1391.6666666666667, 11), "1391.666667");
-        assert_eq!(format_general(0.26, 11), "0.26");
-        assert_eq!(format_general(27400.0, 11), "27400");
-        assert_eq!(format_general(-2.5, 11), "-2.5");
-        assert_eq!(format_general(0.1 + 0.2, 11), "0.3");
-        assert_eq!(format_general(0.0, 11), "0");
+    fn positions_past_the_first_screen() {
+        let config = GridConfig::default();
+        // Rows past 50 and columns past Z used to clamp to the first screen.
+        assert_eq!(config.row_at_y(DEFAULT_ROW_HEIGHT * 120.5), 120);
+        assert_eq!(config.column_at_x(DEFAULT_COLUMN_WIDTH * 30.5), 30);
+        assert_eq!(config.row_at_y(-5.0), 0);
+        assert_eq!(config.row_at_y(f32::MAX), MAX_ROW);
     }
 
     #[test]
-    fn general_format_switches_to_scientific() {
-        assert_eq!(format_general(1e15, 11), "1E+15");
-        assert_eq!(format_general(123456789012345.0, 11), "1.23457E+14");
-        assert_eq!(format_general(1.5e-12, 11), "1.5E-12");
-        assert_eq!(format_general(12345678901.0, 11), "12345678901");
+    fn custom_sizes_shift_positions() {
+        let mut config = GridConfig::default();
+        config.column_widths.insert(1, 200.0);
+        config.column_widths.insert(3, 0.0);
+        assert_eq!(config.column_x(0), 0.0);
+        assert_eq!(config.column_x(2), DEFAULT_COLUMN_WIDTH + 200.0);
+        assert_eq!(config.column_x(5), DEFAULT_COLUMN_WIDTH * 3.0 + 200.0);
+        assert_eq!(config.column_at_x(DEFAULT_COLUMN_WIDTH + 199.0), 1);
+        assert_eq!(config.column_at_x(DEFAULT_COLUMN_WIDTH + 201.0), 2);
+        // Column 3 is hidden (zero width), so the next pixel is column 4.
+        assert_eq!(
+            config.column_at_x(DEFAULT_COLUMN_WIDTH * 2.0 + 200.0 + 1.0),
+            4
+        );
+        for col in [0, 1, 2, 4, 7, 40] {
+            let x = config.column_x(col) + 0.5;
+            assert_eq!(config.column_at_x(x), col, "column {col}");
+        }
     }
 }

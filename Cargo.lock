@@ -3555,7 +3555,7 @@ dependencies = [
 
 [[package]]
 name = "rustsheet"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3576,6 +3576,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "proptest",
+ "quick-xml",
  "raw-window-handle",
  "rfd",
  "roaring",

@@ -46,7 +46,8 @@ try {
     # 3 = PW_CLIENTONLY | PW_RENDERFULLCONTENT
     [Capture]::PrintWindow($h, $dc, 3) | Out-Null
     $g.ReleaseHdc($dc)
-    $bmp.Save((Join-Path (Get-Location) $Out))
+    $outPath = if ([IO.Path]::IsPathRooted($Out)) { $Out } else { Join-Path (Get-Location) $Out }
+    $bmp.Save($outPath)
     Write-Host "Saved $Out ($($bmp.Width)x$($bmp.Height))"
 } finally {
     Stop-Process $p -Force

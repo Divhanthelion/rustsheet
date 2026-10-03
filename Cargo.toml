@@ -1,15 +1,15 @@
 [package]
 name = "rustsheet"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.87"
 description = "A fast, native spreadsheet with an Excel-compatible formula engine"
 repository = "https://github.com/Divhanthelion/rustsheet"
 license = "MIT"
 
 [features]
 default = ["xlsx", "gui", "csv"]
-xlsx = ["dep:calamine", "dep:rust_xlsxwriter", "dep:zip", "dep:serde_json"]
+xlsx = ["dep:calamine", "dep:rust_xlsxwriter", "dep:zip", "dep:serde_json", "dep:quick-xml"]
 csv = ["dep:csv"]
 gui = ["dep:eframe", "dep:egui_extras", "dep:egui_plot", "dep:image", "dep:rfd"]
 web = ["dep:eframe", "dep:egui_extras", "dep:egui_plot", "dep:image", "dep:wasm-bindgen", "dep:console_error_panic_hook", "dep:web-sys", "dep:wasm-bindgen-futures", "dep:getrandom"]
@@ -32,6 +32,7 @@ pest_derive = "2.8"
 # Excel I/O (optional)
 calamine = { version = "0.32", optional = true }
 rust_xlsxwriter = { version = "0.92", optional = true }
+quick-xml = { version = "0.38", optional = true }
 
 # Error handling
 thiserror = "2.0"

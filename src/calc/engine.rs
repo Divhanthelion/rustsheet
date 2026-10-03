@@ -1,5 +1,6 @@
 use crate::calc::functions::BuiltinFunctions;
 use crate::cell::{CellCoord, CellError};
+use crate::format::{CellFormat, SheetFormatting};
 use crate::formula::{BinaryOp, Expr, FormulaParser, UnaryOp};
 use salsa;
 use std::cell::RefCell;
@@ -116,6 +117,8 @@ pub struct CalcEngine {
     functions: BuiltinFunctions,
     /// Tab names, index-aligned with sheet keys
     sheet_names: Vec<String>,
+    /// Cell formats and row/column sizes, by sheet
+    formatting: HashMap<u32, SheetFormatting>,
 }
 
 impl CalcEngine {
@@ -130,6 +133,7 @@ impl CalcEngine {
             evaluating: RefCell::new(HashSet::new()),
             functions: BuiltinFunctions::new(),
             sheet_names: vec!["Sheet1".to_string()],
+            formatting: HashMap::new(),
         }
     }
 
@@ -481,8 +485,32 @@ impl CalcEngine {
         }
     }
 
+    /// A sheet's formatting, if it has any.
+    pub fn formatting(&self, sheet: u32) -> Option<&SheetFormatting> {
+        self.formatting.get(&sheet)
+    }
+
+    pub fn formatting_mut(&mut self, sheet: u32) -> &mut SheetFormatting {
+        self.formatting.entry(sheet).or_default()
+    }
+
+    pub fn cell_format(&self, sheet: u32, coord: CellCoord) -> Option<&CellFormat> {
+        self.formatting(sheet)?.get(coord)
+    }
+
+    /// Set a cell's format; the default format clears it.
+    pub fn set_cell_format(&mut self, sheet: u32, coord: CellCoord, format: CellFormat) {
+        self.formatting_mut(sheet).set(coord, format);
+    }
+
     /// Drop one sheet's cells and shift higher sheet keys down by one.
     pub fn remove_sheet_and_shift(&mut self, index: u32) {
+        self.formatting = std::mem::take(&mut self.formatting)
+            .into_iter()
+            .filter(|&(sheet, _)| sheet != index)
+            .map(|(sheet, f)| (if sheet > index { sheet - 1 } else { sheet }, f))
+            .collect();
+
         let snapshot: Vec<((u32, CellCoord), CellInput)> =
             std::mem::take(&mut self.inputs).into_iter().collect();
         self.formulas.clear();
