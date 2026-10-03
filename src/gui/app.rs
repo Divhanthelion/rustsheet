@@ -873,11 +873,12 @@ impl SpreadsheetApp {
 
         // The first filter is the one selected by default, so lead with every
         // supported format rather than hiding .xlsx behind a CSV-only view.
-        let mut supported: Vec<&str> = Vec::new();
-        #[cfg(feature = "xlsx")]
-        supported.push("xlsx");
-        #[cfg(feature = "csv")]
-        supported.push("csv");
+        let supported = [
+            #[cfg(feature = "xlsx")]
+            "xlsx",
+            #[cfg(feature = "csv")]
+            "csv",
+        ];
 
         let mut dialog = FileDialog::new().add_filter("Spreadsheets", &supported);
         #[cfg(feature = "xlsx")]
