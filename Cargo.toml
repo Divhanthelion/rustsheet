@@ -91,3 +91,7 @@ opt-level = 3
 [profile.bench]
 inherits = "release"
 debug = true
+
+# See vendor/webbrowser/Cargo.toml: keeps process-launch APIs out of the exe.
+[patch.crates-io]
+webbrowser = { path = "vendor/webbrowser" }

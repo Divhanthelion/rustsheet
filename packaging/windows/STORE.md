@@ -28,7 +28,7 @@ Alternatively, push a tag `vX.Y.Z` and download the MSIX from the GitHub release
 ### Test before submitting
 
 - **Install locally** (needs Developer Mode): `Add-AppxPackage -Register target\msix\stage\AppxManifest.xml`, launch RustSheet from Start, right-click a `.csv` > Open with > RustSheet. Remove it with `Get-AppxPackage *RustSheet* | Remove-AppxPackage`.
-- **Certification kit**: `appcert.exe test -appxpackagepath target\msix\RustSheet_<version>_x64.msix -reportoutputpath wack.xml` (from `Windows Kits\10\App Certification Kit`). The last run on 2026-10-03 passed overall. "Blocked executables" is flagged because the Rust standard library links `CreateProcessW`. That check only applies to Windows S mode and does not block the submission.
+- **Certification kit**: `appcert.exe test -appxpackagepath target\msix\RustSheet_<version>_x64.msix -reportoutputpath wack.xml` (from `Windows Kits\App Certification Kit`, needs elevation). It passes with no flagged tests. Keep the `vendor/webbrowser` stand-in: the real crate made the optional "Blocked executables" test fail.
 
 ## Submission answers
 
