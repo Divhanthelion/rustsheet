@@ -14,7 +14,10 @@
 param(
     [string]$Workbook = "target\demo.xlsx",
     [string]$Out = "assets\screenshot.png",
-    [int]$Wait = 7
+    [int]$Wait = 7,
+    # Theme for the capture; a temporary settings folder keeps yours untouched.
+    [ValidateSet("Light", "Dark")]
+    [string]$Theme = "Light"
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +35,11 @@ public class Capture {
 "@
 # Without this, a scaled display reports a shrunken client rect.
 [Capture]::SetProcessDPIAware() | Out-Null
+
+$dataDir = Join-Path ([IO.Path]::GetTempPath()) "rustsheet-screenshot-$Theme"
+New-Item -ItemType Directory $dataDir -Force | Out-Null
+Set-Content (Join-Path $dataDir "settings.json") "{`"theme`":`"$Theme`"}"
+$env:RUSTSHEET_DATA_DIR = $dataDir
 
 $p = Start-Process target\release\rustsheet.exe -ArgumentList "`"$(Resolve-Path $Workbook)`"" -PassThru
 try {

@@ -173,6 +173,10 @@ pub fn show(ui: &mut Ui, current: &CellFormat) -> Option<FormatAction> {
                         .min_size(button_size),
                 )
                 .on_hover_text(tip);
+            // Icon-only: give screen readers the name.
+            r.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, tip)
+            });
             paint_align_icon(ui, r.rect, align);
             if r.clicked() {
                 // Clicking the active alignment returns to General, as in Excel.
@@ -197,6 +201,9 @@ pub fn show(ui: &mut Ui, current: &CellFormat) -> Option<FormatAction> {
                         .min_size(button_size),
                 )
                 .on_hover_text(tip);
+            r.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, tip)
+            });
             paint_valign_icon(ui, r.rect, v);
             if r.clicked() {
                 set(FormatAction::VAlign(v));
@@ -292,6 +299,11 @@ fn palette(ui: &mut Ui, none_label: &str, current: Option<Rgb>) -> Option<Option
                 for hex in row {
                     let c = rgb(hex);
                     let (rect, r) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+                    let name = format!("Color #{:06X}", c.to_u32());
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name)
+                    });
+                    let r = r.on_hover_text(&name);
                     ui.painter().rect_filled(rect, 2.0, color32(c));
                     let outline = if current == Some(c) || r.hovered() {
                         ui.visuals().selection.stroke

@@ -101,10 +101,14 @@ impl Recovery {
 
 /// Autosaves from crashed sessions, newest first.
 pub(super) fn find_recoverable() -> Vec<Recoverable> {
-    let Some(dir) = recovery_dir() else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
+    match recovery_dir() {
+        Some(dir) => find_recoverable_in(&dir),
+        None => Vec::new(),
+    }
+}
+
+pub(super) fn find_recoverable_in(dir: &Path) -> Vec<Recoverable> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut found: Vec<Recoverable> = entries

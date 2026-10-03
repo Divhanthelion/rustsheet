@@ -23,7 +23,7 @@ RustSheet ships to the Store as an MSIX package. The Store re-signs the package,
 
 The output is `target\msix\RustSheet_<version>_x64.msix`. The package version comes from `Cargo.toml` with a fourth field of `.0`, as the Store requires. **Bump `version` in Cargo.toml for every new submission**, because the Store rejects a version it has already seen.
 
-Alternatively, push a tag `vX.Y.Z` and download the MSIX from the GitHub release the workflow creates.
+Alternatively, push a tag `vX.Y.Z` and download `RustSheet_<version>.msixbundle` (x64 and Arm64 in one upload) from the GitHub release the workflow creates. Upload the bundle to the Store.
 
 ### Test before submitting
 
@@ -64,7 +64,9 @@ Alternatively, push a tag `vX.Y.Z` and download the MSIX from the GitHub release
 >
 > Make it look the way you want with bold and italic text, font colors and sizes, fills, borders, alignment, and number formats for currency, percentages, dates and times. Type 12%, $1,234.50 or 2026-10-03 and RustSheet formats it for you.
 >
-> Open the .xlsx files you already have, edit them, and save them back with their formulas, formatting and charts intact. Import and export CSV as well.
+> Sort and filter your data, find and replace across sheets, and drag to fill a series of numbers, dates or months. Insert, delete, hide and freeze rows and columns, merge cells and wrap text. Print, or export a PDF to share.
+>
+> Open the .xlsx files you already have, edit them, and save them back with their formulas, formatting and charts intact. Import and export CSV as well. If RustSheet ever closes unexpectedly, your unsaved work is waiting when you open it again.
 >
 > RustSheet has no account, no subscription, no ads and no telemetry. It never connects to the internet.
 >
@@ -82,6 +84,12 @@ Alternatively, push a tag `vX.Y.Z` and download the MSIX from the GitHub release
 - Currency, percent, date and time entry that formats itself
 - Resizable columns and rows, with fit-to-contents
 - Copy and paste with Excel and other apps
+- Sort, filter, and find and replace
+- Insert, delete, hide and freeze rows and columns
+- Fill series by dragging (numbers, dates, months, weekdays)
+- Merged cells, wrapped text and full-size sheets
+- Print, or export to PDF
+- Autosave and crash recovery
 - CSV import and export
 - Line, bar, scatter, area, pie and doughnut charts
 - Multiple sheets with cross-sheet references
@@ -95,7 +103,20 @@ Alternatively, push a tag `vX.Y.Z` and download the MSIX from the GitHub release
 
 `spreadsheet`, `xlsx`, `csv`, `excel alternative`, `formulas`, `charts`, `offline`
 
-**Screenshots:** [assets/screenshot.png](../../assets/screenshot.png) (1500x1000, desktop). The Store accepts 1 to 10 at 1366x768 or larger. Regenerate it with [screenshot.ps1](screenshot.ps1) after building the demo workbook (`cargo run --release --example demo_workbook -- target\demo.xlsx`).
+**Screenshots** (1500x1000; the Store accepts 1 to 10 at 1366x768 or larger):
+
+1. [assets/screenshot.png](../../assets/screenshot.png): a formatted budget with a merged title, frozen header, filter buttons and a chart
+2. [assets/screenshot-dark.png](../../assets/screenshot-dark.png): the same in dark mode
+3. [assets/screenshot-filter.png](../../assets/screenshot-filter.png): a sales list filtered to two regions
+
+Regenerate them after building (`cargo build --release`):
+
+```powershell
+cargo run --release --example demo_workbook -- target\demo.xlsx target\sales.xlsx
+.\packaging\windows\screenshot.ps1
+.\packaging\windows\screenshot.ps1 -Theme Dark -Out assets\screenshot-dark.png
+.\packaging\windows\screenshot.ps1 -Workbook target\sales.xlsx -Out assets\screenshot-filter.png
+```
 
 **Store logos:** use [assets/icon-1024.png](../../assets/icon-1024.png) for the 1:1 box art and app tile icon (the Store asks for 300x300 or larger; it downscales).
 

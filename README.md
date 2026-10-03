@@ -27,7 +27,15 @@
 - **Excel files**: read and write values, formulas, formatting, column widths, row heights and charts in `.xlsx`.
 - **CSV**: import and export, formulas included.
 - **Copy and paste** within RustSheet (formulas follow their new position, formats come along) and with Excel, Google Sheets or any app that copies tab-separated text. Cut and paste moves cells.
-- **Undo/redo**, formula autocomplete, light and dark themes, keyboard navigation that works like Excel's.
+- **Full-size sheets**: Excel's 1,048,576 rows by 16,384 columns, with scrollbars and Excel-style navigation (Ctrl+Arrow, Ctrl+End, Ctrl+A).
+- **Rows and columns**: insert, delete, hide, resize and freeze. Formulas, formats, merges, charts and filters follow; references to deleted cells become `#REF!`. Click or drag headers to select whole rows or columns, and format them in one go.
+- **Sort and filter**: sort by one column or several, and AutoFilter with value lists and search.
+- **Find and Replace** with `*` and `?` wildcards, in formulas or shown values, on one sheet or all of them.
+- **Fill**: Ctrl+D and Ctrl+R, or drag the fill handle to continue a series (numbers, dates, "Item 1", months, weekdays).
+- **Merged cells and wrapped text**, vertical alignment, and long text that spills into empty neighbors.
+- **Print and PDF**: print through the Windows print dialog, or export a PDF, with gridlines, fit to width, or the selection only.
+- **Crash safe**: unsaved work is autosaved every minute and offered back if RustSheet ever closes unexpectedly; saves replace files atomically.
+- **Undo/redo**, formula autocomplete, light and dark themes (or follow Windows), recent files, and screen reader support.
 
 ### Excel compatibility notes
 
@@ -43,7 +51,7 @@
 | `.xlsx` | Workbook, formulas, formatting, charts | Workbook, formulas, formatting, charts |
 | `.csv` | One sheet | Current sheet only |
 
-`.xls` and `.ods` are not supported. From `.xlsx` formatting, RustSheet keeps fonts (bold, italic, underline, strikethrough, size, color), solid fills, borders (drawn as thin lines), horizontal alignment, number formats, column widths and row heights. It does not keep font names, merged cells, wrapped text, vertical alignment, conditional formatting or column-wide styles.
+`.xls` and `.ods` are not supported. From `.xlsx`, RustSheet keeps fonts (bold, italic, underline, strikethrough, size, color), solid fills, borders (drawn as thin lines), alignment, wrapped text, number formats, row and column formats, column widths, row heights, hidden rows and columns, merged cells, frozen panes and AutoFilters. It does not keep font names, conditional formatting, data validation, comments, images or pivot tables.
 
 ## Install
 
@@ -70,22 +78,28 @@ cargo test --no-default-features --features xlsx,csv
 Needs the Windows 10/11 SDK. See [packaging/windows/STORE.md](packaging/windows/STORE.md) for the Store submission steps.
 
 ```powershell
-.\packaging\windows\build-msix.ps1
+.\packaging\windows\build-msix.ps1                  # x64
+.\packaging\windows\build-msix.ps1 -Arch x64,arm64  # both, plus a .msixbundle
 ```
 
 ## Keyboard shortcuts
 
 | Keys | Action |
 |------|--------|
-| Ctrl+N / Ctrl+O / Ctrl+S | New / Open / Save |
+| Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+P | New / Open / Save / Print |
 | Ctrl+Z / Ctrl+Y | Undo / Redo |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / Cut / Paste |
+| Ctrl+F / Ctrl+H | Find / Replace |
+| Ctrl+D / Ctrl+R | Fill down / right |
 | Delete | Clear the selected cells |
 | Ctrl+B / Ctrl+I / Ctrl+U | Bold / Italic / Underline |
 | F2 or type | Edit the active cell |
-| Enter / Tab | Confirm and move down / right |
-| Ctrl+Arrow | Jump to the edge of the data |
+| Enter / Tab | Move down / right (Shift goes back) |
+| Ctrl+Arrow, Ctrl+End | Jump to the edge of the data, the last used cell |
 | Shift+Arrow | Extend the selection |
+| Ctrl+A, Ctrl+Space, Shift+Space | Select the data, a column, a row |
+| Ctrl+Shift+= / Ctrl+- | Insert / delete rows or columns |
+| Ctrl+Shift+L | Filter on or off |
 | F4 | Toggle absolute/relative reference |
 | F1 | Help and function reference |
 

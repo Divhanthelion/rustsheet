@@ -31,6 +31,8 @@ pub const CELL_FONT_SIZE: f32 = 13.0;
 const MIN_RESIZE: f32 = 8.0;
 /// Padding between a cell's edge and its text.
 const PADDING: f32 = 4.0;
+/// Size of an AutoFilter drop-down button.
+const FILTER_BUTTON: f32 = 16.0;
 /// How far text may spill into empty neighbors, in cells.
 const MAX_OVERFLOW_CELLS: usize = 32;
 
@@ -489,6 +491,11 @@ pub enum NavigationKey {
     SelectAll,
     SelectColumn,
     SelectRow,
+    /// Tab / Shift+Tab and Enter / Shift+Enter: move without extending
+    Next {
+        down: bool,
+        back: bool,
+    },
 }
 
 /// A visible row or column: index, screen start, size, frozen.
@@ -817,6 +824,18 @@ impl<'a> SpreadsheetGrid<'a> {
         let has_focus = ui.ctx().memory(|m| m.has_focus(grid_id)) || grid_response.has_focus();
 
         if has_focus {
+            // Tab and arrows act on the grid instead of moving focus away.
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    grid_id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: false,
+                    },
+                )
+            });
             // Consume arrow keys to prevent them from moving focus to other widgets
             response.navigation = self.handle_keyboard_consume(ui);
 
@@ -824,14 +843,6 @@ impl<'a> SpreadsheetGrid<'a> {
             if ui
                 .ctx()
                 .input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::F2))
-            {
-                response.edit_cell = Some(self.selection.active);
-            }
-
-            // Handle Enter for edit mode
-            if ui
-                .ctx()
-                .input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
             {
                 response.edit_cell = Some(self.selection.active);
             }
@@ -972,7 +983,17 @@ impl<'a> SpreadsheetGrid<'a> {
 
                 // Pass 2: text. It may spill over empty neighbors, which is
                 // why it waits until every background in the pane is down.
-                for (coord, rect) in texts {
+                // Filter header cells keep their text clear of the button.
+                let filter_header = formatting
+                    .and_then(|f| f.filter.as_ref())
+                    .map(|f| (f.range.start.row, f.range.start.col..=f.range.end.col));
+                for (coord, mut rect) in texts {
+                    if filter_header
+                        .as_ref()
+                        .is_some_and(|(row, cols)| *row == coord.row && cols.contains(&coord.col))
+                    {
+                        rect.max.x -= FILTER_BUTTON + 2.0;
+                    }
                     let value = self.engine.get_value(self.sheet_index, coord);
                     if matches!(value, CellResult::Empty) {
                         continue;
@@ -1485,7 +1506,7 @@ impl<'a> SpreadsheetGrid<'a> {
             .iter()
             .filter(|c| (filter.range.start.col..=filter.range.end.col).contains(&c.index))
         {
-            let size = (height - 4.0).clamp(10.0, 16.0);
+            let size = (height - 4.0).clamp(10.0, FILTER_BUTTON);
             let rect = Rect::from_min_size(
                 Pos2::new(
                     col.start + col.size - size - 2.0,
@@ -1669,6 +1690,15 @@ impl<'a> SpreadsheetGrid<'a> {
         let modifiers = ui.input(|i| i.modifiers);
         let ctx = ui.ctx();
 
+        // Like Excel: Tab moves right, Enter moves down (Shift goes back).
+        for (key, down) in [(Key::Tab, false), (Key::Enter, true)] {
+            if !modifiers.command && ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, key)) {
+                return Some(NavigationKey::Next { down, back: true });
+            }
+            if !modifiers.command && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                return Some(NavigationKey::Next { down, back: false });
+            }
+        }
         if modifiers.command && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::A)) {
             return Some(NavigationKey::SelectAll);
         }

@@ -219,6 +219,16 @@ impl SpreadsheetApp {
             NavigationKey::CtrlDown => self.data_edge(active, 1, 0),
             NavigationKey::CtrlLeft => self.data_edge(active, 0, -1),
             NavigationKey::CtrlRight => self.data_edge(active, 0, 1),
+            NavigationKey::Next { down, back } => {
+                let d = if back { -1 } else { 1 };
+                let next = if down {
+                    self.step(active, d, 0)
+                } else {
+                    self.step(active, 0, d)
+                };
+                self.go(next, false, viewport);
+                return;
+            }
             NavigationKey::SelectAll => {
                 self.select_all_or_region();
                 return;
@@ -560,7 +570,7 @@ impl SpreadsheetApp {
     }
 
     /// Apply the popup's choices to its column.
-    fn apply_filter_popup(&mut self, popup: &FilterPopup) {
+    pub(super) fn apply_filter_popup(&mut self, popup: &FilterPopup) {
         let sheet = self.current_sheet;
         let Some(filter) = self.formatting().and_then(|f| f.filter.clone()) else {
             return;

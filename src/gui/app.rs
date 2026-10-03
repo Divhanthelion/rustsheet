@@ -20,6 +20,8 @@ use super::sheet_tabs::SheetTabs;
 use super::theme::Theme;
 
 mod commands;
+#[cfg(test)]
+mod feature_tests;
 mod fill;
 mod find;
 mod printing;

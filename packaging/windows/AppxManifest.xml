@@ -14,7 +14,7 @@
     Name="$IdentityName$"
     Publisher="$Publisher$"
     Version="$Version$"
-    ProcessorArchitecture="x64" />
+    ProcessorArchitecture="$Arch$" />
 
   <Properties>
     <DisplayName>RustSheet</DisplayName>

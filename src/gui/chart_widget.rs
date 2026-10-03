@@ -181,7 +181,17 @@ impl ChartWindowManager {
 
                 // Render the chart
                 if let Some(data) = &window_state.data {
-                    render_chart(ui, &window_state.chart, data, available);
+                    // The window's title bar already shows the title.
+                    let mut chart = window_state.chart.clone();
+                    chart.title = None;
+                    // The default white plot area would glare in dark mode.
+                    if ui.visuals().dark_mode
+                        && chart.style.background_color == [255, 255, 255, 255]
+                    {
+                        let bg = ui.visuals().extreme_bg_color;
+                        chart.style.background_color = [bg.r(), bg.g(), bg.b(), 255];
+                    }
+                    render_chart(ui, &chart, data, available);
                 } else {
                     ui.centered_and_justified(|ui| {
                         ui.label("Loading chart data...");
