@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use super::chart_editor::ChartEditor;
 use super::chart_widget::ChartWindowManager;
 use super::formula_bar::FormulaBar;
-use super::grid::{GridConfig, NavigationKey, ScrollState, SpreadsheetGrid};
+use super::grid::{
+    GridConfig, HEADER_HEIGHT, HEADER_WIDTH, NavigationKey, ScrollState, SpreadsheetGrid,
+};
 use super::help_panel::HelpPanel;
 use super::selection::Selection;
 use super::sheet_tabs::SheetTabs;
@@ -171,6 +173,8 @@ pub struct SpreadsheetApp {
     modified: bool,
     /// Last title sent to the window
     window_title: String,
+    /// Screen position of cell A1's top-left corner, from the last frame
+    grid_origin: Option<egui::Pos2>,
     /// Status message to display
     status_message: Option<(String, std::time::Instant)>,
     /// Undo/redo history
@@ -215,6 +219,7 @@ impl SpreadsheetApp {
             current_file: None,
             modified: false,
             window_title: String::new(),
+            grid_origin: None,
             status_message: None,
             undo_history: UndoHistory::default(),
             chart_windows: ChartWindowManager::new(),
@@ -1108,7 +1113,15 @@ impl SpreadsheetApp {
     }
 
     /// Add a new chart
-    fn add_chart(&mut self, chart: ChartDefinition) {
+    fn add_chart(&mut self, mut chart: ChartDefinition) {
+        // Place a new chart just right of its data, like Excel does.
+        let ranges = chart.dependent_ranges();
+        if let (Some(top), Some(right)) = (
+            ranges.iter().map(|r| r.start.row.min(r.end.row)).min(),
+            ranges.iter().map(|r| r.start.col.max(r.end.col)).max(),
+        ) {
+            chart.overlay_area.anchor_cell = (top, right + 1);
+        }
         let id = chart.id;
         self.chart_windows.add_chart(chart.clone());
         self.update_chart_data(id);
@@ -1352,7 +1365,24 @@ impl eframe::App for SpreadsheetApp {
         self.help_panel.show(ctx);
 
         // Chart windows
-        let chart_response = self.chart_windows.show(ctx);
+        // Charts are placed relative to the grid, which is laid out below;
+        // skip the first frame until its position is known.
+        let chart_response = match self.grid_origin {
+            Some(origin) => {
+                let (config, scroll) = (&self.grid_config, &self.scroll);
+                self.chart_windows.show(ctx, |(row, col)| {
+                    origin
+                        + Vec2::new(
+                            config.column_x(col) - scroll.offset_x,
+                            config.row_y(row) - scroll.offset_y,
+                        )
+                })
+            }
+            None => {
+                ctx.request_repaint();
+                Default::default()
+            }
+        };
 
         // Handle chart window actions
         if let Some(edit_id) = chart_response.edit_requested {
@@ -1472,6 +1502,8 @@ impl eframe::App for SpreadsheetApp {
         // Main grid area
         CentralPanel::default().show(ctx, |ui| {
             let viewport_size = ui.available_size();
+            self.grid_origin =
+                Some(ui.available_rect_before_wrap().min + Vec2::new(HEADER_WIDTH, HEADER_HEIGHT));
 
             let grid = SpreadsheetGrid::new(
                 self.current_sheet,
@@ -1587,6 +1619,7 @@ pub fn run_with_file(path: Option<PathBuf>) -> Result<(), eframe::Error> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1200.0, 800.0])
         .with_min_inner_size([600.0, 400.0])
+        .with_maximized(true)
         .with_title("RustSheet");
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);

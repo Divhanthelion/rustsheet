@@ -113,8 +113,13 @@ impl ChartWindowManager {
         self.windows.is_empty()
     }
 
-    /// Render all chart windows
-    pub fn show(&mut self, ctx: &Context) -> ChartWindowResponse {
+    /// Render all chart windows. `cell_pos` maps a (row, col) anchor cell to
+    /// its screen position, used to place a chart before it has been moved.
+    pub fn show(
+        &mut self,
+        ctx: &Context,
+        cell_pos: impl Fn((u32, u32)) -> Pos2,
+    ) -> ChartWindowResponse {
         let mut response = ChartWindowResponse::default();
         self.pending_removes.clear();
 
@@ -139,9 +144,11 @@ impl ChartWindowManager {
                 .collapsible(true)
                 .default_size(window_state.size);
 
-            if let Some(pos) = window_state.position {
-                window = window.default_pos(pos);
-            }
+            let area = &window_state.chart.overlay_area;
+            let pos = window_state
+                .position
+                .unwrap_or_else(|| cell_pos(area.anchor_cell) + Vec2::from(area.anchor_offset));
+            window = window.default_pos(pos);
 
             let window_response = window.show(ctx, |ui| {
                 let available = ui.available_rect_before_wrap();
