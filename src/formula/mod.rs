@@ -2,7 +2,7 @@ mod ast;
 mod grammar;
 mod parser;
 
-pub use ast::{BinaryOp, CellRef, Expr, FunctionCall, RangeRef, UnaryOp};
+pub use ast::{BinaryOp, CellRef, Expr, FunctionCall, RangeRef, RefMut, UnaryOp};
 pub use parser::FormulaParser;
 
 /// Ensure a formula string starts with `=` so it re-parses.

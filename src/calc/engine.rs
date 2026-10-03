@@ -503,6 +503,35 @@ impl CalcEngine {
         self.formatting_mut(sheet).set(coord, format);
     }
 
+    pub(crate) fn all_inputs(&self) -> impl Iterator<Item = ((u32, CellCoord), &CellInput)> {
+        self.inputs.iter().map(|(&k, v)| (k, v))
+    }
+
+    pub(crate) fn all_formatting(&self) -> &HashMap<u32, SheetFormatting> {
+        &self.formatting
+    }
+
+    pub(crate) fn all_formatting_mut(&mut self) -> &mut HashMap<u32, SheetFormatting> {
+        &mut self.formatting
+    }
+
+    /// A cell's stored input (value or formula), if any.
+    pub fn get_input(&self, sheet: u32, coord: CellCoord) -> Option<&CellInput> {
+        self.inputs.get(&(sheet, coord))
+    }
+
+    /// Remove every input and all derived state, for whole-workbook rewrites
+    /// that put cells back afterwards.
+    pub(crate) fn take_all_inputs(&mut self) -> HashMap<(u32, CellCoord), CellInput> {
+        let inputs = std::mem::take(&mut self.inputs);
+        self.formulas.clear();
+        self.dependents.clear();
+        self.dependencies.clear();
+        self.cache.borrow_mut().clear();
+        self.evaluating.borrow_mut().clear();
+        inputs
+    }
+
     /// Drop one sheet's cells and shift higher sheet keys down by one.
     pub fn remove_sheet_and_shift(&mut self, index: u32) {
         self.formatting = std::mem::take(&mut self.formatting)

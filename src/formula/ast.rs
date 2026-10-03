@@ -99,6 +99,12 @@ pub struct RangeRef {
     pub end_absolute: (bool, bool),
 }
 
+/// A reference found by [`Expr::visit_references_mut`].
+pub enum RefMut<'a> {
+    Cell(&'a mut CellRef),
+    Range(&'a mut RangeRef),
+}
+
 /// Excel's last row and column index.
 const MAX_ROW: i64 = 1_048_575;
 const MAX_COL: i64 = 16_383;
@@ -178,6 +184,34 @@ impl Expr {
             Expr::Unary { operand, .. } => operand.has_dependencies(),
             Expr::Function(f) => f.args.iter().any(|a| a.has_dependencies()),
             _ => false,
+        }
+    }
+
+    /// Visit every cell and range reference. Returning `false` replaces that
+    /// reference with `#REF!`.
+    pub fn visit_references_mut(&mut self, f: &mut dyn FnMut(RefMut<'_>) -> bool) {
+        let keep = match self {
+            Expr::CellRef(r) => f(RefMut::Cell(r)),
+            Expr::RangeRef(r) => f(RefMut::Range(r)),
+            Expr::Binary { left, right, .. } => {
+                left.visit_references_mut(f);
+                right.visit_references_mut(f);
+                true
+            }
+            Expr::Unary { operand, .. } => {
+                operand.visit_references_mut(f);
+                true
+            }
+            Expr::Function(func) => {
+                for arg in &mut func.args {
+                    arg.visit_references_mut(f);
+                }
+                true
+            }
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) => true,
+        };
+        if !keep {
+            *self = Expr::Error(CellError::Ref);
         }
     }
 

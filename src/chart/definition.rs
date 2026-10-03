@@ -337,6 +337,27 @@ impl Default for ChartDefinition {
 }
 
 impl ChartDefinition {
+    /// Follow inserted or deleted rows/columns on the chart's sheet: data
+    /// ranges shrink or grow, series whose data was deleted are dropped, and
+    /// the anchor moves with its cell.
+    pub fn apply_line_edit(&mut self, edit: &crate::cell::LineEdit) {
+        self.series.retain_mut(|s| {
+            s.x_range = s.x_range.and_then(|r| edit.map_range(r));
+            match edit.map_range(s.y_range) {
+                Some(r) => {
+                    s.y_range = r;
+                    true
+                }
+                None => false,
+            }
+        });
+        let (row, col) = self.overlay_area.anchor_cell;
+        let anchor = crate::cell::CellRange::single(crate::cell::CellCoord::new(row, col));
+        if let Some(moved) = edit.map_range(anchor) {
+            self.overlay_area.anchor_cell = (moved.start.row, moved.start.col);
+        }
+    }
+
     pub fn new(chart_kind: ChartKind) -> Self {
         let mut def = Self {
             chart_kind,
