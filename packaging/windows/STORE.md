@@ -28,7 +28,7 @@ Alternatively, push a tag `vX.Y.Z` and download the MSIX from the GitHub release
 ### Test before submitting
 
 - **Install locally** (needs Developer Mode): `Add-AppxPackage -Register target\msix\stage\AppxManifest.xml`, launch RustSheet from Start, right-click a `.csv` > Open with > RustSheet. Remove it with `Get-AppxPackage *RustSheet* | Remove-AppxPackage`.
-- **Certification kit**: `appcert.exe test -appxpackagepath target\msix\RustSheet_<version>_x64.msix -reportoutputpath wack.xml` (from `Windows Kits\App Certification Kit`, needs elevation). It passes with no flagged tests. Keep the `vendor/webbrowser` stand-in: the real crate made the optional "Blocked executables" test fail.
+- **Certification kit**: `appcert.exe test -appxpackagepath target\msix\RustSheet_<version>_x64.msix -reportoutputpath wack.xml` (from `Windows Kits\10\App Certification Kit`, needs elevation). It passes with no flagged tests. Keep the `vendor/webbrowser` stand-in: the real crate made the optional "Blocked executables" test fail.
 
 ## Submission answers
 
