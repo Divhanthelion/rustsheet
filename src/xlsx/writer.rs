@@ -152,6 +152,9 @@ impl XlsxWriter {
             for cf in &formatting.conditional {
                 add_conditional_format(worksheet, cf)?;
             }
+            for p in &formatting.pictures {
+                insert_picture(worksheet, p)?;
+            }
             for (coord, note) in &formatting.notes {
                 let mut n = rust_xlsxwriter::Note::new(&note.text);
                 if let Some(author) = &note.author {
@@ -785,6 +788,35 @@ fn add_conditional_format(
             add!(rule)
         }
     }
+    Ok(())
+}
+
+/// Place a picture at its cell. Images rust_xlsxwriter can't read are left
+/// out rather than failing the save.
+fn insert_picture(
+    worksheet: &mut Worksheet,
+    p: &crate::format::picture::Picture,
+) -> Result<(), XlsxWriteError> {
+    use super::drawing::ROW_POINTS_PER_PIXEL;
+    use crate::format::picture::POINTS_PER_PIXEL;
+    let Ok(mut image) = rust_xlsxwriter::Image::new_from_buffer(&p.data) else {
+        return Ok(());
+    };
+    image = image.set_scale_to_size(
+        f64::from(p.size.0 / POINTS_PER_PIXEL),
+        f64::from(p.size.1 / POINTS_PER_PIXEL),
+        false,
+    );
+    if !p.description.is_empty() {
+        image = image.set_alt_text(&p.description);
+    }
+    worksheet.insert_image_with_offset(
+        p.anchor.row,
+        col_num(p.anchor.col)?,
+        &image,
+        (p.offset.0 / POINTS_PER_PIXEL).round().max(0.0) as u32,
+        (p.offset.1 / ROW_POINTS_PER_PIXEL).round().max(0.0) as u32,
+    )?;
     Ok(())
 }
 

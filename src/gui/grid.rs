@@ -11,12 +11,13 @@ use super::theme::Theme;
 use crate::calc::CellResult;
 use crate::calc::{CalcEngine, CfLook};
 use crate::cell::{Axis, CellCoord, CellError, CellRange, MAX_COL, MAX_ROW};
+use crate::format::picture::Picture;
 use crate::format::{
     CellFormat, DEFAULT_FONT_SIZE, HAlign, Rgb, SheetFormatting, VAlign, format_general,
     format_number,
 };
 use eframe::egui::{self, Color32, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Default cell dimensions
 pub const DEFAULT_COLUMN_WIDTH: f32 = 80.0;
@@ -220,6 +221,88 @@ fn cell_text(value: &CellResult, format: &CellFormat, max_len: usize) -> Option<
 /// A cell's value as shown on screen, e.g. for copying to other apps.
 pub fn display_text(value: &CellResult, format: Option<&CellFormat>) -> String {
     crate::format::display_text(value, format)
+}
+
+/// Where a picture sits: its top-left cell, the offset into that cell, and
+/// its size, in grid points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PicturePlace {
+    pub anchor: CellCoord,
+    pub offset: (f32, f32),
+    pub size: (f32, f32),
+}
+
+/// Commands from a picture's right-click menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PictureAction {
+    Delete,
+    ResetSize,
+    BringToFront,
+    SendToBack,
+    AltText,
+}
+
+/// Identifies a picture's image across frames, for its texture.
+pub fn picture_key(p: &Picture) -> usize {
+    p.data.as_ptr() as usize
+}
+
+/// A picture being moved (no corner) or resized from a corner (0 top-left,
+/// then clockwise).
+#[derive(Clone, Copy, Debug)]
+struct PictureDrag {
+    index: usize,
+    corner: Option<usize>,
+    delta: Vec2,
+}
+
+fn corners(r: Rect) -> [Pos2; 4] {
+    [
+        r.left_top(),
+        r.right_top(),
+        r.right_bottom(),
+        r.left_bottom(),
+    ]
+}
+
+/// A picture's rect while dragged. Corners keep its shape, with the
+/// opposite corner fixed.
+fn dragged_rect(rect: Rect, drag: &PictureDrag) -> Rect {
+    let Some(corner) = drag.corner else {
+        return rect.translate(drag.delta);
+    };
+    let c = corners(rect);
+    let (moving, fixed) = (c[corner], c[(corner + 2) % 4]);
+    let moved = moving + drag.delta;
+    let (w, h) = (rect.width().max(1.0), rect.height().max(1.0));
+    // Follow whichever way the pointer moved further.
+    let scale = if (drag.delta.x / w).abs() >= (drag.delta.y / h).abs() {
+        (moved.x - fixed.x) * (moving.x - fixed.x).signum() / w
+    } else {
+        (moved.y - fixed.y) * (moving.y - fixed.y).signum() / h
+    }
+    .max(8.0 / w.min(h));
+    let far = fixed
+        + Vec2::new(
+            (moving.x - fixed.x).signum() * w * scale,
+            (moving.y - fixed.y).signum() * h * scale,
+        );
+    Rect::from_two_pos(fixed, far)
+}
+
+fn picture_menu(ui: &mut Ui, index: usize, out: &mut Option<(usize, PictureAction)>) {
+    for (label, action) in [
+        ("Delete Picture", PictureAction::Delete),
+        ("Reset Size", PictureAction::ResetSize),
+        ("Bring to Front", PictureAction::BringToFront),
+        ("Send to Back", PictureAction::SendToBack),
+        ("Alt Text...", PictureAction::AltText),
+    ] {
+        if ui.button(label).clicked() {
+            *out = Some((index, action));
+            ui.close_menu();
+        }
+    }
 }
 
 /// A conditional-format data bar: `fraction` of the cell, fading into the
@@ -525,6 +608,12 @@ pub struct GridResponse {
     pub hovered_note: Option<(CellCoord, Pos2)>,
     /// The active cell's validation drop-down was clicked: where to open it
     pub validation_dropdown: Option<Pos2>,
+    /// A picture was clicked or right-clicked (select it)
+    pub picture_clicked: Option<usize>,
+    /// A picture was moved or resized to this place
+    pub picture_placed: Option<(usize, PicturePlace)>,
+    /// Command picked from a picture's right-click menu
+    pub picture_action: Option<(usize, PictureAction)>,
 }
 
 /// Navigation keys
@@ -579,6 +668,9 @@ pub struct SpreadsheetGrid<'a> {
     fill_preview: Option<CellRange>,
     /// Installed fonts, for cells that name one
     fonts: Option<&'a FontLibrary>,
+    /// Picture textures by `picture_key`
+    picture_textures: Option<&'a HashMap<usize, egui::TextureId>>,
+    selected_picture: Option<usize>,
     /// Screen rect of the data area, set at the start of `show`
     data: Rect,
 }
@@ -603,6 +695,8 @@ impl<'a> SpreadsheetGrid<'a> {
             fill_handle: true,
             fill_preview: None,
             fonts: None,
+            picture_textures: None,
+            selected_picture: None,
             data: Rect::NOTHING,
         }
     }
@@ -625,6 +719,16 @@ impl<'a> SpreadsheetGrid<'a> {
 
     pub fn with_fill_preview(mut self, range: Option<CellRange>) -> Self {
         self.fill_preview = range;
+        self
+    }
+
+    pub fn with_pictures(
+        mut self,
+        textures: &'a HashMap<usize, egui::TextureId>,
+        selected: Option<usize>,
+    ) -> Self {
+        self.picture_textures = Some(textures);
+        self.selected_picture = selected;
         self
     }
 
@@ -752,6 +856,50 @@ impl<'a> SpreadsheetGrid<'a> {
         lines
     }
 
+    /// Screen rect of a picture.
+    fn picture_rect(&self, p: &Picture) -> Rect {
+        Rect::from_min_size(
+            Pos2::new(
+                self.col_left(p.anchor.col) + p.offset.0,
+                self.row_top(p.anchor.row) + p.offset.1,
+            ),
+            Vec2::new(p.size.0, p.size.1),
+        )
+    }
+
+    /// Where a picture can show: it scrolls with its anchor cell's pane, and
+    /// slides under frozen rows and columns.
+    fn picture_clip(&self, anchor: CellCoord) -> Rect {
+        let f = self.config.frozen_size();
+        let d = self.data;
+        let x0 = if anchor.col < self.config.frozen_cols {
+            d.min.x
+        } else {
+            d.min.x + f.x
+        };
+        let y0 = if anchor.row < self.config.frozen_rows {
+            d.min.y
+        } else {
+            d.min.y + f.y
+        };
+        Rect::from_min_max(Pos2::new(x0, y0), d.max)
+    }
+
+    /// The place of a picture moved from `p`'s place by `delta`, with size
+    /// `size`.
+    fn moved_place(&self, p: &Picture, delta: Vec2, size: Vec2) -> PicturePlace {
+        let c = self.config;
+        let x = (c.column_x(p.anchor.col) + p.offset.0 + delta.x).max(0.0);
+        let y = (c.row_y(p.anchor.row) + p.offset.1 + delta.y).max(0.0);
+        let col = c.column_at_x(x).min(MAX_COL);
+        let row = c.row_at_y(y).min(MAX_ROW);
+        PicturePlace {
+            anchor: CellCoord::new(row, col),
+            offset: ((x - c.column_x(col)).max(0.0), (y - c.row_y(row)).max(0.0)),
+            size: (size.x, size.y),
+        }
+    }
+
     /// Screen rect of one pane.
     fn pane_rect(&self, frozen_row: bool, frozen_col: bool) -> Rect {
         let f = self.config.frozen_size();
@@ -807,6 +955,7 @@ impl<'a> SpreadsheetGrid<'a> {
             let cols = self.visible_lines(Axis::Column);
             self.draw_cells(&painter, &rows, &cols);
             self.draw_selection(&painter);
+            self.draw_pictures(ui, &painter, grid_id);
             if let Some(range) = self.fill_preview {
                 let p = painter.with_clip_rect(self.data);
                 let rect = self.range_rect(range);
@@ -831,6 +980,7 @@ impl<'a> SpreadsheetGrid<'a> {
             self.filter_buttons(ui, grid_id, &painter, &cols, &mut response);
             self.fill_handle(ui, grid_id, &painter, &mut response);
             self.validation_button(ui, grid_id, &painter, &mut response);
+            self.picture_interaction(ui, grid_id, &mut response);
             self.scrollbars(ui, grid_id, grid_rect, &painter, &mut response);
 
             // Handle drag for multi-cell selection
@@ -1129,6 +1279,152 @@ impl<'a> SpreadsheetGrid<'a> {
                 }
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Pictures
+    // ------------------------------------------------------------------
+
+    fn pictures(&self) -> &'a [Picture] {
+        self.formatting().map_or(&[], |f| f.pictures.as_slice())
+    }
+
+    fn draw_pictures(&self, ui: &Ui, painter: &egui::Painter, grid_id: egui::Id) {
+        let drag: Option<PictureDrag> = ui.data(|d| d.get_temp(grid_id.with("picture_drag")));
+        for (i, p) in self.pictures().iter().enumerate() {
+            let mut rect = self.picture_rect(p);
+            if let Some(d) = drag.filter(|d| d.index == i) {
+                rect = dragged_rect(rect, &d);
+            }
+            let painter =
+                painter.with_clip_rect(self.picture_clip(p.anchor).intersect(painter.clip_rect()));
+            if !painter.clip_rect().intersects(rect) {
+                continue;
+            }
+            match self.picture_textures.and_then(|t| t.get(&picture_key(p))) {
+                Some(&texture) => {
+                    painter.image(
+                        texture,
+                        rect,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+                // Not decoded (yet), or a format that can't be shown.
+                None => {
+                    painter.rect_filled(rect, 0.0, self.theme.header_bg);
+                    painter.text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "Picture",
+                        egui::FontId::proportional(12.0),
+                        self.theme.header_text,
+                    );
+                }
+            }
+            if self.selected_picture == Some(i) {
+                let stroke = Stroke::new(1.5_f32, self.theme.selection_border);
+                painter.rect_stroke(rect, 0.0, stroke, StrokeKind::Outside);
+                for corner in corners(rect) {
+                    painter.circle(corner, 4.5, self.theme.cell_bg, stroke);
+                }
+            }
+        }
+    }
+
+    /// Click to select, drag to move, drag a corner of the selected picture
+    /// to resize. The change is reported once, when the drag ends.
+    fn picture_interaction(&self, ui: &Ui, grid_id: egui::Id, response: &mut GridResponse) {
+        let pictures = self.pictures();
+        if pictures.is_empty() {
+            return;
+        }
+        let drag_id = grid_id.with("picture_drag");
+        let mut drag: Option<PictureDrag> = ui.data(|d| d.get_temp(drag_id));
+        let mut finished = false;
+        for (i, p) in pictures.iter().enumerate() {
+            let visible = self.picture_rect(p).intersect(self.picture_clip(p.anchor));
+            if !visible.is_positive() {
+                continue;
+            }
+            let r = ui
+                .interact(
+                    visible,
+                    grid_id.with(("picture", i)),
+                    Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::Move);
+            if r.clicked() || r.drag_started() || r.secondary_clicked() {
+                response.picture_clicked = Some(i);
+            }
+            if r.drag_started() {
+                drag = Some(PictureDrag {
+                    index: i,
+                    corner: None,
+                    delta: Vec2::ZERO,
+                });
+            }
+            if r.dragged() {
+                if let Some(d) = drag.as_mut().filter(|d| d.index == i && d.corner.is_none()) {
+                    d.delta += r.drag_delta();
+                }
+            }
+            finished |= r.drag_stopped();
+            r.context_menu(|ui| picture_menu(ui, i, &mut response.picture_action));
+        }
+        if let Some(i) = self.selected_picture.filter(|&i| i < pictures.len()) {
+            let p = &pictures[i];
+            let clip = self.picture_clip(p.anchor);
+            for (corner, pos) in corners(self.picture_rect(p)).into_iter().enumerate() {
+                if !clip.contains(pos) {
+                    continue;
+                }
+                let cursor = if corner % 2 == 0 {
+                    egui::CursorIcon::ResizeNwSe
+                } else {
+                    egui::CursorIcon::ResizeNeSw
+                };
+                let handle = Rect::from_center_size(pos, Vec2::splat(12.0));
+                let r = ui
+                    .interact(
+                        handle,
+                        grid_id.with(("picture_corner", corner)),
+                        Sense::drag(),
+                    )
+                    .on_hover_cursor(cursor);
+                if r.drag_started() {
+                    drag = Some(PictureDrag {
+                        index: i,
+                        corner: Some(corner),
+                        delta: Vec2::ZERO,
+                    });
+                }
+                if r.dragged() {
+                    if let Some(d) = drag
+                        .as_mut()
+                        .filter(|d| d.index == i && d.corner == Some(corner))
+                    {
+                        d.delta += r.drag_delta();
+                    }
+                }
+                finished |= r.drag_stopped();
+            }
+        }
+        if finished {
+            if let Some(d) = drag.take().filter(|d| d.index < pictures.len()) {
+                let p = &pictures[d.index];
+                let before = self.picture_rect(p);
+                let after = dragged_rect(before, &d);
+                if after != before {
+                    let place = self.moved_place(p, after.min - before.min, after.size());
+                    response.picture_placed = Some((d.index, place));
+                }
+            }
+        }
+        ui.data_mut(|m| match drag {
+            Some(d) => m.insert_temp(drag_id, d),
+            None => m.remove::<PictureDrag>(drag_id),
+        });
     }
 
     /// The area text may use: its cell, widened over empty neighbors when
@@ -2163,5 +2459,27 @@ mod tests {
         assert_eq!(column_to_letter(25), "Z");
         assert_eq!(column_to_letter(26), "AA");
         assert_eq!(column_to_letter(MAX_COL), "XFD");
+    }
+
+    #[test]
+    fn picture_corners_resize_keeping_shape() {
+        let rect = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(100.0, 50.0));
+        let drag = |corner, delta| PictureDrag {
+            index: 0,
+            corner,
+            delta,
+        };
+        // Bottom-right outward: the top-left stays, the shape is kept.
+        let r = dragged_rect(rect, &drag(Some(2), Vec2::new(50.0, 0.0)));
+        assert_eq!(r, Rect::from_min_size(rect.min, Vec2::new(150.0, 75.0)));
+        // Top-left inward: the bottom-right stays.
+        let r = dragged_rect(rect, &drag(Some(0), Vec2::new(0.0, 25.0)));
+        assert_eq!(r, Rect::from_min_max(Pos2::new(60.0, 35.0), rect.max));
+        // It never collapses.
+        let r = dragged_rect(rect, &drag(Some(2), Vec2::new(-500.0, -500.0)));
+        assert!(r.height() >= 8.0 && r.min == rect.min);
+        // No corner: a move.
+        let r = dragged_rect(rect, &drag(None, Vec2::new(5.0, -5.0)));
+        assert_eq!(r, rect.translate(Vec2::new(5.0, -5.0)));
     }
 }

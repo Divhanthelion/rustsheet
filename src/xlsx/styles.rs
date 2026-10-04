@@ -47,37 +47,37 @@ pub fn read_formatting<R: Read + Seek>(
     reader: R,
 ) -> Result<Vec<(String, SheetFormatting)>, String> {
     let mut zip = zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
-    let mut read = |name: &str| -> Option<String> {
+    let mut read_bytes = |name: &str| -> Option<Vec<u8>> {
         let mut file = zip.by_name(name).ok()?;
-        let mut s = String::new();
-        file.read_to_string(&mut s).ok()?;
-        Some(s)
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).ok()?;
+        Some(buf)
+    };
+    let read = |read_bytes: &mut dyn FnMut(&str) -> Option<Vec<u8>>, name: &str| {
+        String::from_utf8(read_bytes(name)?).ok()
     };
 
-    let workbook = read("xl/workbook.xml").ok_or("missing xl/workbook.xml")?;
-    let rels = read("xl/_rels/workbook.xml.rels").unwrap_or_default();
-    let theme = read("xl/theme/theme1.xml")
+    let workbook = read(&mut read_bytes, "xl/workbook.xml").ok_or("missing xl/workbook.xml")?;
+    let rels = read(&mut read_bytes, "xl/_rels/workbook.xml.rels").unwrap_or_default();
+    let theme = read(&mut read_bytes, "xl/theme/theme1.xml")
         .map(|t| parse_theme(&t))
         .unwrap_or_else(default_theme);
-    let styles = read("xl/styles.xml")
+    let styles = read(&mut read_bytes, "xl/styles.xml")
         .map(|s| parse_styles(&s, &theme))
         .transpose()?
         .unwrap_or_default();
 
     let targets = parse_rels(&rels);
     let mut out = Vec::new();
-    let read_rel = |read: &mut dyn FnMut(&str) -> Option<String>,
+    let read_rel = |read_bytes: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
                     sheet_path: &str,
                     kind: &str|
      -> Option<(String, String)> {
-        // xl/worksheets/sheet1.xml -> xl/worksheets/_rels/sheet1.xml.rels
-        let (dir, file) = sheet_path.rsplit_once('/').unwrap_or(("", sheet_path));
-        let rels = read(&format!("{dir}/_rels/{file}.rels"))?;
-        let target = parse_typed_rels(&rels)
+        let target = part_rels(read_bytes, sheet_path)
             .into_iter()
             .find(|(_, t, _)| t.ends_with(kind))
-            .map(|(_, _, target)| resolve_part(dir, &target))?;
-        let xml = read(&target)?;
+            .map(|(_, _, target)| target)?;
+        let xml = read(read_bytes, &target)?;
         Some((target, xml))
     };
     for (name, rid) in parse_sheet_list(&workbook)? {
@@ -88,23 +88,52 @@ pub fn read_formatting<R: Read + Seek>(
             Some(abs) => abs.to_string(),
             None => format!("xl/{target}"),
         };
-        let mut formatting = match read(&path) {
-            Some(xml) => parse_sheet(&xml, &styles)?,
+        let mut formatting = match read(&mut read_bytes, &path) {
+            Some(xml) => {
+                let mut f = parse_sheet(&xml, &styles)?;
+                f.validations = parse_validations(&xml)?;
+                f.conditional = parse_conditional(&xml, &styles.dxfs, &theme)?;
+                f
+            }
             None => SheetFormatting::default(),
         };
-        if let Some(xml) = read(&path) {
-            formatting.validations = parse_validations(&xml)?;
-            formatting.conditional = parse_conditional(&xml, &styles.dxfs, &theme)?;
-        }
-        if let Some((_, xml)) = read_rel(&mut read, &path, "/comments") {
+        if let Some((_, xml)) = read_rel(&mut read_bytes, &path, "/comments") {
             formatting.notes = parse_comments(&xml)?;
+        }
+        if let Some((drawing, xml)) = read_rel(&mut read_bytes, &path, "/drawing") {
+            let images = part_rels(&mut read_bytes, &drawing);
+            formatting.pictures = super::drawing::parse_drawing(&xml)
+                .into_iter()
+                .filter_map(|d| {
+                    let (_, _, target) = images.iter().find(|(id, _, _)| *id == d.embed)?;
+                    super::drawing::to_picture(d, read_bytes(target)?)
+                })
+                .collect();
         }
         out.push((name, formatting));
     }
     Ok(out)
 }
 
-fn attr(e: &BytesStart, name: &[u8]) -> Option<String> {
+/// A part's relationships as (id, type, resolved target):
+/// xl/worksheets/sheet1.xml's are in xl/worksheets/_rels/sheet1.xml.rels.
+fn part_rels(
+    read_bytes: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
+    part: &str,
+) -> Vec<(String, String, String)> {
+    let (dir, file) = part.rsplit_once('/').unwrap_or(("", part));
+    let Some(rels) =
+        read_bytes(&format!("{dir}/_rels/{file}.rels")).and_then(|b| String::from_utf8(b).ok())
+    else {
+        return Vec::new();
+    };
+    parse_typed_rels(&rels)
+        .into_iter()
+        .map(|(id, kind, target)| (id, kind, resolve_part(dir, &target)))
+        .collect()
+}
+
+pub(super) fn attr(e: &BytesStart, name: &[u8]) -> Option<String> {
     e.attributes()
         .flatten()
         .find(|a| a.key.local_name().as_ref() == name)

@@ -31,7 +31,8 @@ impl Axis {
         }
     }
 
-    fn with(self, coord: CellCoord, index: u32) -> CellCoord {
+    /// The coordinate moved to `index` along this axis.
+    pub fn with(self, coord: CellCoord, index: u32) -> CellCoord {
         match self {
             Axis::Row => CellCoord::new(index, coord.col),
             Axis::Column => CellCoord::new(coord.row, index),

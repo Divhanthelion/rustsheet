@@ -7,6 +7,7 @@
 pub mod conditional;
 mod input;
 mod number;
+pub mod picture;
 pub mod validation;
 
 pub use input::parse_typed_number;
@@ -192,6 +193,8 @@ pub struct SheetFormatting {
     pub validations: Vec<validation::DataValidation>,
     /// Conditional formatting rules, highest priority first
     pub conditional: Vec<conditional::ConditionalFormat>,
+    /// Pictures, back to front
+    pub pictures: Vec<picture::Picture>,
 }
 
 impl SheetFormatting {
@@ -267,6 +270,7 @@ impl SheetFormatting {
             .collect();
         validation::apply_line_edit(&mut self.validations, edit);
         conditional::apply_line_edit(&mut self.conditional, edit);
+        picture::apply_line_edit(&mut self.pictures, edit);
         match edit.axis {
             Axis::Row => {
                 map_keys(&mut self.row_formats, edit);

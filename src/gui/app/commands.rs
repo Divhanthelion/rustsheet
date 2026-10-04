@@ -40,6 +40,7 @@ pub(super) enum Command {
     FreezeFirstColumn,
     Unfreeze,
     InsertChart,
+    InsertPicture,
     EditNote,
     DeleteNote,
     DataValidation,
@@ -174,6 +175,7 @@ impl SpreadsheetApp {
                 item(ui, "Columns", "", Command::Insert(Axis::Column), &mut out);
                 ui.separator();
                 item(ui, "Chart...", "", Command::InsertChart, &mut out);
+                item(ui, "Picture...", "", Command::InsertPicture, &mut out);
                 item(ui, "Note", "Shift+F2", Command::EditNote, &mut out);
             });
 
@@ -441,7 +443,10 @@ impl SpreadsheetApp {
             Command::Cut => self.copy_selection(ctx, true),
             Command::Copy => self.copy_selection(ctx, false),
             Command::Paste => self.paste_from_system_clipboard(),
-            Command::ClearContents => self.delete_selection(),
+            Command::ClearContents => match self.selected_picture {
+                Some(i) => self.delete_picture(i),
+                None => self.delete_selection(),
+            },
             Command::SelectAll => self.select_all_or_region(),
             Command::Find => self.open_find(false),
             Command::Replace => self.open_find(true),
@@ -463,6 +468,7 @@ impl SpreadsheetApp {
             Command::FreezeFirstColumn => self.freeze(0, 1),
             Command::Unfreeze => self.freeze(0, 0),
             Command::InsertChart => self.open_new_chart_editor(),
+            Command::InsertPicture => self.insert_picture_from_file(),
             Command::EditNote => self.open_note_editor(),
             Command::DeleteNote => self.delete_note(),
             Command::DataValidation => self.open_validation_dialog(),

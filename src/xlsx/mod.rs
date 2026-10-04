@@ -1,6 +1,8 @@
 #[cfg(feature = "xlsx")]
 mod chart_reader;
 #[cfg(feature = "xlsx")]
+mod drawing;
+#[cfg(feature = "xlsx")]
 mod reader;
 #[cfg(feature = "xlsx")]
 mod styles;
@@ -736,5 +738,42 @@ mod tests {
         let read = super::read_formatting_from_path(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(read[0].1.conditional, rules);
+    }
+
+    /// A 1x1 PNG.
+    pub(crate) const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn pictures_round_trip() {
+        use crate::format::picture::{Picture, PictureKind};
+        let mut engine = CalcEngine::new();
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(1.0));
+        let mut logo = Picture::new(
+            CellCoord::new(3, 2),
+            std::sync::Arc::from(TINY_PNG),
+            PictureKind::Png,
+            (1, 1),
+        );
+        logo.size = (250.0, 125.0);
+        logo.offset = (12.5, 2.2);
+        logo.description = "Company logo".into();
+        let mut second = logo.clone();
+        second.anchor = CellCoord::new(20, 0);
+        second.description.clear();
+        engine.formatting_mut(0).pictures = vec![logo.clone(), second.clone()];
+
+        let path = temp_xlsx("pictures");
+        let mut writer = XlsxWriter::new();
+        writer.add_engine_sheet("Main", &engine, 0).unwrap();
+        writer.save(&path).unwrap();
+        let read = super::read_formatting_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read[0].1.pictures, vec![logo, second]);
     }
 }

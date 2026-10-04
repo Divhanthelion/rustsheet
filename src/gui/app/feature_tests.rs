@@ -668,3 +668,67 @@ fn conditional_dialog_draws_every_rule_kind() {
     let _ = ctx.run(Default::default(), |ctx| app.show_conditional_dialog(ctx));
     assert_eq!(app.cf_dialog.as_ref().unwrap().rules.len(), 8);
 }
+
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::new(width, height)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    out.into_inner()
+}
+
+#[test]
+fn pictures_insert_move_order_and_delete() {
+    use crate::gui::grid::{PictureAction, PicturePlace};
+    let mut app = app();
+    app.last_viewport = Vec2::new(1000.0, 800.0);
+    select(&mut app, "B3", "B3");
+    app.insert_picture(png(40, 20)).unwrap();
+    assert!(app.insert_picture(b"not a picture".to_vec()).is_err());
+    assert_eq!(app.sheet_pictures().len(), 1);
+    let p = &app.sheet_pictures()[0];
+    assert_eq!((p.anchor, p.size), (at("B3"), (50.0, 25.0)));
+    assert_eq!(app.selected_picture, Some(0));
+
+    // Big pictures start scaled to fit the window.
+    app.insert_picture(png(1600, 400)).unwrap();
+    let big = app.sheet_pictures()[1].size;
+    assert!(
+        big.0 <= 600.0 && (big.0 / big.1 - 4.0).abs() < 0.01,
+        "{big:?}"
+    );
+
+    app.place_picture(
+        0,
+        PicturePlace {
+            anchor: at("D5"),
+            offset: (3.0, 4.0),
+            size: (100.0, 50.0),
+        },
+    );
+    assert_eq!(app.sheet_pictures()[0].anchor, at("D5"));
+
+    // It hangs from its cell when rows are inserted above.
+    select(&mut app, "A1", "A1");
+    app.insert_lines(Axis::Row);
+    assert_eq!(app.sheet_pictures()[0].anchor, at("D6"));
+
+    app.picture_action(0, PictureAction::BringToFront);
+    assert_eq!(app.sheet_pictures()[1].anchor, at("D6"));
+    assert_eq!(app.selected_picture, Some(1));
+    app.picture_action(1, PictureAction::ResetSize);
+    assert_eq!(app.sheet_pictures()[1].size, (50.0, 25.0));
+
+    app.picture_action(1, PictureAction::Delete);
+    assert_eq!(app.sheet_pictures().len(), 1);
+    app.undo();
+    assert_eq!(app.sheet_pictures().len(), 2);
+
+    // Textures for the grid.
+    let ctx = egui::Context::default();
+    let pictures = app.sheet_pictures().to_vec();
+    app.picture_textures.update(&ctx, &pictures);
+    assert_eq!(app.picture_textures.ids.len(), 2);
+    app.picture_textures.update(&ctx, &pictures[..1]);
+    assert_eq!(app.picture_textures.ids.len(), 1);
+}

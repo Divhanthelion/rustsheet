@@ -26,6 +26,7 @@ mod feature_tests;
 mod fill;
 mod find;
 mod notes;
+mod pictures;
 mod printing;
 mod recovery;
 mod sheet_ops;
@@ -43,6 +44,7 @@ use conditional_ui::CfDialog;
 use eframe::egui::RichText;
 use find::FindDialog;
 use notes::NoteEditor;
+use pictures::{AltTextEditor, PictureTextures};
 use printing::PrintDialog;
 use recovery::{Recoverable, Recovery};
 use sheet_ops::{FilterPopup, SortDialog, WorkbookState};
@@ -308,6 +310,14 @@ pub struct SpreadsheetApp {
     list_popup: Option<ListPopup>,
     /// Text to put back in the editor after a rejected entry
     retry_text: Option<String>,
+    /// Decoded pictures for the grid
+    picture_textures: PictureTextures,
+    /// The selected picture on the current sheet, by index
+    selected_picture: Option<usize>,
+    /// Alt text editor, when open
+    alt_text_editor: Option<AltTextEditor>,
+    /// Ctrl+V was down last frame (for pasting images; see `handle_clipboard_events`)
+    paste_key_down: bool,
     /// Tests answer validation alerts without a dialog
     #[cfg(test)]
     alert_answer: Option<validation_ui::AlertAnswer>,
@@ -396,6 +406,10 @@ impl SpreadsheetApp {
             cf_dialog: None,
             list_popup: None,
             retry_text: None,
+            picture_textures: PictureTextures::default(),
+            selected_picture: None,
+            alt_text_editor: None,
+            paste_key_down: false,
             #[cfg(test)]
             alert_answer: None,
             print_dialog: None,
@@ -685,6 +699,7 @@ impl SpreadsheetApp {
     /// Undo the last action
     fn undo(&mut self) {
         if let Some(action) = self.undo_history.pop_undo() {
+            self.selected_picture = None;
             self.replay(&action, false);
             self.undo_history.push_redo(action);
             self.set_status("Undo");
@@ -694,6 +709,7 @@ impl SpreadsheetApp {
     /// Redo the last undone action
     fn redo(&mut self) {
         if let Some(action) = self.undo_history.pop_redo() {
+            self.selected_picture = None;
             self.replay(&action, true);
             self.undo_history.push_undo_for_redo(action);
             self.set_status("Redo");
@@ -1076,9 +1092,16 @@ impl SpreadsheetApp {
     /// Edit > Paste and the right-click menu read the clipboard directly;
     /// Ctrl+V arrives as an egui paste event instead.
     fn paste_from_system_clipboard(&mut self) {
-        match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+            self.set_status("Nothing to paste");
+            return;
+        };
+        match clipboard.get_text() {
             Ok(text) if !text.is_empty() => self.paste_text(&text),
-            _ => self.set_status("Nothing to paste"),
+            _ => match clipboard.get_image() {
+                Ok(image) => self.paste_image(image),
+                Err(_) => self.set_status("Nothing to paste"),
+            },
         }
     }
 
@@ -1126,6 +1149,7 @@ impl SpreadsheetApp {
                 .cloned()
                 .collect()
         });
+        let pasted_text = events.iter().any(|e| matches!(e, egui::Event::Paste(_)));
         for event in events {
             match event {
                 egui::Event::Copy => self.copy_selection(ctx, false),
@@ -1134,6 +1158,15 @@ impl SpreadsheetApp {
                 _ => {}
             }
         }
+        // egui pastes only text: with just an image on the clipboard (a
+        // screenshot), Ctrl+V sends no event, so watch the key itself.
+        let down = paste_key_down(ctx);
+        if down && !self.paste_key_down && !pasted_text {
+            if let Ok(image) = arboard::Clipboard::new().and_then(|mut c| c.get_image()) {
+                self.paste_image(image);
+            }
+        }
+        self.paste_key_down = down;
     }
 
     // ------------------------------------------------------------------
@@ -1445,6 +1478,7 @@ impl SpreadsheetApp {
 
         // Switch
         self.current_sheet = sheet_index;
+        self.selected_picture = None;
 
         // Load new state
         self.load_sheet_state(sheet_index);
@@ -2259,12 +2293,17 @@ impl SpreadsheetApp {
                     self.help_panel.visible = false;
                 }
                 self.fill_target = None;
+                self.selected_picture = None;
             }
-            // Delete clears every selected cell (with undo support)
+            // Delete removes the selected picture, or clears every selected
+            // cell (with undo support)
             if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace))
                 && !self.is_editing()
             {
-                self.delete_selection();
+                match self.selected_picture {
+                    Some(i) => self.delete_picture(i),
+                    None => self.delete_selection(),
+                }
             }
             self.handle_clipboard_events(ctx);
         }
@@ -2281,6 +2320,14 @@ impl SpreadsheetApp {
                 .fill_target
                 .and_then(|t| self.fill_plan(t))
                 .map(|p| p.0);
+            let pictures = self
+                .engine
+                .formatting(self.current_sheet)
+                .map_or(&[][..], |f| f.pictures.as_slice());
+            self.picture_textures.update(ctx, pictures);
+            if self.selected_picture.is_some_and(|i| i >= pictures.len()) {
+                self.selected_picture = None;
+            }
             let grid = SpreadsheetGrid::new(
                 self.current_sheet,
                 &self.engine,
@@ -2290,11 +2337,38 @@ impl SpreadsheetApp {
                 &self.theme,
             )
             .with_used_extent(used)
-            .with_fill_handle(!self.is_editing())
+            .with_fill_handle(!self.is_editing() && self.selected_picture.is_none())
             .with_fill_preview(fill_preview)
-            .with_fonts(&self.fonts);
+            .with_fonts(&self.fonts)
+            .with_pictures(&self.picture_textures.ids, self.selected_picture);
 
             let grid_response = grid.show(ui);
+
+            // Pictures: select, move or resize, menu. Working with cells
+            // deselects them.
+            if let Some(i) = grid_response.picture_clicked {
+                if self.is_editing() {
+                    self.edit_buffer = self.formula_bar.content.clone();
+                    self.confirm_edit(false, false);
+                }
+                self.selected_picture = Some(i);
+                ctx.memory_mut(|m| m.request_focus(egui::Id::new("spreadsheet_grid")));
+            } else if grid_response.clicked_cell.is_some()
+                || grid_response.drag_started.is_some()
+                || grid_response.right_clicked_cell.is_some()
+                || grid_response.header_select.is_some()
+                || grid_response.select_all
+                || grid_response.navigation.is_some()
+                || grid_response.text_input_char.is_some()
+            {
+                self.selected_picture = None;
+            }
+            if let Some((i, place)) = grid_response.picture_placed {
+                self.place_picture(i, place);
+            }
+            if let Some((i, action)) = grid_response.picture_action {
+                self.picture_action(i, action);
+            }
 
             if let Some(offset) = grid_response.scroll_to {
                 self.scroll
@@ -2502,6 +2576,7 @@ impl SpreadsheetApp {
         self.show_note_editor(ctx);
         self.show_validation_dialog(ctx);
         self.show_conditional_dialog(ctx);
+        self.show_alt_text_editor(ctx);
         self.show_list_popup(ctx);
         self.show_input_message(ctx);
         self.show_filter_popup(ctx);
@@ -2512,6 +2587,20 @@ impl SpreadsheetApp {
             self.run_command(ctx, c);
         }
     }
+}
+
+/// Ctrl+V is held down, read from the keyboard directly.
+#[cfg(windows)]
+fn paste_key_down(ctx: &egui::Context) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_V};
+    let focused = ctx.input(|i| i.focused && i.modifiers.command);
+    // SAFETY: GetAsyncKeyState only reads key state.
+    focused && unsafe { GetAsyncKeyState(i32::from(VK_V)) } as u16 & 0x8000 != 0
+}
+
+#[cfg(not(windows))]
+fn paste_key_down(_ctx: &egui::Context) -> bool {
+    false
 }
 
 /// Whether a text field (formula bar, dialog box, sheet rename) has focus.
