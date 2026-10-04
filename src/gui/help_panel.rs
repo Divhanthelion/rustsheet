@@ -224,6 +224,9 @@ impl HelpPanel {
             shortcut_row(ui, "Ctrl+N", "New");
             shortcut_row(ui, "Ctrl+Z", "Undo");
             shortcut_row(ui, "Ctrl+Y", "Redo");
+            shortcut_row(ui, "Ctrl+C / Ctrl+X", "Copy / cut the selection");
+            shortcut_row(ui, "Ctrl+V", "Paste (from RustSheet, Excel, or text)");
+            shortcut_row(ui, "Delete", "Clear the selected cells");
 
             ui.add_space(10.0);
             ui.heading("Formatting");

@@ -3558,6 +3558,7 @@ name = "rustsheet"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "bytemuck",
  "calamine",
  "console_error_panic_hook",

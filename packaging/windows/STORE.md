@@ -81,6 +81,7 @@ Alternatively, push a tag `vX.Y.Z` and download the MSIX from the GitHub release
 - Fonts, colors, fills, borders, alignment and number formats
 - Currency, percent, date and time entry that formats itself
 - Resizable columns and rows, with fit-to-contents
+- Copy and paste with Excel and other apps
 - CSV import and export
 - Line, bar, scatter, area, pie and doughnut charts
 - Multiple sheets with cross-sheet references

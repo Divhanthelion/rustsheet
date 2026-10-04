@@ -169,6 +169,14 @@ fn cell_text(value: &CellResult, format: &CellFormat, max_len: usize) -> Option<
     })
 }
 
+/// A cell's value as shown on screen, e.g. for copying to other apps.
+pub fn display_text(value: &CellResult, format: Option<&CellFormat>) -> String {
+    let default_format = CellFormat::default();
+    cell_text(value, format.unwrap_or(&default_format), 15)
+        .map(|c| c.text)
+        .unwrap_or_default()
+}
+
 fn font_for(format: &CellFormat) -> egui::FontId {
     egui::FontId::proportional(
         CELL_FONT_SIZE * format.font_size_or_default() as f32 / DEFAULT_FONT_SIZE as f32,
@@ -237,6 +245,16 @@ pub fn fit_column_width(
             .reduce(f32::max)
     })
     .map(|w| w.max(MIN_RESIZE * 3.0))
+}
+
+/// Commands in the grid's right-click menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextAction {
+    Cut,
+    Copy,
+    Paste,
+    ClearContents,
+    ClearFormatting,
 }
 
 /// Which header border is being dragged.
@@ -311,6 +329,10 @@ pub struct GridResponse {
     pub resize_ended: bool,
     /// A column border was double-clicked: fit the column to its contents
     pub autofit_column: Option<u32>,
+    /// Cell under a right-click, to select before the menu acts
+    pub right_clicked_cell: Option<CellCoord>,
+    /// Command picked from the right-click menu
+    pub context_action: Option<ContextAction>,
 }
 
 /// Navigation keys
@@ -479,6 +501,31 @@ impl<'a> SpreadsheetGrid<'a> {
                     }
                 }
             }
+
+            if grid_response.secondary_clicked() {
+                if let Some(pos) = grid_response.interact_pointer_pos() {
+                    response.right_clicked_cell = pos_to_cell(pos);
+                }
+            }
+            grid_response.context_menu(|ui| {
+                let items = [
+                    ("Cut", "Ctrl+X", ContextAction::Cut),
+                    ("Copy", "Ctrl+C", ContextAction::Copy),
+                    ("Paste", "Ctrl+V", ContextAction::Paste),
+                    ("Clear contents", "Delete", ContextAction::ClearContents),
+                    ("Clear formatting", "", ContextAction::ClearFormatting),
+                ];
+                for (label, shortcut, action) in items {
+                    if action == ContextAction::ClearContents {
+                        ui.separator();
+                    }
+                    let button = egui::Button::new(label).shortcut_text(shortcut);
+                    if ui.add(button).clicked() {
+                        response.context_action = Some(action);
+                        ui.close_menu();
+                    }
+                }
+            });
         }
 
         // Handle keyboard navigation - use consume_key to prevent focus changes

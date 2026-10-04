@@ -91,6 +91,30 @@ impl CellRef {
 pub struct RangeRef {
     pub sheet: Option<String>,
     pub range: CellRange,
+    /// `$` on the start corner's (row, column)
+    #[serde(default)]
+    pub start_absolute: (bool, bool),
+    /// `$` on the end corner's (row, column)
+    #[serde(default)]
+    pub end_absolute: (bool, bool),
+}
+
+/// Excel's last row and column index.
+const MAX_ROW: i64 = 1_048_575;
+const MAX_COL: i64 = 16_383;
+
+/// Move a coordinate by (`rows`, `cols`) except on absolute axes.
+/// `None` if it would leave the sheet.
+fn offset_coord(
+    coord: CellCoord,
+    absolute: (bool, bool),
+    rows: i64,
+    cols: i64,
+) -> Option<CellCoord> {
+    let row = coord.row as i64 + if absolute.0 { 0 } else { rows };
+    let col = coord.col as i64 + if absolute.1 { 0 } else { cols };
+    ((0..=MAX_ROW).contains(&row) && (0..=MAX_COL).contains(&col))
+        .then(|| CellCoord::new(row as u32, col as u32))
 }
 
 /// Abstract Syntax Tree for formulas
@@ -154,6 +178,39 @@ impl Expr {
             Expr::Unary { operand, .. } => operand.has_dependencies(),
             Expr::Function(f) => f.args.iter().any(|a| a.has_dependencies()),
             _ => false,
+        }
+    }
+
+    /// Move relative references by (`rows`, `cols`), as when a formula is
+    /// copied to another cell. `$` parts stay put; a reference pushed off the
+    /// sheet becomes `#REF!`, as in Excel.
+    pub fn offset_references(&mut self, rows: i64, cols: i64) {
+        match self {
+            Expr::CellRef(r) => {
+                match offset_coord(r.coord, (r.row_absolute, r.col_absolute), rows, cols) {
+                    Some(coord) => r.coord = coord,
+                    None => *self = Expr::Error(CellError::Ref),
+                }
+            }
+            Expr::RangeRef(r) => {
+                let start = offset_coord(r.range.start, r.start_absolute, rows, cols);
+                let end = offset_coord(r.range.end, r.end_absolute, rows, cols);
+                match (start, end) {
+                    (Some(start), Some(end)) => r.range = CellRange::new(start, end),
+                    _ => *self = Expr::Error(CellError::Ref),
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                left.offset_references(rows, cols);
+                right.offset_references(rows, cols);
+            }
+            Expr::Unary { operand, .. } => operand.offset_references(rows, cols),
+            Expr::Function(f) => {
+                for arg in &mut f.args {
+                    arg.offset_references(rows, cols);
+                }
+            }
+            Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) => {}
         }
     }
 
@@ -243,7 +300,15 @@ impl fmt::Display for Expr {
                 sheet_prefix(r.sheet.as_deref()),
                 r.coord.to_a1_abs(r.row_absolute, r.col_absolute)
             ),
-            Expr::RangeRef(r) => write!(f, "{}{}", sheet_prefix(r.sheet.as_deref()), r.range),
+            Expr::RangeRef(r) => write!(
+                f,
+                "{}{}:{}",
+                sheet_prefix(r.sheet.as_deref()),
+                r.range
+                    .start
+                    .to_a1_abs(r.start_absolute.0, r.start_absolute.1),
+                r.range.end.to_a1_abs(r.end_absolute.0, r.end_absolute.1)
+            ),
             Expr::Binary { op, left, right } => {
                 write!(f, "({}{}{})", left, op.as_str(), right)
             }
@@ -281,5 +346,31 @@ mod tests {
         let mut deps = Vec::new();
         expr.collect_dependencies(&mut deps);
         assert_eq!(deps.len(), 2);
+    }
+
+    fn moved(formula: &str, rows: i64, cols: i64) -> String {
+        let mut expr = crate::formula::FormulaParser::new().parse(formula).unwrap();
+        expr.offset_references(rows, cols);
+        format!("={expr}")
+    }
+
+    #[test]
+    fn absolute_ranges_keep_their_dollars() {
+        let expr = crate::formula::FormulaParser::new()
+            .parse("=SUM($B$2:$B$7)+SUM(B$1:$C2)")
+            .unwrap();
+        assert_eq!(format!("={expr}"), "=(SUM($B$2:$B$7)+SUM(B$1:$C2))");
+    }
+
+    #[test]
+    fn copied_formulas_move_relative_parts_only() {
+        assert_eq!(moved("=A1+B2", 1, 2), "=(C2+D3)");
+        assert_eq!(moved("=$A$1+A$1+$A1", 3, 3), "=(($A$1+D$1)+$A4)");
+        assert_eq!(moved("=SUM(B2:B7)", 0, 1), "=SUM(C2:C7)");
+        assert_eq!(moved("=SUM($B$2:$B$7)", 5, 5), "=SUM($B$2:$B$7)");
+        assert_eq!(moved("=Sheet2!A1", 1, 0), "=Sheet2!A2");
+        // Off the top of the sheet: #REF!, as in Excel.
+        assert_eq!(moved("=A1*2", -1, 0), "=(#REF!*2)");
+        assert_eq!(moved("=SUM(A1:A3)", 0, -1), "=SUM(#REF!)");
     }
 }

@@ -205,10 +205,26 @@ impl FormulaParser {
             _ => return Err(ParseError::InvalidCellRef("invalid range".into())),
         };
 
+        // CellRange::new puts the smaller row and column first; keep each
+        // `$` with the corner it ends up on.
+        let (s, e) = (&start_ref, &end_ref);
+        let (top_row_abs, bottom_row_abs) = if s.coord.row <= e.coord.row {
+            (s.row_absolute, e.row_absolute)
+        } else {
+            (e.row_absolute, s.row_absolute)
+        };
+        let (left_col_abs, right_col_abs) = if s.coord.col <= e.coord.col {
+            (s.col_absolute, e.col_absolute)
+        } else {
+            (e.col_absolute, s.col_absolute)
+        };
+
         // Use sheet from start ref (Excel behavior)
         Ok(Expr::RangeRef(RangeRef {
-            sheet: start_ref.sheet,
             range: CellRange::new(start_ref.coord, end_ref.coord),
+            sheet: start_ref.sheet,
+            start_absolute: (top_row_abs, left_col_abs),
+            end_absolute: (bottom_row_abs, right_col_abs),
         }))
     }
 
