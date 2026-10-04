@@ -27,6 +27,7 @@ mod fill;
 mod find;
 mod notes;
 mod pictures;
+mod pivot_ui;
 mod printing;
 mod recovery;
 mod sheet_ops;
@@ -45,6 +46,7 @@ use eframe::egui::RichText;
 use find::FindDialog;
 use notes::NoteEditor;
 use pictures::{AltTextEditor, PictureTextures};
+use pivot_ui::PivotDialog;
 use printing::PrintDialog;
 use recovery::{Recoverable, Recovery};
 use sheet_ops::{FilterPopup, SortDialog, WorkbookState};
@@ -316,6 +318,8 @@ pub struct SpreadsheetApp {
     selected_picture: Option<usize>,
     /// Alt text editor, when open
     alt_text_editor: Option<AltTextEditor>,
+    /// PivotTable dialog, when open
+    pivot_dialog: Option<PivotDialog>,
     /// Ctrl+V was down last frame (for pasting images; see `handle_clipboard_events`)
     paste_key_down: bool,
     /// Tests answer validation alerts without a dialog
@@ -409,6 +413,7 @@ impl SpreadsheetApp {
             picture_textures: PictureTextures::default(),
             selected_picture: None,
             alt_text_editor: None,
+            pivot_dialog: None,
             paste_key_down: false,
             #[cfg(test)]
             alert_answer: None,
@@ -1541,22 +1546,37 @@ impl SpreadsheetApp {
         self.set_status(&format!("Deleted {}", name));
     }
 
-    /// Rename a sheet
+    /// Rename a sheet. Names follow Excel's rules, so the file saves.
     fn rename_sheet(&mut self, sheet_index: u32, new_name: String) {
         let index = sheet_index as usize;
         if index >= self.sheet_names.len() {
             return;
         }
-        if new_name.is_empty() {
-            self.set_status("Sheet name cannot be empty");
+        let new_name = new_name.trim().to_string();
+        if new_name == self.sheet_names[index] {
             return;
         }
-        // Check for duplicate names (excluding current)
-        for (i, name) in self.sheet_names.iter().enumerate() {
-            if i != index && name == &new_name {
-                self.set_status("Sheet name already exists");
-                return;
-            }
+        let problem = if new_name.is_empty() {
+            Some("Sheet names can't be blank")
+        } else if new_name.chars().count() > 31 {
+            Some("Sheet names can be at most 31 characters")
+        } else if new_name.contains([':', '\\', '/', '?', '*', '[', ']']) {
+            Some("Sheet names can't contain : \\ / ? * [ or ]")
+        } else if new_name.starts_with('\'') || new_name.ends_with('\'') {
+            Some("Sheet names can't start or end with an apostrophe")
+        } else if self
+            .sheet_names
+            .iter()
+            .enumerate()
+            .any(|(i, name)| i != index && name.eq_ignore_ascii_case(&new_name))
+        {
+            Some("There's already a sheet with that name")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            self.set_status(problem);
+            return;
         }
         let old_name = self.sheet_names[index].clone();
         self.engine.rewrite_sheet_name(&old_name, &new_name);
@@ -1925,11 +1945,21 @@ impl SpreadsheetApp {
             Ok(()) => {
                 self.saved_to(path);
                 let sheet_count = self.sheet_names.len();
+                let has_pivots = self
+                    .engine
+                    .all_formatting()
+                    .values()
+                    .any(|f| !f.pivots.is_empty());
                 self.set_status(&format!(
-                    "Saved: {} ({} sheet{})",
+                    "Saved: {} ({} sheet{}){}",
                     path.display(),
                     sheet_count,
-                    if sheet_count == 1 { "" } else { "s" }
+                    if sheet_count == 1 { "" } else { "s" },
+                    if has_pivots {
+                        ". In Excel, PivotTables show as values; RustSheet can still refresh them."
+                    } else {
+                        ""
+                    }
                 ));
             }
             Err(e) => {
@@ -2577,6 +2607,7 @@ impl SpreadsheetApp {
         self.show_validation_dialog(ctx);
         self.show_conditional_dialog(ctx);
         self.show_alt_text_editor(ctx);
+        self.show_pivot_dialog(ctx);
         self.show_list_popup(ctx);
         self.show_input_message(ctx);
         self.show_filter_popup(ctx);

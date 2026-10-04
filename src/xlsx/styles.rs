@@ -69,6 +69,7 @@ pub fn read_formatting<R: Read + Seek>(
 
     let targets = parse_rels(&rels);
     let mut out = Vec::new();
+    let mut sheet_parts = Vec::new();
     let read_rel = |read_bytes: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
                     sheet_path: &str,
                     kind: &str|
@@ -88,6 +89,7 @@ pub fn read_formatting<R: Read + Seek>(
             Some(abs) => abs.to_string(),
             None => format!("xl/{target}"),
         };
+        sheet_parts.push((name.clone(), path.clone()));
         let mut formatting = match read(&mut read_bytes, &path) {
             Some(xml) => {
                 let mut f = parse_sheet(&xml, &styles)?;
@@ -112,12 +114,24 @@ pub fn read_formatting<R: Read + Seek>(
         }
         out.push((name, formatting));
     }
+
+    // Pivot tables: RustSheet's own definitions, or Excel's.
+    let pivots: Vec<(String, Vec<crate::pivot::PivotTable>)> =
+        match read(&mut read_bytes, super::writer::PIVOTS_MANIFEST) {
+            Some(json) => serde_json::from_str(&json).unwrap_or_default(),
+            None => super::pivot_reader::read_excel_pivots(&mut read_bytes, &sheet_parts),
+        };
+    for (name, list) in pivots {
+        if let Some((_, f)) = out.iter_mut().find(|(n, _)| *n == name) {
+            f.pivots = list;
+        }
+    }
     Ok(out)
 }
 
 /// A part's relationships as (id, type, resolved target):
 /// xl/worksheets/sheet1.xml's are in xl/worksheets/_rels/sheet1.xml.rels.
-fn part_rels(
+pub(super) fn part_rels(
     read_bytes: &mut dyn FnMut(&str) -> Option<Vec<u8>>,
     part: &str,
 ) -> Vec<(String, String, String)> {

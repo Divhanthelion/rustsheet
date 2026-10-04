@@ -41,6 +41,10 @@ pub(super) enum Command {
     Unfreeze,
     InsertChart,
     InsertPicture,
+    InsertPivot,
+    EditPivot,
+    RefreshPivot,
+    RefreshAllPivots,
     EditNote,
     DeleteNote,
     DataValidation,
@@ -69,6 +73,8 @@ impl From<ContextAction> for Command {
             ContextAction::SortAscending => Command::SortAscending,
             ContextAction::SortDescending => Command::SortDescending,
             ContextAction::ToggleFilter => Command::ToggleFilter,
+            ContextAction::RefreshPivot => Command::RefreshPivot,
+            ContextAction::EditPivot => Command::EditPivot,
         }
     }
 }
@@ -176,6 +182,7 @@ impl SpreadsheetApp {
                 ui.separator();
                 item(ui, "Chart...", "", Command::InsertChart, &mut out);
                 item(ui, "Picture...", "", Command::InsertPicture, &mut out);
+                item(ui, "PivotTable...", "", Command::InsertPivot, &mut out);
                 item(ui, "Note", "Shift+F2", Command::EditNote, &mut out);
             });
 
@@ -277,6 +284,25 @@ impl SpreadsheetApp {
                     Command::DataValidation,
                     &mut out,
                 );
+                ui.separator();
+                let in_pivot = self.pivot_at_active().is_some();
+                if in_pivot {
+                    item(ui, "PivotTable Fields...", "", Command::EditPivot, &mut out);
+                    item(
+                        ui,
+                        "Refresh PivotTable",
+                        "Alt+F5",
+                        Command::RefreshPivot,
+                        &mut out,
+                    );
+                }
+                item(
+                    ui,
+                    "Refresh All",
+                    "Ctrl+Alt+F5",
+                    Command::RefreshAllPivots,
+                    &mut out,
+                );
             });
 
             ui.menu_button("View", |ui| {
@@ -372,6 +398,12 @@ impl SpreadsheetApp {
         }
         if take(Modifiers::SHIFT, Key::F2) {
             return Some(Command::EditNote);
+        }
+        if take(Modifiers::COMMAND | Modifiers::ALT, Key::F5) {
+            return Some(Command::RefreshAllPivots);
+        }
+        if take(Modifiers::ALT, Key::F5) {
+            return Some(Command::RefreshPivot);
         }
         if take(cmd_shift, Key::L) {
             return Some(Command::ToggleFilter);
@@ -469,6 +501,10 @@ impl SpreadsheetApp {
             Command::Unfreeze => self.freeze(0, 0),
             Command::InsertChart => self.open_new_chart_editor(),
             Command::InsertPicture => self.insert_picture_from_file(),
+            Command::InsertPivot => self.open_pivot_dialog(false),
+            Command::EditPivot => self.open_pivot_dialog(true),
+            Command::RefreshPivot => self.refresh_pivot(),
+            Command::RefreshAllPivots => self.refresh_all_pivots(),
             Command::EditNote => self.open_note_editor(),
             Command::DeleteNote => self.delete_note(),
             Command::DataValidation => self.open_validation_dialog(),

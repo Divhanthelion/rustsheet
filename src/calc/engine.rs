@@ -490,6 +490,7 @@ impl CalcEngine {
 
     /// Rewrite formula text after a tab rename, then rebind.
     pub fn rewrite_sheet_name(&mut self, old: &str, new: &str) {
+        self.rename_pivot_sources(old, new);
         let items: Vec<(u32, CellCoord, String)> = self
             .inputs
             .iter()

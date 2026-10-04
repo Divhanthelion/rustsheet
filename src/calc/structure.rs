@@ -90,6 +90,7 @@ impl CalcEngine {
             }
         }
         self.formatting_mut(sheet).apply_line_edit(edit);
+        self.move_pivot_sources(sheet, edit);
     }
 
     /// Re-parse `formula` (on sheet `formula_sheet`), apply `f` to each

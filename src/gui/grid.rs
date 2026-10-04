@@ -484,6 +484,8 @@ pub enum ContextAction {
     SortAscending,
     SortDescending,
     ToggleFilter,
+    RefreshPivot,
+    EditPivot,
 }
 
 /// A click or drag on a row or column header.
@@ -1036,8 +1038,17 @@ impl<'a> SpreadsheetGrid<'a> {
             let has_note = self
                 .formatting()
                 .is_some_and(|f| f.notes.contains_key(&self.selection.active));
+            let in_pivot = self
+                .formatting()
+                .is_some_and(|f| f.pivots.iter().any(|p| p.contains(self.selection.active)));
             grid_response.context_menu(|ui| {
-                cell_menu(ui, filter_on, has_note, &mut response.context_action);
+                cell_menu(
+                    ui,
+                    filter_on,
+                    has_note,
+                    in_pivot,
+                    &mut response.context_action,
+                );
             });
 
             // The wheel scrolls the grid only when the pointer is over it.
@@ -2255,7 +2266,24 @@ fn menu_item(
 }
 
 /// Right-click menu on cells.
-fn cell_menu(ui: &mut Ui, filter_on: bool, has_note: bool, out: &mut Option<ContextAction>) {
+fn cell_menu(
+    ui: &mut Ui,
+    filter_on: bool,
+    has_note: bool,
+    in_pivot: bool,
+    out: &mut Option<ContextAction>,
+) {
+    if in_pivot {
+        menu_item(ui, "Refresh", "Alt+F5", ContextAction::RefreshPivot, out);
+        menu_item(
+            ui,
+            "PivotTable Fields...",
+            "",
+            ContextAction::EditPivot,
+            out,
+        );
+        ui.separator();
+    }
     menu_item(ui, "Cut", "Ctrl+X", ContextAction::Cut, out);
     menu_item(ui, "Copy", "Ctrl+C", ContextAction::Copy, out);
     menu_item(ui, "Paste", "Ctrl+V", ContextAction::Paste, out);

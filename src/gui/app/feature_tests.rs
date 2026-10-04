@@ -732,3 +732,104 @@ fn pictures_insert_move_order_and_delete() {
     app.picture_textures.update(&ctx, &pictures[..1]);
     assert_eq!(app.picture_textures.ids.len(), 1);
 }
+
+#[test]
+fn pivot_tables_create_refresh_and_undo() {
+    use super::pivot_ui::Area;
+    let mut app = app();
+    for (a1, v) in [
+        ("A1", "Region"),
+        ("B1", "Sales"),
+        ("A2", "North"),
+        ("B2", "10"),
+        ("A3", "South"),
+        ("B3", "5"),
+        ("A4", "North"),
+        ("B4", "7"),
+    ] {
+        put(&mut app, a1, v);
+    }
+    select(&mut app, "A2", "A2");
+    app.open_pivot_dialog(false);
+    let mut d = app.pivot_dialog.take().unwrap();
+    assert_eq!(d.source, "Sheet1!A1:B4", "the block around the active cell");
+    d.load(&app.engine, "Sheet1");
+    d.add(0, Area::Rows);
+    d.add(1, Area::Values);
+    app.apply_pivot_dialog(&mut d).unwrap();
+
+    assert_eq!(app.sheet_names[1], "Pivot1");
+    assert_eq!(app.current_sheet, 1);
+    let column = |app: &SpreadsheetApp, col: char| -> Vec<CellResult> {
+        (1..=4).map(|r| val(app, &format!("{col}{r}"))).collect()
+    };
+    assert_eq!(
+        column(&app, 'A'),
+        vec![
+            text("Region"),
+            text("North"),
+            text("South"),
+            text("Grand Total")
+        ]
+    );
+    assert_eq!(
+        column(&app, 'B'),
+        vec![
+            text("Sum of Sales"),
+            CellResult::Value(17.0),
+            CellResult::Value(5.0),
+            CellResult::Value(22.0)
+        ]
+    );
+    assert!(app.engine.cell_format(1, at("A1")).is_some_and(|f| f.bold));
+
+    // The data changes; Refresh All catches up, and undo puts it back.
+    app.engine
+        .set_value(0, at("B3"), CellValueInput::Number(50.0));
+    app.refresh_all_pivots();
+    assert_eq!(val(&app, "B3"), CellResult::Value(50.0));
+    app.undo();
+    assert_eq!(val(&app, "B3"), CellResult::Value(5.0));
+
+    // A field in columns grows the table; the old cells are replaced.
+    select(&mut app, "A2", "A2");
+    app.open_pivot_dialog(true);
+    let mut d = app.pivot_dialog.take().unwrap();
+    d.load(&app.engine, "Pivot1");
+    d.add(0, Area::Columns);
+    app.apply_pivot_dialog(&mut d).unwrap();
+    assert_eq!(val(&app, "C2"), text("South"));
+
+    // It won't write over other data.
+    put(&mut app, "J1", "keep me");
+    app.switch_sheet(0);
+    select(&mut app, "D1", "D1");
+    app.open_pivot_dialog(false);
+    let mut d = app.pivot_dialog.take().unwrap();
+    d.source = "Sheet1!A1:B4".into();
+    d.load(&app.engine, "Sheet1");
+    d.add(0, Area::Rows);
+    d.new_sheet = false;
+    d.destination = "A2".into();
+    assert!(app.apply_pivot_dialog(&mut d).is_err());
+    assert_eq!(app.engine.formatting(0).map_or(0, |f| f.pivots.len()), 0);
+
+    // Deleting removes its cells.
+    app.switch_sheet(1);
+    app.delete_pivot(1, 0);
+    assert_eq!(val(&app, "A1"), CellResult::Empty);
+    assert_eq!(val(&app, "J1"), text("keep me"));
+}
+
+#[test]
+fn sheet_names_follow_excel_rules() {
+    let mut app = app();
+    app.add_sheet();
+    app.rename_sheet(1, "  Q1 sales ".into());
+    assert_eq!(app.sheet_names[1], "Q1 sales");
+    let long = "x".repeat(32);
+    for bad in ["", "a/b", "what?", long.as_str(), "'quoted'", "SHEET1"] {
+        app.rename_sheet(1, bad.into());
+        assert_eq!(app.sheet_names[1], "Q1 sales", "{bad:?} is refused");
+    }
+}

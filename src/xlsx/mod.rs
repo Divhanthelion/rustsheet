@@ -3,6 +3,8 @@ mod chart_reader;
 #[cfg(feature = "xlsx")]
 mod drawing;
 #[cfg(feature = "xlsx")]
+mod pivot_reader;
+#[cfg(feature = "xlsx")]
 mod reader;
 #[cfg(feature = "xlsx")]
 mod styles;
@@ -775,5 +777,53 @@ mod tests {
         let read = super::read_formatting_from_path(&path).unwrap();
         let _ = std::fs::remove_file(&path);
         assert_eq!(read[0].1.pictures, vec![logo, second]);
+    }
+
+    #[test]
+    fn pivot_tables_round_trip() {
+        use crate::cell::CellRange;
+        use crate::pivot::{Aggregate, PivotTable, PivotValue};
+        use std::io::Read;
+        let mut engine = CalcEngine::new();
+        engine.set_sheet_names(vec!["Data".into(), "Report".into()]);
+        engine.set_value(
+            0,
+            CellCoord::new(0, 0),
+            CellValueInput::Text("Region".into()),
+        );
+        let mut table = PivotTable::new(
+            "PivotTable1".into(),
+            "Data".into(),
+            CellRange::from_a1("A1:C40").unwrap(),
+            CellCoord::new(2, 0),
+        );
+        table.rows = vec![0];
+        table.values = vec![PivotValue {
+            field: 2,
+            aggregate: Aggregate::Average,
+        }];
+        table.filters = vec![1];
+        table.hidden.insert(1, ["Pen".to_string()].into());
+        table.output = Some(CellRange::from_a1("A3:B9").unwrap());
+        engine.formatting_mut(1).pivots.push(table.clone());
+
+        let path = temp_xlsx("pivots");
+        let mut writer = XlsxWriter::new();
+        writer.add_engine_sheet("Data", &engine, 0).unwrap();
+        writer.add_engine_sheet("Report", &engine, 1).unwrap();
+        writer.save(&path).unwrap();
+        let read = super::read_formatting_from_path(&path).unwrap();
+
+        // The manifest's type is declared, as Excel requires.
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut types = String::new();
+        zip.by_name("[Content_Types].xml")
+            .unwrap()
+            .read_to_string(&mut types)
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(types.contains(r#"<Default Extension="json" ContentType="application/json"/>"#));
+        assert!(read[0].1.pivots.is_empty());
+        assert_eq!(read[1].1.pivots, vec![table]);
     }
 }

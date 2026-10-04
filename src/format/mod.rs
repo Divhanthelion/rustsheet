@@ -195,6 +195,8 @@ pub struct SheetFormatting {
     pub conditional: Vec<conditional::ConditionalFormat>,
     /// Pictures, back to front
     pub pictures: Vec<picture::Picture>,
+    /// Pivot tables on this sheet
+    pub pivots: Vec<crate::pivot::PivotTable>,
 }
 
 impl SheetFormatting {
@@ -271,6 +273,7 @@ impl SheetFormatting {
         validation::apply_line_edit(&mut self.validations, edit);
         conditional::apply_line_edit(&mut self.conditional, edit);
         picture::apply_line_edit(&mut self.pictures, edit);
+        crate::pivot::apply_line_edit(&mut self.pivots, edit);
         match edit.axis {
             Axis::Row => {
                 map_keys(&mut self.row_formats, edit);

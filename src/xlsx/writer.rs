@@ -30,6 +30,9 @@ pub struct XlsxWriter {
     workbook: Workbook,
     /// Charts to add to sheets
     pending_charts: Vec<(u32, ChartDefinition)>,
+    /// Pivot table definitions by sheet name, saved in a manifest so
+    /// RustSheet can refresh them (rust_xlsxwriter can't write pivots)
+    pivots: Vec<(String, Vec<crate::pivot::PivotTable>)>,
 }
 
 impl XlsxWriter {
@@ -38,6 +41,7 @@ impl XlsxWriter {
         Self {
             workbook: Workbook::new(),
             pending_charts: Vec::new(),
+            pivots: Vec::new(),
         }
     }
 
@@ -63,6 +67,9 @@ impl XlsxWriter {
         worksheet.set_name(name)?;
 
         let formatting = engine.formatting(sheet_index);
+        if let Some(f) = formatting.filter(|f| !f.pivots.is_empty()) {
+            self.pivots.push((name.to_string(), f.pivots.clone()));
+        }
         let mut cache = FormatCache::default();
         // Cells carry the format they show (own, row or column), as Excel writes them.
         let format_for = |cache: &mut FormatCache, coord: CellCoord| -> Option<Format> {
@@ -424,63 +431,95 @@ impl XlsxWriter {
     }
 
     /// Save the workbook to a file
-    pub fn save<P: AsRef<Path>>(mut self, path: P) -> Result<(), XlsxWriteError> {
-        self.workbook.save(path.as_ref())?;
+    pub fn save<P: AsRef<Path>>(self, path: P) -> Result<(), XlsxWriteError> {
+        std::fs::write(path, self.into_bytes(None)?)?;
         Ok(())
     }
 
     /// Save cells plus a rustsheet chart manifest inside the xlsx zip.
     pub fn save_with_charts<P: AsRef<Path>>(
-        mut self,
+        self,
         path: P,
         charts: &[ChartDefinition],
     ) -> Result<(), XlsxWriteError> {
-        let bytes = self.workbook.save_to_buffer()?;
-        embed_chart_manifest(bytes, charts, path.as_ref())
+        std::fs::write(path, self.into_bytes(Some(charts))?)?;
+        Ok(())
     }
 
     /// Save to a Vec<u8> for in-memory use
-    pub fn save_to_buffer(mut self) -> Result<Vec<u8>, XlsxWriteError> {
-        let buffer = self.workbook.save_to_buffer()?;
-        Ok(buffer)
+    pub fn save_to_buffer(self) -> Result<Vec<u8>, XlsxWriteError> {
+        self.into_bytes(None)
+    }
+
+    /// The finished file, with RustSheet's manifests (charts, pivot tables)
+    /// added when there are any.
+    fn into_bytes(mut self, charts: Option<&[ChartDefinition]>) -> Result<Vec<u8>, XlsxWriteError> {
+        let bytes = self.workbook.save_to_buffer()?;
+        let mut files: Vec<(&str, Vec<u8>)> = Vec::new();
+        if let Some(charts) = charts {
+            let data =
+                serde_json::to_vec(charts).map_err(|e| XlsxWriteError::Json(e.to_string()))?;
+            files.push((CHARTS_MANIFEST, data));
+        }
+        if !self.pivots.is_empty() {
+            let data = serde_json::to_vec(&self.pivots)
+                .map_err(|e| XlsxWriteError::Json(e.to_string()))?;
+            files.push((PIVOTS_MANIFEST, data));
+        }
+        if files.is_empty() {
+            return Ok(bytes);
+        }
+        embed_manifests(bytes, &files)
     }
 }
 
-fn embed_chart_manifest(
-    xlsx: Vec<u8>,
-    charts: &[ChartDefinition],
-    path: &Path,
-) -> Result<(), XlsxWriteError> {
-    use std::io::{Cursor, Write};
+pub(super) const CHARTS_MANIFEST: &str = "xl/rustsheet/charts.json";
+pub(super) const PIVOTS_MANIFEST: &str = "xl/rustsheet/pivots.json";
+
+/// Add RustSheet's own files to a saved workbook, replacing older copies,
+/// and declare their type so Excel accepts the package.
+fn embed_manifests(xlsx: Vec<u8>, files: &[(&str, Vec<u8>)]) -> Result<Vec<u8>, XlsxWriteError> {
+    use std::io::{Cursor, Read, Write};
     use zip::write::SimpleFileOptions;
     use zip::{ZipArchive, ZipWriter};
 
-    let mut archive =
-        ZipArchive::new(Cursor::new(xlsx)).map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+    let zip_err = |e: zip::result::ZipError| XlsxWriteError::Zip(e.to_string());
+    let mut archive = ZipArchive::new(Cursor::new(xlsx)).map_err(zip_err)?;
     let mut out = Cursor::new(Vec::new());
     {
         let mut zip = ZipWriter::new(&mut out);
         for i in 0..archive.len() {
-            let mut file = archive
-                .by_index(i)
-                .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+            let mut file = archive.by_index(i).map_err(zip_err)?;
             let name = file.name().to_string();
-            if name == "xl/rustsheet/charts.json" {
+            if files.iter().any(|(n, _)| *n == name) {
                 continue;
             }
             zip.start_file(&name, SimpleFileOptions::default())
-                .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
-            std::io::copy(&mut file, &mut zip).map_err(XlsxWriteError::Io)?;
+                .map_err(zip_err)?;
+            if name == "[Content_Types].xml" {
+                let mut types = String::new();
+                file.read_to_string(&mut types)?;
+                if !types.contains("Extension=\"json\"") {
+                    if let Some(at) = types.find("<Default ") {
+                        types.insert_str(
+                            at,
+                            "<Default Extension=\"json\" ContentType=\"application/json\"/>",
+                        );
+                    }
+                }
+                zip.write_all(types.as_bytes())?;
+            } else {
+                std::io::copy(&mut file, &mut zip)?;
+            }
         }
-        zip.start_file("xl/rustsheet/charts.json", SimpleFileOptions::default())
-            .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
-        let json = serde_json::to_vec(charts).map_err(|e| XlsxWriteError::Json(e.to_string()))?;
-        zip.write_all(&json).map_err(XlsxWriteError::Io)?;
-        zip.finish()
-            .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+        for (name, data) in files {
+            zip.start_file(*name, SimpleFileOptions::default())
+                .map_err(zip_err)?;
+            zip.write_all(data)?;
+        }
+        zip.finish().map_err(zip_err)?;
     }
-    std::fs::write(path, out.into_inner())?;
-    Ok(())
+    Ok(out.into_inner())
 }
 
 impl Default for XlsxWriter {
