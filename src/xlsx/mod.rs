@@ -1,6 +1,10 @@
 #[cfg(feature = "xlsx")]
 mod chart_reader;
 #[cfg(feature = "xlsx")]
+mod drawing;
+#[cfg(feature = "xlsx")]
+mod pivot_reader;
+#[cfg(feature = "xlsx")]
 mod reader;
 #[cfg(feature = "xlsx")]
 mod styles;
@@ -431,6 +435,7 @@ mod tests {
             italic: true,
             underline: true,
             font_size: Some(14),
+            font_name: Some("Georgia".into()),
             font_color: Some(Rgb(0x1F, 0x4E, 0x79)),
             fill: Some(Rgb(0xFF, 0xF2, 0xCC)),
             h_align: HAlign::Center,
@@ -534,6 +539,14 @@ mod tests {
             });
         }
         engine.set_cell_format(0, CellCoord::from_a1("B2").unwrap(), wrapped.clone());
+        let note = crate::format::Note {
+            text: "Check this & that <later>".into(),
+            author: Some("Avery".into()),
+        };
+        engine
+            .formatting_mut(0)
+            .notes
+            .insert(CellCoord::from_a1("A3").unwrap(), note.clone());
 
         let path = temp_xlsx("layout");
         let mut writer = XlsxWriter::new();
@@ -553,8 +566,264 @@ mod tests {
         assert_eq!(f.frozen, (1, 1));
         assert!(f.hidden_columns.contains(&6));
         assert!(f.hidden_rows.contains(&2));
+        let read_note = &f.notes[&CellCoord::from_a1("A3").unwrap()];
+        assert!(
+            read_note.text.contains("Check this & that <later>"),
+            "{read_note:?}"
+        );
+        assert_eq!(read_note.author.as_deref(), Some("Avery"));
         let filter = f.filter.as_ref().unwrap();
         assert_eq!(filter.range, r("A1:A4"));
         assert!(filter.allowed[&0].contains("Tea"));
+    }
+
+    #[test]
+    fn validation_roundtrip_through_xlsx() {
+        use crate::cell::CellRange;
+        use crate::format::validation::{CompareOp, DataValidation, ErrorStyle, ValidationKind};
+
+        let mut engine = CalcEngine::new();
+        engine.set_sheet_names(vec!["Main".into(), "Lists".into()]);
+        let r = |a1: &str| CellRange::from_a1(a1).unwrap();
+        let list = DataValidation {
+            ranges: vec![r("A2:A20")],
+            kind: ValidationKind::List,
+            formula1: "\"Small,Medium,Large\"".into(),
+            input_title: "Size".into(),
+            input_message: "Pick a size".into(),
+            ..Default::default()
+        };
+        let whole = DataValidation {
+            ranges: vec![r("B2:B20"), r("D2:D5")],
+            kind: ValidationKind::Whole,
+            operator: CompareOp::Between,
+            formula1: "1".into(),
+            formula2: Some("100".into()),
+            error_style: ErrorStyle::Warning,
+            error_title: "Out of range".into(),
+            error_message: "Use 1 to 100".into(),
+            ..Default::default()
+        };
+        let from_sheet = DataValidation {
+            ranges: vec![r("C2:C20")],
+            kind: ValidationKind::List,
+            formula1: "Lists!$A$1:$A$3".into(),
+            ..Default::default()
+        };
+        engine.formatting_mut(0).validations =
+            vec![list.clone(), whole.clone(), from_sheet.clone()];
+
+        let path = temp_xlsx("validation");
+        let mut writer = XlsxWriter::new();
+        writer.add_engine_sheet("Main", &engine, 0).unwrap();
+        writer.add_engine_sheet("Lists", &engine, 1).unwrap();
+        writer.save(&path).unwrap();
+        let read = super::read_formatting_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let got = &read[0].1.validations;
+        assert_eq!(got.len(), 3, "{got:?}");
+        let find = |range: CellRange| got.iter().find(|v| v.ranges.contains(&range)).unwrap();
+        let l = find(r("A2:A20"));
+        assert_eq!(l.kind, ValidationKind::List);
+        assert_eq!(l.literal_items().unwrap(), vec!["Small", "Medium", "Large"]);
+        assert_eq!(l.input_message, "Pick a size");
+        assert!(l.dropdown);
+        let w = find(r("B2:B20"));
+        assert_eq!(w.ranges, vec![r("B2:B20"), r("D2:D5")]);
+        assert_eq!(
+            (w.formula1.as_str(), w.formula2.as_deref()),
+            ("1", Some("100"))
+        );
+        assert_eq!(w.error_style, ErrorStyle::Warning);
+        assert_eq!(w.error_message, "Use 1 to 100");
+        assert_eq!(find(r("C2:C20")).formula1, "Lists!$A$1:$A$3");
+    }
+
+    #[test]
+    fn conditional_formats_round_trip() {
+        use crate::cell::CellRange;
+        use crate::format::Rgb;
+        use crate::format::conditional::{
+            AverageRule, CfRule, CfStyle, Cfvo, ConditionalFormat, TextRule,
+        };
+        use crate::format::validation::CompareOp;
+        let r = |a1: &str| CellRange::from_a1(a1).unwrap();
+        let mut engine = CalcEngine::new();
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(1.0));
+        let bold_red = CfStyle {
+            bold: Some(true),
+            number_format: Some("0.0%".into()),
+            ..CfStyle::preset(0)
+        };
+        let rules = vec![
+            ConditionalFormat {
+                ranges: vec![r("A1:A10"), r("C1:C10")],
+                rule: CfRule::CellIs {
+                    op: CompareOp::Between,
+                    formula1: "1".into(),
+                    formula2: Some("$B$1".into()),
+                    style: bold_red.clone(),
+                },
+                stop_if_true: true,
+            },
+            ConditionalFormat {
+                ranges: vec![r("A1:A10")],
+                rule: CfRule::Text {
+                    rule: TextRule::BeginsWith,
+                    text: "Q\"1".into(),
+                    style: CfStyle::preset(1),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("B1:B10")],
+                rule: CfRule::Top {
+                    bottom: true,
+                    rank: 10,
+                    percent: true,
+                    style: CfStyle::preset(2),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("D1:D10")],
+                rule: CfRule::Average {
+                    rule: AverageRule::EqualOrAbove,
+                    style: CfStyle::preset(3),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("E1:E10")],
+                rule: CfRule::Expression {
+                    formula: "$A1>AVERAGE($A$1:$A$10)".into(),
+                    style: CfStyle::preset(0),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("F1:F10")],
+                rule: CfRule::ColorScale {
+                    stops: vec![
+                        (Cfvo::min(), Rgb(0xF8, 0x69, 0x6B)),
+                        (Cfvo::percentile(50), Rgb(0xFF, 0xEB, 0x84)),
+                        (Cfvo::max(), Rgb(0x63, 0xBE, 0x7B)),
+                    ],
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("G1:G10")],
+                rule: CfRule::DataBar {
+                    min: Cfvo::min(),
+                    max: Cfvo::max(),
+                    color: Rgb(0x5A, 0x8A, 0xC6),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![r("H1:H10")],
+                rule: CfRule::Duplicate {
+                    unique: true,
+                    style: CfStyle::preset(1),
+                },
+                stop_if_true: false,
+            },
+        ];
+        engine.formatting_mut(0).conditional = rules.clone();
+
+        let path = temp_xlsx("conditional");
+        let mut writer = XlsxWriter::new();
+        writer.add_engine_sheet("Main", &engine, 0).unwrap();
+        writer.save(&path).unwrap();
+        let read = super::read_formatting_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read[0].1.conditional, rules);
+    }
+
+    /// A 1x1 PNG.
+    pub(crate) const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    #[test]
+    fn pictures_round_trip() {
+        use crate::format::picture::{Picture, PictureKind};
+        let mut engine = CalcEngine::new();
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(1.0));
+        let mut logo = Picture::new(
+            CellCoord::new(3, 2),
+            std::sync::Arc::from(TINY_PNG),
+            PictureKind::Png,
+            (1, 1),
+        );
+        logo.size = (250.0, 125.0);
+        logo.offset = (12.5, 2.2);
+        logo.description = "Company logo".into();
+        let mut second = logo.clone();
+        second.anchor = CellCoord::new(20, 0);
+        second.description.clear();
+        engine.formatting_mut(0).pictures = vec![logo.clone(), second.clone()];
+
+        let path = temp_xlsx("pictures");
+        let mut writer = XlsxWriter::new();
+        writer.add_engine_sheet("Main", &engine, 0).unwrap();
+        writer.save(&path).unwrap();
+        let read = super::read_formatting_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(read[0].1.pictures, vec![logo, second]);
+    }
+
+    #[test]
+    fn pivot_tables_round_trip() {
+        use crate::cell::CellRange;
+        use crate::pivot::{Aggregate, PivotTable, PivotValue};
+        use std::io::Read;
+        let mut engine = CalcEngine::new();
+        engine.set_sheet_names(vec!["Data".into(), "Report".into()]);
+        engine.set_value(
+            0,
+            CellCoord::new(0, 0),
+            CellValueInput::Text("Region".into()),
+        );
+        let mut table = PivotTable::new(
+            "PivotTable1".into(),
+            "Data".into(),
+            CellRange::from_a1("A1:C40").unwrap(),
+            CellCoord::new(2, 0),
+        );
+        table.rows = vec![0];
+        table.values = vec![PivotValue {
+            field: 2,
+            aggregate: Aggregate::Average,
+        }];
+        table.filters = vec![1];
+        table.hidden.insert(1, ["Pen".to_string()].into());
+        table.output = Some(CellRange::from_a1("A3:B9").unwrap());
+        engine.formatting_mut(1).pivots.push(table.clone());
+
+        let path = temp_xlsx("pivots");
+        let mut writer = XlsxWriter::new();
+        writer.add_engine_sheet("Data", &engine, 0).unwrap();
+        writer.add_engine_sheet("Report", &engine, 1).unwrap();
+        writer.save(&path).unwrap();
+        let read = super::read_formatting_from_path(&path).unwrap();
+
+        // The manifest's type is declared, as Excel requires.
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&path).unwrap()).unwrap();
+        let mut types = String::new();
+        zip.by_name("[Content_Types].xml")
+            .unwrap()
+            .read_to_string(&mut types)
+            .unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(types.contains(r#"<Default Extension="json" ContentType="application/json"/>"#));
+        assert!(read[0].1.pivots.is_empty());
+        assert_eq!(read[1].1.pivots, vec![table]);
     }
 }

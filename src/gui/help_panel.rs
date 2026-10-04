@@ -214,10 +214,18 @@ impl HelpPanel {
                         "Move down / right (confirms an edit); Shift goes back",
                     ),
                     ("Escape", "Cancel editing"),
-                    ("Delete or Backspace", "Clear the selected cells"),
+                    (
+                        "Delete or Backspace",
+                        "Clear the selected cells (or delete the selected picture)",
+                    ),
                     ("Ctrl+Z / Ctrl+Y", "Undo / Redo"),
                     ("Ctrl+C / Ctrl+X", "Copy / cut"),
-                    ("Ctrl+V", "Paste (from RustSheet, Excel, or text)"),
+                    (
+                        "Ctrl+V",
+                        "Paste (from RustSheet, Excel, text, or a picture or screenshot)",
+                    ),
+                    ("Shift+F2", "Add or edit the cell's note"),
+                    ("Alt+Down", "Open the cell's drop-down list"),
                     ("Ctrl+D / Ctrl+R", "Fill down / right"),
                     (
                         "Drag the corner square",
@@ -268,6 +276,18 @@ impl HelpPanel {
                 &[
                     ("Ctrl+Shift+L", "Turn the filter on or off"),
                     ("Right-click > Sort A to Z", "Sort the data around the cell"),
+                    ("Alt+F5", "Refresh the PivotTable at the cell"),
+                    ("Ctrl+Alt+F5", "Refresh all PivotTables"),
+                ],
+            );
+            section(
+                ui,
+                "Sheets and pictures",
+                &[
+                    ("Double-click a sheet tab", "Rename the sheet"),
+                    ("Drag a picture", "Move it"),
+                    ("Drag a picture's corner", "Resize it, keeping its shape"),
+                    ("Right-click a picture", "Alt text, order, size, delete"),
                 ],
             );
             section(

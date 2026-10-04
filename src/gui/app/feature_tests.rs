@@ -463,3 +463,388 @@ fn saves_are_atomic_and_leave_no_temp_files() {
     assert_eq!(val(&back, "A1"), text("v2"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn note(text: &str) -> crate::format::Note {
+    crate::format::Note {
+        text: text.into(),
+        author: None,
+    }
+}
+
+#[test]
+fn notes_undo_copy_sort_and_move_with_rows() {
+    let mut app = app();
+    put(&mut app, "A1", "b");
+    put(&mut app, "A2", "a");
+    app.selection.move_to(at("A1"));
+    app.set_note(at("A1"), Some(note("check")));
+    assert_eq!(
+        app.note_at(at("A1")).map(|n| n.text.as_str()),
+        Some("check")
+    );
+    app.undo();
+    assert!(app.note_at(at("A1")).is_none());
+    app.redo();
+
+    // Copy and paste carries the note.
+    let ctx = egui::Context::default();
+    select(&mut app, "A1", "A1");
+    app.copy_selection(&ctx, false);
+    select(&mut app, "C5", "C5");
+    let text = app.clipboard.as_ref().unwrap().text.clone();
+    app.paste_text(&text);
+    assert!(app.note_at(at("C5")).is_some());
+    app.undo();
+    assert!(app.note_at(at("C5")).is_none());
+
+    // Sorting moves the note with its row ("b" sorts after "a").
+    select(&mut app, "A1", "A2");
+    app.quick_sort(true);
+    assert_eq!(val(&app, "A2"), text_value("b"));
+    assert!(app.note_at(at("A2")).is_some());
+    assert!(app.note_at(at("A1")).is_none());
+
+    // Inserting a row above moves it down.
+    select(&mut app, "A1", "A1");
+    app.insert_lines(Axis::Row);
+    assert!(app.note_at(at("A3")).is_some());
+}
+
+fn text_value(s: &str) -> CellResult {
+    CellResult::Text(s.into())
+}
+
+#[test]
+fn typed_entries_are_checked_against_validation() {
+    use crate::format::validation::{CompareOp, DataValidation, ErrorStyle, ValidationKind};
+    let mut app = app();
+    app.engine
+        .formatting_mut(0)
+        .validations
+        .push(DataValidation {
+            ranges: vec![CellRange::from_a1("A1:A9").unwrap()],
+            kind: ValidationKind::Whole,
+            operator: CompareOp::Between,
+            formula1: "1".into(),
+            formula2: Some("10".into()),
+            ..Default::default()
+        });
+    let type_in = |app: &mut SpreadsheetApp, a1: &str, text: &str| {
+        app.selection.move_to(at(a1));
+        app.input_mode = InputMode::Editing { cell: at(a1) };
+        app.edit_buffer = text.into();
+        app.confirm_edit(true, false);
+    };
+
+    type_in(&mut app, "A1", "5");
+    assert_eq!(val(&app, "A1"), CellResult::Value(5.0));
+
+    // Stop + Retry: the entry is undone and editing resumes with the text.
+    app.alert_answer = Some(validation_ui::AlertAnswer::Retry);
+    type_in(&mut app, "A2", "50");
+    assert_eq!(val(&app, "A2"), CellResult::Empty);
+    assert_eq!(app.retry_text.as_deref(), Some("50"));
+    assert!(matches!(app.input_mode, InputMode::TransitionToEdit { .. }));
+    app.retry_text = None;
+    app.input_mode = InputMode::Navigation;
+
+    // Cancel undoes it; nothing lands in the undo history.
+    app.alert_answer = Some(validation_ui::AlertAnswer::Cancel);
+    type_in(&mut app, "A3", "abc");
+    assert_eq!(val(&app, "A3"), CellResult::Empty);
+
+    // A warning the user accepts keeps the value.
+    app.engine.formatting_mut(0).validations[0].error_style = ErrorStyle::Warning;
+    app.alert_answer = Some(validation_ui::AlertAnswer::Keep);
+    type_in(&mut app, "A4", "99");
+    assert_eq!(val(&app, "A4"), CellResult::Value(99.0));
+
+    // Choosing from a list popup writes the item.
+    app.engine
+        .formatting_mut(0)
+        .validations
+        .push(DataValidation {
+            ranges: vec![CellRange::from_a1("B1").unwrap()],
+            kind: ValidationKind::List,
+            formula1: "\"Yes,No\"".into(),
+            ..Default::default()
+        });
+    app.selection.move_to(at("B1"));
+    app.open_list_popup(egui::Pos2::ZERO);
+    assert_eq!(app.list_popup.as_ref().unwrap().items, vec!["Yes", "No"]);
+}
+
+#[test]
+fn conditional_formatting_from_the_dialog() {
+    use crate::format::validation::CompareOp;
+    let mut app = app();
+    for (a1, v) in [("A1", "5"), ("A2", "50"), ("A3", "500")] {
+        put(&mut app, a1, v);
+    }
+    select(&mut app, "A1", "A3");
+    app.open_conditional_dialog();
+    let d = app.cf_dialog.as_mut().unwrap();
+    let editor = d.editor.as_mut().expect("starts with a new rule");
+    assert_eq!(editor.applies_to, "A1:A3");
+    editor.op = CompareOp::Greater;
+    editor.value1 = "10".into();
+    let rule = editor.build().unwrap();
+    app.cf_dialog = None;
+    app.apply_conditional(vec![rule]);
+
+    let look = |app: &SpreadsheetApp, a1: &str| app.engine.conditional_look(0, at(a1));
+    assert!(look(&app, "A1").is_none());
+    assert!(look(&app, "A2").is_some());
+
+    // Inserting a row above moves the rule with its cells.
+    select(&mut app, "A1", "A1");
+    app.insert_lines(Axis::Row);
+    assert!(look(&app, "A3").is_some());
+    app.undo();
+    app.undo();
+    assert!(
+        app.engine
+            .formatting(0)
+            .is_none_or(|f| f.conditional.is_empty())
+    );
+
+    // With a rule on the selection, the dialog opens on the rules list.
+    app.redo();
+    select(&mut app, "A2", "A2");
+    app.open_conditional_dialog();
+    assert!(app.cf_dialog.as_ref().unwrap().editor.is_none());
+}
+
+#[test]
+fn conditional_dialog_draws_every_rule_kind() {
+    use super::conditional_ui::RuleKind;
+    let mut app = app();
+    put(&mut app, "A1", "1");
+    select(&mut app, "A1", "A3");
+    app.open_conditional_dialog();
+    let ctx = egui::Context::default();
+    for kind in [
+        RuleKind::CellValue,
+        RuleKind::Text,
+        RuleKind::Top,
+        RuleKind::Average,
+        RuleKind::Duplicate,
+        RuleKind::Blanks,
+        RuleKind::Errors,
+        RuleKind::Formula,
+        RuleKind::TwoColorScale,
+        RuleKind::ThreeColorScale,
+        RuleKind::DataBar,
+    ] {
+        app.cf_dialog
+            .as_mut()
+            .unwrap()
+            .editor
+            .as_mut()
+            .unwrap()
+            .kind = kind;
+        let _ = ctx.run(Default::default(), |ctx| app.show_conditional_dialog(ctx));
+        assert!(app.cf_dialog.is_some());
+        let rule = app
+            .cf_dialog
+            .as_ref()
+            .unwrap()
+            .editor
+            .as_ref()
+            .unwrap()
+            .build();
+        // Kinds with a value to type say what's missing; the rest are complete.
+        let needs_input = matches!(
+            kind,
+            RuleKind::CellValue | RuleKind::Text | RuleKind::Formula
+        );
+        assert_eq!(rule.is_err(), needs_input, "{kind:?}");
+        if let Ok(rule) = rule {
+            app.cf_dialog.as_mut().unwrap().rules.push(rule);
+        }
+    }
+    // The rules list, with a sample of each.
+    app.cf_dialog.as_mut().unwrap().editor = None;
+    let _ = ctx.run(Default::default(), |ctx| app.show_conditional_dialog(ctx));
+    assert_eq!(app.cf_dialog.as_ref().unwrap().rules.len(), 8);
+}
+
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::new(width, height)
+        .write_to(&mut out, image::ImageFormat::Png)
+        .unwrap();
+    out.into_inner()
+}
+
+#[test]
+fn pictures_insert_move_order_and_delete() {
+    use crate::gui::grid::{PictureAction, PicturePlace};
+    let mut app = app();
+    app.last_viewport = Vec2::new(1000.0, 800.0);
+    select(&mut app, "B3", "B3");
+    app.insert_picture(png(40, 20)).unwrap();
+    assert!(app.insert_picture(b"not a picture".to_vec()).is_err());
+    assert_eq!(app.sheet_pictures().len(), 1);
+    let p = &app.sheet_pictures()[0];
+    assert_eq!((p.anchor, p.size), (at("B3"), (50.0, 25.0)));
+    assert_eq!(app.selected_picture, Some(0));
+
+    // Big pictures start scaled to fit the window.
+    app.insert_picture(png(1600, 400)).unwrap();
+    let big = app.sheet_pictures()[1].size;
+    assert!(
+        big.0 <= 600.0 && (big.0 / big.1 - 4.0).abs() < 0.01,
+        "{big:?}"
+    );
+
+    app.place_picture(
+        0,
+        PicturePlace {
+            anchor: at("D5"),
+            offset: (3.0, 4.0),
+            size: (100.0, 50.0),
+        },
+    );
+    assert_eq!(app.sheet_pictures()[0].anchor, at("D5"));
+
+    // It hangs from its cell when rows are inserted above.
+    select(&mut app, "A1", "A1");
+    app.insert_lines(Axis::Row);
+    assert_eq!(app.sheet_pictures()[0].anchor, at("D6"));
+
+    app.picture_action(0, PictureAction::BringToFront);
+    assert_eq!(app.sheet_pictures()[1].anchor, at("D6"));
+    assert_eq!(app.selected_picture, Some(1));
+    app.picture_action(1, PictureAction::ResetSize);
+    assert_eq!(app.sheet_pictures()[1].size, (50.0, 25.0));
+
+    app.picture_action(1, PictureAction::Delete);
+    assert_eq!(app.sheet_pictures().len(), 1);
+    app.undo();
+    assert_eq!(app.sheet_pictures().len(), 2);
+
+    // Textures for the grid.
+    let ctx = egui::Context::default();
+    let pictures = app.sheet_pictures().to_vec();
+    app.picture_textures.update(&ctx, &pictures);
+    assert_eq!(app.picture_textures.ids.len(), 2);
+    app.picture_textures.update(&ctx, &pictures[..1]);
+    assert_eq!(app.picture_textures.ids.len(), 1);
+}
+
+#[test]
+fn pivot_tables_create_refresh_and_undo() {
+    use super::pivot_ui::Area;
+    let mut app = app();
+    for (a1, v) in [
+        ("A1", "Region"),
+        ("B1", "Sales"),
+        ("A2", "North"),
+        ("B2", "10"),
+        ("A3", "South"),
+        ("B3", "5"),
+        ("A4", "North"),
+        ("B4", "7"),
+    ] {
+        put(&mut app, a1, v);
+    }
+    select(&mut app, "A2", "A2");
+    app.open_pivot_dialog(false);
+    let mut d = app.pivot_dialog.take().unwrap();
+    assert_eq!(d.source, "Sheet1!A1:B4", "the block around the active cell");
+    d.load(&app.engine, "Sheet1");
+    d.add(0, Area::Rows);
+    d.add(1, Area::Values);
+    app.apply_pivot_dialog(&mut d).unwrap();
+
+    assert_eq!(app.sheet_names[1], "Pivot1");
+    assert_eq!(app.current_sheet, 1);
+    let column = |app: &SpreadsheetApp, col: char| -> Vec<CellResult> {
+        (1..=4).map(|r| val(app, &format!("{col}{r}"))).collect()
+    };
+    assert_eq!(
+        column(&app, 'A'),
+        vec![
+            text("Region"),
+            text("North"),
+            text("South"),
+            text("Grand Total")
+        ]
+    );
+    assert_eq!(
+        column(&app, 'B'),
+        vec![
+            text("Sum of Sales"),
+            CellResult::Value(17.0),
+            CellResult::Value(5.0),
+            CellResult::Value(22.0)
+        ]
+    );
+    assert!(app.engine.cell_format(1, at("A1")).is_some_and(|f| f.bold));
+
+    // The data changes; Refresh All catches up, and undo puts it back.
+    app.engine
+        .set_value(0, at("B3"), CellValueInput::Number(50.0));
+    app.refresh_all_pivots();
+    assert_eq!(val(&app, "B3"), CellResult::Value(50.0));
+    app.undo();
+    assert_eq!(val(&app, "B3"), CellResult::Value(5.0));
+
+    // A field in columns grows the table; the old cells are replaced.
+    select(&mut app, "A2", "A2");
+    app.open_pivot_dialog(true);
+    let mut d = app.pivot_dialog.take().unwrap();
+    d.load(&app.engine, "Pivot1");
+    d.add(0, Area::Columns);
+    app.apply_pivot_dialog(&mut d).unwrap();
+    assert_eq!(val(&app, "C2"), text("South"));
+
+    // It won't write over other data.
+    put(&mut app, "J1", "keep me");
+    app.switch_sheet(0);
+    select(&mut app, "D1", "D1");
+    app.open_pivot_dialog(false);
+    let mut d = app.pivot_dialog.take().unwrap();
+    d.source = "Sheet1!A1:B4".into();
+    d.load(&app.engine, "Sheet1");
+    d.add(0, Area::Rows);
+    d.new_sheet = false;
+    d.destination = "A2".into();
+    assert!(app.apply_pivot_dialog(&mut d).is_err());
+    assert_eq!(app.engine.formatting(0).map_or(0, |f| f.pivots.len()), 0);
+
+    // Deleting removes its cells.
+    app.switch_sheet(1);
+    app.delete_pivot(1, 0);
+    assert_eq!(val(&app, "A1"), CellResult::Empty);
+    assert_eq!(val(&app, "J1"), text("keep me"));
+}
+
+#[test]
+fn sheet_names_follow_excel_rules() {
+    let mut app = app();
+    app.add_sheet();
+    app.rename_sheet(1, "  Q1 sales ".into());
+    assert_eq!(app.sheet_names[1], "Q1 sales");
+    let long = "x".repeat(32);
+    for bad in ["", "a/b", "what?", long.as_str(), "'quoted'", "SHEET1"] {
+        app.rename_sheet(1, bad.into());
+        assert_eq!(app.sheet_names[1], "Q1 sales", "{bad:?} is refused");
+    }
+}
+
+#[test]
+fn pasted_images_become_pictures() {
+    let mut app = app();
+    app.last_viewport = Vec2::new(1000.0, 800.0);
+    select(&mut app, "C2", "C2");
+    app.paste_image(arboard::ImageData {
+        width: 4,
+        height: 2,
+        bytes: std::borrow::Cow::Owned(vec![200; 4 * 2 * 4]),
+    });
+    let p = &app.sheet_pictures()[0];
+    assert_eq!(p.kind, crate::format::picture::PictureKind::Png);
+    assert_eq!((p.anchor, p.size), (at("C2"), (5.0, 2.5)));
+}

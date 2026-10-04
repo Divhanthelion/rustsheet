@@ -20,14 +20,20 @@ use super::sheet_tabs::SheetTabs;
 use super::theme::Theme;
 
 mod commands;
+mod conditional_ui;
 #[cfg(test)]
 mod feature_tests;
 mod fill;
 mod find;
+mod notes;
+mod pictures;
+mod pivot_ui;
 mod printing;
 mod recovery;
 mod sheet_ops;
+mod validation_ui;
 
+use super::fonts::FontLibrary;
 use super::grid::fit_row_height;
 use super::settings::{Settings, ThemeChoice};
 use crate::format::{
@@ -35,12 +41,17 @@ use crate::format::{
 };
 use crate::formula::FormulaParser;
 use commands::Command;
+use conditional_ui::CfDialog;
 use eframe::egui::RichText;
 use find::FindDialog;
+use notes::NoteEditor;
+use pictures::{AltTextEditor, PictureTextures};
+use pivot_ui::PivotDialog;
 use printing::PrintDialog;
 use recovery::{Recoverable, Recovery};
 use sheet_ops::{FilterPopup, SortDialog, WorkbookState};
 use std::collections::{HashMap, HashSet};
+use validation_ui::{ListPopup, ValidationDialog};
 
 /// Modifier key name shown in menu shortcut hints.
 const MOD: &str = if cfg!(target_os = "macos") {
@@ -115,6 +126,13 @@ enum UndoAction {
     },
     /// The whole workbook before and after a structural edit
     Snapshot(Box<(WorkbookState, WorkbookState)>),
+    /// A cell's note
+    Note {
+        sheet: u32,
+        coord: CellCoord,
+        old: Option<crate::format::Note>,
+        new: Option<crate::format::Note>,
+    },
 }
 
 /// Cells copied or cut inside RustSheet. When the system clipboard still
@@ -127,6 +145,8 @@ struct ClipboardCells {
     cols: u32,
     /// By (row, col) offset from `origin`: content as typed, and format
     cells: HashMap<(u32, u32), (Option<String>, Option<CellFormat>)>,
+    /// Notes, by the same offsets
+    notes: HashMap<(u32, u32), crate::format::Note>,
     text: String,
     /// Cut cells move on paste instead of being copied
     cut: bool,
@@ -282,6 +302,29 @@ pub struct SpreadsheetApp {
     sort_dialog: Option<SortDialog>,
     /// Find and Replace, when open
     find_dialog: Option<FindDialog>,
+    /// Note editor, when open
+    note_editor: Option<NoteEditor>,
+    /// Data Validation dialog, when open
+    validation_dialog: Option<ValidationDialog>,
+    /// Conditional Formatting dialog, when open
+    cf_dialog: Option<CfDialog>,
+    /// A validation list's drop-down, when open
+    list_popup: Option<ListPopup>,
+    /// Text to put back in the editor after a rejected entry
+    retry_text: Option<String>,
+    /// Decoded pictures for the grid
+    picture_textures: PictureTextures,
+    /// The selected picture on the current sheet, by index
+    selected_picture: Option<usize>,
+    /// Alt text editor, when open
+    alt_text_editor: Option<AltTextEditor>,
+    /// PivotTable dialog, when open
+    pivot_dialog: Option<PivotDialog>,
+    /// Ctrl+V was down last frame (for pasting images; see `handle_clipboard_events`)
+    paste_key_down: bool,
+    /// Tests answer validation alerts without a dialog
+    #[cfg(test)]
+    alert_answer: Option<validation_ui::AlertAnswer>,
     /// Export/Print options, when open
     print_dialog: Option<PrintDialog>,
     /// Page setup from the last export or print
@@ -292,6 +335,8 @@ pub struct SpreadsheetApp {
     last_viewport: Vec2,
     /// Theme and recent files
     settings: Settings,
+    /// Installed fonts, for cells that name one
+    fonts: FontLibrary,
     /// Which theme is applied (true = dark)
     dark_mode: Option<bool>,
     /// This session's autosave
@@ -360,11 +405,24 @@ impl SpreadsheetApp {
             filter_popup: None,
             sort_dialog: None,
             find_dialog: None,
+            note_editor: None,
+            validation_dialog: None,
+            cf_dialog: None,
+            list_popup: None,
+            retry_text: None,
+            picture_textures: PictureTextures::default(),
+            selected_picture: None,
+            alt_text_editor: None,
+            pivot_dialog: None,
+            paste_key_down: false,
+            #[cfg(test)]
+            alert_answer: None,
             print_dialog: None,
             last_page_setup: Default::default(),
             fill_target: None,
             last_viewport: Vec2::new(1200.0, 800.0),
             settings: Settings::in_memory(),
+            fonts: FontLibrary::empty(),
             dark_mode: None,
             recovery: None,
             recoverable: Vec::new(),
@@ -646,6 +704,7 @@ impl SpreadsheetApp {
     /// Undo the last action
     fn undo(&mut self) {
         if let Some(action) = self.undo_history.pop_undo() {
+            self.selected_picture = None;
             self.replay(&action, false);
             self.undo_history.push_redo(action);
             self.set_status("Undo");
@@ -655,6 +714,7 @@ impl SpreadsheetApp {
     /// Redo the last undone action
     fn redo(&mut self) {
         if let Some(action) = self.undo_history.pop_redo() {
+            self.selected_picture = None;
             self.replay(&action, true);
             self.undo_history.push_undo_for_redo(action);
             self.set_status("Redo");
@@ -716,6 +776,15 @@ impl SpreadsheetApp {
                 }
                 self.modified = true;
             }
+            UndoAction::Note {
+                sheet,
+                coord,
+                old,
+                new,
+            } => {
+                let note = if forward { new } else { old };
+                self.apply_note(*sheet, *coord, note.clone());
+            }
             UndoAction::Snapshot(states) => {
                 let state = if forward { &states.1 } else { &states.0 };
                 self.restore_workbook_state(state);
@@ -755,6 +824,7 @@ impl SpreadsheetApp {
         let sheet = self.current_sheet;
         let range = self.clamp_to_used_or_self(self.selection.primary_range());
         let mut cells = HashMap::new();
+        let mut notes = HashMap::new();
         let mut lines = Vec::new();
         for row in range.start.row..=range.end.row {
             let mut fields = Vec::new();
@@ -764,11 +834,13 @@ impl SpreadsheetApp {
                 let value = self.engine.get_value(sheet, coord);
                 fields.push(tsv_field(&display_text(&value, format.as_ref())));
                 let content = self.cell_content_string(sheet, coord);
-                if content.is_some() || format.is_some() {
-                    cells.insert(
-                        (row - range.start.row, col - range.start.col),
-                        (content, format),
-                    );
+                let offset = (row - range.start.row, col - range.start.col);
+                let note = self.note_at(coord).cloned();
+                if content.is_some() || format.is_some() || note.is_some() {
+                    cells.insert(offset, (content, format));
+                }
+                if let Some(note) = note {
+                    notes.insert(offset, note);
                 }
             }
             lines.push(fields.join("\t"));
@@ -782,6 +854,7 @@ impl SpreadsheetApp {
             rows: range.end.row - range.start.row + 1,
             cols: range.end.col - range.start.col + 1,
             cells,
+            notes,
             text,
             cut,
         });
@@ -865,6 +938,7 @@ impl SpreadsheetApp {
                             &mut actions,
                             &mut format_changes,
                         );
+                        app.put_note(sheet, dest, clip.notes.get(&(r, c)).cloned(), &mut actions);
                         written.insert(dest);
                     }
                 }
@@ -890,6 +964,7 @@ impl SpreadsheetApp {
                             &mut actions,
                             &mut source_formats,
                         );
+                        app.put_note(clip.sheet, src, None, &mut actions);
                     }
                 }
                 if !source_formats.is_empty() {
@@ -911,6 +986,30 @@ impl SpreadsheetApp {
             ));
         }
         self.finish_paste(actions);
+    }
+
+    /// Set or clear one cell's note, recording an undo step.
+    fn put_note(
+        &mut self,
+        sheet: u32,
+        coord: CellCoord,
+        note: Option<crate::format::Note>,
+        actions: &mut Vec<UndoAction>,
+    ) {
+        let old = self
+            .engine
+            .formatting(sheet)
+            .and_then(|f| f.notes.get(&coord))
+            .cloned();
+        if old != note {
+            self.apply_note(sheet, coord, note.clone());
+            actions.push(UndoAction::Note {
+                sheet,
+                coord,
+                old,
+                new: note,
+            });
+        }
     }
 
     /// Write one cell's content and format, recording undo steps.
@@ -998,9 +1097,16 @@ impl SpreadsheetApp {
     /// Edit > Paste and the right-click menu read the clipboard directly;
     /// Ctrl+V arrives as an egui paste event instead.
     fn paste_from_system_clipboard(&mut self) {
-        match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+            self.set_status("Nothing to paste");
+            return;
+        };
+        match clipboard.get_text() {
             Ok(text) if !text.is_empty() => self.paste_text(&text),
-            _ => self.set_status("Nothing to paste"),
+            _ => match clipboard.get_image() {
+                Ok(image) => self.paste_image(image),
+                Err(_) => self.set_status("Nothing to paste"),
+            },
         }
     }
 
@@ -1048,6 +1154,7 @@ impl SpreadsheetApp {
                 .cloned()
                 .collect()
         });
+        let pasted_text = events.iter().any(|e| matches!(e, egui::Event::Paste(_)));
         for event in events {
             match event {
                 egui::Event::Copy => self.copy_selection(ctx, false),
@@ -1056,6 +1163,15 @@ impl SpreadsheetApp {
                 _ => {}
             }
         }
+        // egui pastes only text: with just an image on the clipboard (a
+        // screenshot), Ctrl+V sends no event, so watch the key itself.
+        let down = paste_key_down(ctx);
+        if down && !self.paste_key_down && !pasted_text {
+            if let Ok(image) = arboard::Clipboard::new().and_then(|mut c| c.get_image()) {
+                self.paste_image(image);
+            }
+        }
+        self.paste_key_down = down;
     }
 
     // ------------------------------------------------------------------
@@ -1234,6 +1350,7 @@ impl SpreadsheetApp {
                 self.apply_format(|_, _, f| f.number_format = code.clone());
             }
             FormatAction::Clear => self.apply_format(|_, _, f| *f = CellFormat::default()),
+            FormatAction::FontName(name) => self.apply_format(|_, _, f| f.font_name = name.clone()),
             FormatAction::ToggleWrap => {
                 let on = !current.wrap;
                 self.apply_format(|_, _, f| f.wrap = on);
@@ -1299,10 +1416,13 @@ impl SpreadsheetApp {
         // Use editing_cell if in Editing state, otherwise fall back to selection.active
         let coord = self.editing_cell().unwrap_or(self.selection.active);
         let content = self.edit_buffer.clone();
-        self.set_cell_content(coord, &content);
         self.input_mode = InputMode::Navigation;
         self.edit_buffer.clear();
         self.formula_bar.editing = false;
+        // A rejected entry (data validation) goes back to editing.
+        if !self.commit_typed(coord, &content) {
+            return;
+        }
 
         if move_down {
             self.selection
@@ -1363,6 +1483,7 @@ impl SpreadsheetApp {
 
         // Switch
         self.current_sheet = sheet_index;
+        self.selected_picture = None;
 
         // Load new state
         self.load_sheet_state(sheet_index);
@@ -1425,22 +1546,37 @@ impl SpreadsheetApp {
         self.set_status(&format!("Deleted {}", name));
     }
 
-    /// Rename a sheet
+    /// Rename a sheet. Names follow Excel's rules, so the file saves.
     fn rename_sheet(&mut self, sheet_index: u32, new_name: String) {
         let index = sheet_index as usize;
         if index >= self.sheet_names.len() {
             return;
         }
-        if new_name.is_empty() {
-            self.set_status("Sheet name cannot be empty");
+        let new_name = new_name.trim().to_string();
+        if new_name == self.sheet_names[index] {
             return;
         }
-        // Check for duplicate names (excluding current)
-        for (i, name) in self.sheet_names.iter().enumerate() {
-            if i != index && name == &new_name {
-                self.set_status("Sheet name already exists");
-                return;
-            }
+        let problem = if new_name.is_empty() {
+            Some("Sheet names can't be blank")
+        } else if new_name.chars().count() > 31 {
+            Some("Sheet names can be at most 31 characters")
+        } else if new_name.contains([':', '\\', '/', '?', '*', '[', ']']) {
+            Some("Sheet names can't contain : \\ / ? * [ or ]")
+        } else if new_name.starts_with('\'') || new_name.ends_with('\'') {
+            Some("Sheet names can't start or end with an apostrophe")
+        } else if self
+            .sheet_names
+            .iter()
+            .enumerate()
+            .any(|(i, name)| i != index && name.eq_ignore_ascii_case(&new_name))
+        {
+            Some("There's already a sheet with that name")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
+            self.set_status(problem);
+            return;
         }
         let old_name = self.sheet_names[index].clone();
         self.engine.rewrite_sheet_name(&old_name, &new_name);
@@ -1809,11 +1945,21 @@ impl SpreadsheetApp {
             Ok(()) => {
                 self.saved_to(path);
                 let sheet_count = self.sheet_names.len();
+                let has_pivots = self
+                    .engine
+                    .all_formatting()
+                    .values()
+                    .any(|f| !f.pivots.is_empty());
                 self.set_status(&format!(
-                    "Saved: {} ({} sheet{})",
+                    "Saved: {} ({} sheet{}){}",
                     path.display(),
                     sheet_count,
-                    if sheet_count == 1 { "" } else { "s" }
+                    if sheet_count == 1 { "" } else { "s" },
+                    if has_pivots {
+                        ". In Excel, PivotTables show as values; RustSheet can still refresh them."
+                    } else {
+                        ""
+                    }
                 ));
             }
             Err(e) => {
@@ -1967,6 +2113,7 @@ impl SpreadsheetApp {
             self.dark_mode = Some(dark);
         }
         self.tick_recovery(ctx);
+        self.fonts.begin_frame(ctx);
 
         let title = format!(
             "{}{} - RustSheet",
@@ -1987,7 +2134,9 @@ impl SpreadsheetApp {
             let active_cell = self.selection.active;
 
             // Initialize edit buffer
-            let initial_text = if let Some(c) = initial_char {
+            let initial_text = if let Some(text) = self.retry_text.take() {
+                text
+            } else if let Some(c) = initial_char {
                 c.to_string()
             } else {
                 self.get_cell_formula_or_value(active_cell)
@@ -2026,9 +2175,10 @@ impl SpreadsheetApp {
 
         // Formatting toolbar
         let active_format = self.active_format();
+        let font_families = self.fonts.families().to_vec();
         TopBottomPanel::top("format_bar").show(ctx, |ui| {
             ui.add_space(2.0);
-            if let Some(action) = format_bar::show(ui, &active_format) {
+            if let Some(action) = format_bar::show(ui, &active_format, &font_families) {
                 format_action = Some(action);
             }
             ui.add_space(2.0);
@@ -2173,12 +2323,17 @@ impl SpreadsheetApp {
                     self.help_panel.visible = false;
                 }
                 self.fill_target = None;
+                self.selected_picture = None;
             }
-            // Delete clears every selected cell (with undo support)
+            // Delete removes the selected picture, or clears every selected
+            // cell (with undo support)
             if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace))
                 && !self.is_editing()
             {
-                self.delete_selection();
+                match self.selected_picture {
+                    Some(i) => self.delete_picture(i),
+                    None => self.delete_selection(),
+                }
             }
             self.handle_clipboard_events(ctx);
         }
@@ -2195,6 +2350,14 @@ impl SpreadsheetApp {
                 .fill_target
                 .and_then(|t| self.fill_plan(t))
                 .map(|p| p.0);
+            let pictures = self
+                .engine
+                .formatting(self.current_sheet)
+                .map_or(&[][..], |f| f.pictures.as_slice());
+            self.picture_textures.update(ctx, pictures);
+            if self.selected_picture.is_some_and(|i| i >= pictures.len()) {
+                self.selected_picture = None;
+            }
             let grid = SpreadsheetGrid::new(
                 self.current_sheet,
                 &self.engine,
@@ -2204,10 +2367,38 @@ impl SpreadsheetApp {
                 &self.theme,
             )
             .with_used_extent(used)
-            .with_fill_handle(!self.is_editing())
-            .with_fill_preview(fill_preview);
+            .with_fill_handle(!self.is_editing() && self.selected_picture.is_none())
+            .with_fill_preview(fill_preview)
+            .with_fonts(&self.fonts)
+            .with_pictures(&self.picture_textures.ids, self.selected_picture);
 
             let grid_response = grid.show(ui);
+
+            // Pictures: select, move or resize, menu. Working with cells
+            // deselects them.
+            if let Some(i) = grid_response.picture_clicked {
+                if self.is_editing() {
+                    self.edit_buffer = self.formula_bar.content.clone();
+                    self.confirm_edit(false, false);
+                }
+                self.selected_picture = Some(i);
+                ctx.memory_mut(|m| m.request_focus(egui::Id::new("spreadsheet_grid")));
+            } else if grid_response.clicked_cell.is_some()
+                || grid_response.drag_started.is_some()
+                || grid_response.right_clicked_cell.is_some()
+                || grid_response.header_select.is_some()
+                || grid_response.select_all
+                || grid_response.navigation.is_some()
+                || grid_response.text_input_char.is_some()
+            {
+                self.selected_picture = None;
+            }
+            if let Some((i, place)) = grid_response.picture_placed {
+                self.place_picture(i, place);
+            }
+            if let Some((i, action)) = grid_response.picture_action {
+                self.picture_action(i, action);
+            }
 
             if let Some(offset) = grid_response.scroll_to {
                 self.scroll
@@ -2238,6 +2429,14 @@ impl SpreadsheetApp {
                     self.select_lines(axis, index, index);
                 }
             }
+            if let Some((coord, pos)) = grid_response.hovered_note {
+                if self.note_editor.is_none() {
+                    self.show_note_popup(ctx, coord, pos);
+                }
+            }
+            if let Some(pos) = grid_response.validation_dropdown {
+                self.open_list_popup(pos);
+            }
             if let Some((col, pos)) = grid_response.filter_button {
                 self.open_filter_popup(col, pos);
             }
@@ -2253,6 +2452,7 @@ impl SpreadsheetApp {
                 let height = fit_row_height(
                     ctx,
                     &self.engine,
+                    Some(&self.fonts),
                     &self.grid_config,
                     self.current_sheet,
                     row,
@@ -2303,7 +2503,13 @@ impl SpreadsheetApp {
                 }
             }
             if let Some(col) = grid_response.autofit_column {
-                if let Some(width) = fit_column_width(ctx, &self.engine, self.current_sheet, col) {
+                if let Some(width) = fit_column_width(
+                    ctx,
+                    &self.engine,
+                    Some(&self.fonts),
+                    self.current_sheet,
+                    col,
+                ) {
                     let axis = ResizeAxis::Column;
                     let old = self.current_size(axis, col);
                     self.set_size(self.current_sheet, axis, col, Some(width));
@@ -2397,6 +2603,13 @@ impl SpreadsheetApp {
         // Dialogs and popups float above everything.
         self.show_recovery_prompt(ctx);
         self.show_find_dialog(ctx);
+        self.show_note_editor(ctx);
+        self.show_validation_dialog(ctx);
+        self.show_conditional_dialog(ctx);
+        self.show_alt_text_editor(ctx);
+        self.show_pivot_dialog(ctx);
+        self.show_list_popup(ctx);
+        self.show_input_message(ctx);
         self.show_filter_popup(ctx);
         self.show_sort_dialog(ctx);
         self.show_print_dialog(ctx);
@@ -2405,6 +2618,20 @@ impl SpreadsheetApp {
             self.run_command(ctx, c);
         }
     }
+}
+
+/// Ctrl+V is held down, read from the keyboard directly.
+#[cfg(windows)]
+fn paste_key_down(ctx: &egui::Context) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_V};
+    let focused = ctx.input(|i| i.focused && i.modifiers.command);
+    // SAFETY: GetAsyncKeyState only reads key state.
+    focused && unsafe { GetAsyncKeyState(i32::from(VK_V)) } as u16 & 0x8000 != 0
+}
+
+#[cfg(not(windows))]
+fn paste_key_down(_ctx: &egui::Context) -> bool {
+    false
 }
 
 /// Whether a text field (formula bar, dialog box, sheet rename) has focus.
@@ -2450,6 +2677,7 @@ pub fn run_with_file(path: Option<PathBuf>) -> Result<(), eframe::Error> {
         Box::new(move |_cc| {
             let mut app = SpreadsheetApp::new();
             app.settings = Settings::load();
+            app.fonts = FontLibrary::scan_in_background();
             app.recoverable = recovery::find_recoverable();
             app.recovery = Recovery::new();
             if let Some(path) = path {

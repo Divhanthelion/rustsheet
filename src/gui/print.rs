@@ -1,12 +1,12 @@
 //! Printing and PDF export.
 //!
 //! [`layout`] turns a sheet into pages of simple drawing operations (fills,
-//! lines, text boxes), in points from each page's top-left corner. Those
+//! lines, text boxes, pictures), in points from each page's top-left corner. Those
 //! pages are written to a PDF with [`write_pdf`] (embedding the app's own
 //! font, so the PDF looks like the screen) or sent to a printer with
 //! [`print`] on Windows (GDI, through the standard Print dialog).
 
-use super::grid::GridConfig;
+use super::grid::{DEFAULT_COLUMN_WIDTH, DEFAULT_ROW_HEIGHT, GridConfig};
 use crate::calc::{CalcEngine, CellResult};
 use crate::cell::{CellCoord, CellRange};
 use crate::format::{
@@ -14,6 +14,10 @@ use crate::format::{
 };
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::sync::Arc;
+
+/// Pictures print at most this many pixels on a side.
+const MAX_PRINT_PIXELS: u32 = 2000;
 
 /// UI points (egui) to print points: the grid is drawn at 96 dpi.
 const UI_TO_PT: f32 = 0.75;
@@ -50,6 +54,44 @@ pub enum Op {
         color: Rgb,
     },
     Text(TextBox),
+    /// A picture in `rect`, cut to `clip` (the page's cells)
+    Image {
+        rect: Rect,
+        clip: Rect,
+        image: Arc<PrintImage>,
+    },
+}
+
+/// A decoded picture: RGB rows, top first, with transparency over white.
+#[derive(Debug, PartialEq)]
+pub struct PrintImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
+}
+
+impl PrintImage {
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let mut image = image::load_from_memory(bytes).ok()?;
+        if image.width() > MAX_PRINT_PIXELS || image.height() > MAX_PRINT_PIXELS {
+            image = image.thumbnail(MAX_PRINT_PIXELS, MAX_PRINT_PIXELS);
+        }
+        let rgba = image.to_rgba8();
+        let over_white =
+            |c: u8, a: u8| ((c as u16 * a as u16 + 255 * (255 - a as u16)) / 255) as u8;
+        let rgb = rgba
+            .pixels()
+            .flat_map(|p| {
+                let [r, g, b, a] = p.0;
+                [over_white(r, a), over_white(g, a), over_white(b, a)]
+            })
+            .collect();
+        Some(Self {
+            width: rgba.width(),
+            height: rgba.height(),
+            rgb,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +102,8 @@ pub struct TextBox {
     pub clip: Rect,
     pub text: String,
     pub size: f32,
+    /// Font family for printing; `None` is the default
+    pub font_name: Option<String>,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
@@ -171,12 +215,49 @@ pub fn layout(
 
     let formatting = engine.formatting(sheet);
     let default_format = CellFormat::default();
-    let format_of = |c: CellCoord| {
-        formatting
+    // Conditional formatting prints as shown.
+    let format_of = |c: CellCoord| -> std::borrow::Cow<CellFormat> {
+        let base = formatting
             .and_then(|f| f.effective(c))
-            .unwrap_or(&default_format)
+            .unwrap_or(&default_format);
+        match engine.conditional_look(sheet, c) {
+            Some(look) => std::borrow::Cow::Owned(look.apply(base)),
+            None => std::borrow::Cow::Borrowed(base),
+        }
     };
     let merge_of = |c: CellCoord| formatting.and_then(|f| f.merge_at(c));
+
+    // Distance from the area's top-left, in print points.
+    let offset_x = |c: u32| -> f32 {
+        if c >= area.start.col {
+            (area.start.col..c).map(col_w).sum::<f32>() * scale
+        } else {
+            -(c..area.start.col).map(col_w).sum::<f32>() * scale
+        }
+    };
+    let offset_y = |r: u32| -> f32 {
+        if r >= area.start.row {
+            (area.start.row..r).map(row_h).sum::<f32>() * scale
+        } else {
+            -(r..area.start.row).map(row_h).sum::<f32>() * scale
+        }
+    };
+    // Pictures, placed from the area's top-left.
+    let pictures: Vec<(Rect, Arc<PrintImage>)> = formatting
+        .map(|f| f.pictures.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| {
+            let image = Arc::new(PrintImage::decode(&p.data)?);
+            let rect = Rect {
+                x: offset_x(p.anchor.col) + p.offset.0 * UI_TO_PT * scale,
+                y: offset_y(p.anchor.row) + p.offset.1 * UI_TO_PT * scale,
+                w: p.size.0 * UI_TO_PT * scale,
+                h: p.size.1 * UI_TO_PT * scale,
+            };
+            Some((rect, image))
+        })
+        .collect();
 
     let mut pages = Vec::new();
     for cols in &col_bands {
@@ -248,6 +329,22 @@ pub fn layout(
                             color: fill,
                         });
                     }
+                    if let Some((fraction, color)) = engine
+                        .conditional_look(sheet, owner)
+                        .and_then(|l| l.bar)
+                        .filter(|_| owner == coord)
+                    {
+                        let inset = 1.5 * scale;
+                        page.ops.push(Op::Fill {
+                            rect: Rect {
+                                x: cell.x + inset,
+                                y: cell.y + inset,
+                                w: ((cell.w - 2.0 * inset) * fraction as f32).max(0.0),
+                                h: cell.h - 2.0 * inset,
+                            },
+                            color: crate::format::conditional::mix(color, Rgb::WHITE, 0.3),
+                        });
+                    }
                     if setup.gridlines && format.fill.is_none() {
                         if merge.is_none_or(|m| c == m.end.col) {
                             lines.push(((cell.right(), cell.y), (cell.right(), cell.bottom())));
@@ -306,7 +403,7 @@ pub fn layout(
                 let size = DEFAULT_FONT_SIZE.max(1) as f32 * format.font_size_or_default() as f32
                     / DEFAULT_FONT_SIZE as f32
                     * scale;
-                let Some((mut text, number, format_color)) = cell_text(&value, format) else {
+                let Some((mut text, number, format_color)) = cell_text(&value, &format) else {
                     continue;
                 };
                 let inner = rect.w - 2.0 * PADDING;
@@ -350,6 +447,7 @@ pub fn layout(
                     clip,
                     text,
                     size,
+                    font_name: format.font_name.clone(),
                     bold: format.bold,
                     italic: format.italic,
                     underline: format.underline,
@@ -367,6 +465,34 @@ pub fn layout(
                     width: 0.75,
                     color: Rgb::BLACK,
                 });
+            }
+            // Pictures float over the cells; parts on other pages are cut.
+            if !pictures.is_empty() {
+                let (ox, oy) = (offset_x(cols[0]), offset_y(rows[0]));
+                let band = Rect {
+                    x: setup.margin,
+                    y: setup.margin,
+                    w: cols.iter().map(|&c| col_w(c) * scale).sum(),
+                    h: rows.iter().map(|&r| row_h(r) * scale).sum(),
+                };
+                for (r, image) in &pictures {
+                    let rect = Rect {
+                        x: setup.margin + r.x - ox,
+                        y: setup.margin + r.y - oy,
+                        ..*r
+                    };
+                    if rect.x < band.right()
+                        && rect.right() > band.x
+                        && rect.y < band.bottom()
+                        && rect.bottom() > band.y
+                    {
+                        page.ops.push(Op::Image {
+                            rect,
+                            clip: band,
+                            image: image.clone(),
+                        });
+                    }
+                }
             }
             pages.push(page);
         }
@@ -394,15 +520,28 @@ fn cell_text(value: &CellResult, format: &CellFormat) -> Option<(String, bool, O
     .filter(|(t, _, _)| !t.is_empty())
 }
 
-/// The area to print: every used cell and merge, or `None` if blank.
+/// The area to print: every used cell, merge and picture, or `None` if
+/// blank.
 pub fn print_area(engine: &CalcEngine, sheet: u32) -> Option<CellRange> {
-    let mut end = engine.sheet_max_coord(sheet)?;
+    let mut end = engine.sheet_max_coord(sheet);
+    let mut cover = |c: CellCoord| {
+        end = Some(end.map_or(c, |e| CellCoord::new(e.row.max(c.row), e.col.max(c.col))));
+    };
     if let Some(f) = engine.formatting(sheet) {
         for m in &f.merges {
-            end = CellCoord::new(end.row.max(m.end.row), end.col.max(m.end.col));
+            cover(m.end);
+        }
+        // Roughly where each picture ends, in default-sized cells.
+        for p in &f.pictures {
+            let cols = ((p.offset.0 + p.size.0) / DEFAULT_COLUMN_WIDTH).ceil() as u32;
+            let rows = ((p.offset.1 + p.size.1) / DEFAULT_ROW_HEIGHT).ceil() as u32;
+            cover(CellCoord::new(
+                (p.anchor.row + rows.saturating_sub(1)).min(crate::cell::MAX_ROW),
+                (p.anchor.col + cols.saturating_sub(1)).min(crate::cell::MAX_COL),
+            ));
         }
     }
-    Some(CellRange::new(CellCoord::new(0, 0), end))
+    Some(CellRange::new(CellCoord::new(0, 0), end?))
 }
 
 // ----------------------------------------------------------------------
@@ -496,6 +635,8 @@ pub fn write_pdf(pages: &[Page], setup: &PageSetup, font: &PdfFont, title: &str)
     let (page_w, page_h) = setup.page_size();
     let mut used_glyphs: BTreeMap<u16, char> = BTreeMap::new();
     let mut contents = Vec::new();
+    // Each distinct picture once, drawn by name (/Im0, /Im1...).
+    let mut images: Vec<Arc<PrintImage>> = Vec::new();
 
     for page in pages {
         let mut s = String::new();
@@ -527,6 +668,26 @@ pub fn write_pdf(pages: &[Page], setup: &PageSetup, font: &PdfFont, title: &str)
                     );
                 }
                 Op::Text(t) => s += &pdf_text(t, page_h, font, &mut used_glyphs),
+                Op::Image { rect, clip, image } => {
+                    let k = match images.iter().position(|i| Arc::ptr_eq(i, image)) {
+                        Some(k) => k,
+                        None => {
+                            images.push(image.clone());
+                            images.len() - 1
+                        }
+                    };
+                    s += &format!(
+                        "q {:.2} {:.2} {:.2} {:.2} re W n {:.2} 0 0 {:.2} {:.2} {:.2} cm /Im{k} Do Q\n",
+                        clip.x,
+                        page_h - clip.bottom(),
+                        clip.w,
+                        clip.h,
+                        rect.w,
+                        rect.h,
+                        rect.x,
+                        page_h - rect.bottom()
+                    );
+                }
             }
         }
         contents.push(deflate(s.as_bytes()));
@@ -617,10 +778,15 @@ pub fn write_pdf(pages: &[Page], setup: &PageSetup, font: &PdfFont, title: &str)
         .collect();
     objects.push(format!("<< /Title ({title}) /Producer (RustSheet) >>").into_bytes());
 
+    // Pictures follow the pages.
+    let first_image = 9 + 2 * pages.len();
+    let xobjects: String = (0..images.len())
+        .map(|k| format!("/Im{k} {} 0 R ", first_image + k))
+        .collect();
     for (i, content) in contents.iter().enumerate() {
         objects.push(
             format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.2} {page_h:.2}] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_w:.2} {page_h:.2}] /Resources << /Font << /F1 3 0 R >> /XObject << {xobjects}>> >> /Contents {} 0 R >>",
                 page_ids[i] + 1
             )
             .into_bytes(),
@@ -631,6 +797,19 @@ pub fn write_pdf(pages: &[Page], setup: &PageSetup, font: &PdfFont, title: &str)
         )
         .into_bytes();
         obj.extend_from_slice(content);
+        obj.extend_from_slice(b"\nendstream");
+        objects.push(obj);
+    }
+    for image in &images {
+        let data = deflate(&image.rgb);
+        let mut obj = format!(
+            "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n",
+            image.width,
+            image.height,
+            data.len()
+        )
+        .into_bytes();
+        obj.extend_from_slice(&data);
         obj.extend_from_slice(b"\nendstream");
         objects.push(obj);
     }
@@ -804,7 +983,7 @@ pub fn print(doc_name: &str, layout_for: impl Fn((f32, f32)) -> Vec<Page>) -> Re
                 return Err("The print job couldn't be started".into());
             }
             SetBkMode(dc, TRANSPARENT as i32);
-            let face = wide("Segoe UI");
+            let default_face = wide("Segoe UI");
             for page in &pages {
                 if StartPage(dc) <= 0 {
                     break;
@@ -831,6 +1010,9 @@ pub fn print(doc_name: &str, layout_for: impl Fn((f32, f32)) -> Vec<Page>) -> Re
                             DeleteObject(pen);
                         }
                         Op::Text(t) => {
+                            let face = t.font_name.as_deref().map(wide);
+                            let face_ptr =
+                                face.as_ref().map_or(default_face.as_ptr(), |f| f.as_ptr());
                             let font = CreateFontW(
                                 -py(t.size),
                                 0,
@@ -845,7 +1027,7 @@ pub fn print(doc_name: &str, layout_for: impl Fn((f32, f32)) -> Vec<Page>) -> Re
                                 0,
                                 ANTIALIASED_QUALITY as u32,
                                 0,
-                                face.as_ptr(),
+                                face_ptr,
                             );
                             let old = SelectObject(dc, font);
                             SetTextColor(dc, color(t.color));
@@ -886,6 +1068,42 @@ pub fn print(doc_name: &str, layout_for: impl Fn((f32, f32)) -> Vec<Page>) -> Re
                             RestoreDC(dc, saved);
                             SelectObject(dc, old);
                             DeleteObject(font);
+                        }
+                        Op::Image { rect, clip, image } => {
+                            // 32-bit BGRX rows, top first (negative height).
+                            let bgrx: Vec<u8> = image
+                                .rgb
+                                .chunks_exact(3)
+                                .flat_map(|p| [p[2], p[1], p[0], 0])
+                                .collect();
+                            let mut info: BITMAPINFO = std::mem::zeroed();
+                            info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+                            info.bmiHeader.biWidth = image.width as i32;
+                            info.bmiHeader.biHeight = -(image.height as i32);
+                            info.bmiHeader.biPlanes = 1;
+                            info.bmiHeader.biBitCount = 32;
+                            info.bmiHeader.biCompression = BI_RGB;
+                            let saved = SaveDC(dc);
+                            let c = to_rect(clip);
+                            IntersectClipRect(dc, c.left, c.top, c.right, c.bottom);
+                            SetStretchBltMode(dc, HALFTONE);
+                            let r = to_rect(rect);
+                            StretchDIBits(
+                                dc,
+                                r.left,
+                                r.top,
+                                r.right - r.left,
+                                r.bottom - r.top,
+                                0,
+                                0,
+                                image.width as i32,
+                                image.height as i32,
+                                bgrx.as_ptr().cast(),
+                                &info,
+                                DIB_RGB_COLORS,
+                                SRCCOPY,
+                            );
+                            RestoreDC(dc, saved);
                         }
                     }
                 }
@@ -1011,6 +1229,59 @@ mod tests {
         let text = String::from_utf8_lossy(&pdf);
         assert!(text.contains("/Count 1"));
         // The xref offset points at the xref table.
+        let start = text.rfind("startxref\n").unwrap() + "startxref\n".len();
+        let offset: usize = text[start..].lines().next().unwrap().parse().unwrap();
+        assert!(pdf[offset..].starts_with(b"xref"));
+    }
+
+    #[test]
+    fn pictures_print_and_go_into_pdfs() {
+        use crate::format::picture::{Picture, PictureKind};
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(4, 2, image::Rgba([255, 0, 0, 128]))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let mut e = CalcEngine::new();
+        // A sheet with only a picture still prints.
+        let mut p = Picture::new(
+            CellCoord::new(2, 1),
+            Arc::from(png.into_inner()),
+            PictureKind::Png,
+            (4, 2),
+        );
+        p.size = (160.0, 80.0);
+        e.formatting_mut(0).pictures.push(p);
+        let area = print_area(&e, 0).unwrap();
+        assert!(area.end.col >= 2 && area.end.row >= 5, "{area:?}");
+
+        let font = PdfFont::new().unwrap();
+        let pages = layout(
+            &e,
+            0,
+            area,
+            &GridConfig::default(),
+            &PageSetup::default(),
+            &font,
+        );
+        let (rect, image) = pages[0]
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Image { rect, image, .. } => Some((*rect, image.clone())),
+                _ => None,
+            })
+            .expect("the picture is on the page");
+        // B3 at 0.75 points per UI point, inside the 36pt margin.
+        assert_eq!((rect.x, rect.y), (36.0 + 60.0, 36.0 + 33.0));
+        assert_eq!((rect.w, rect.h), (120.0, 60.0));
+        // Half-transparent red over white.
+        assert_eq!(&image.rgb[..3], &[255, 127, 127]);
+
+        let pdf = write_pdf(&pages, &PageSetup::default(), &font, "Picture");
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/Subtype /Image /Width 4 /Height 2"));
+        // Page contents are compressed; the resources name the picture.
+        assert!(text.contains("/XObject << /Im0 "));
         let start = text.rfind("startxref\n").unwrap() + "startxref\n".len();
         let offset: usize = text[start..].lines().next().unwrap().parse().unwrap();
         assert!(pdf[offset..].starts_with(b"xref"));

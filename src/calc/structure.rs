@@ -90,6 +90,7 @@ impl CalcEngine {
             }
         }
         self.formatting_mut(sheet).apply_line_edit(edit);
+        self.move_pivot_sources(sheet, edit);
     }
 
     /// Re-parse `formula` (on sheet `formula_sheet`), apply `f` to each
@@ -162,20 +163,24 @@ impl CalcEngine {
                 let coord = CellCoord::new(row, col);
                 let input = self.get_input(sheet, coord).cloned();
                 let format = formatting.get(coord).cloned();
+                let note = self.formatting_mut(sheet).notes.remove(&coord);
                 if input.is_some() {
                     self.clear(sheet, coord);
                 }
                 if format.is_some() {
                     self.set_cell_format(sheet, coord, Default::default());
                 }
-                taken.push((row, col, input, format));
+                taken.push((row, col, input, format, note));
             }
         }
         let parser = FormulaParser::new();
         for (new_index, &old_row) in order.iter().enumerate() {
             let new_row = first + new_index as u32;
-            for (_, col, input, format) in taken.iter().filter(|t| t.0 == old_row) {
+            for (_, col, input, format, note) in taken.iter().filter(|t| t.0 == old_row) {
                 let coord = CellCoord::new(new_row, *col);
+                if let Some(note) = note {
+                    self.formatting_mut(sheet).notes.insert(coord, note.clone());
+                }
                 if let Some(format) = format {
                     self.set_cell_format(sheet, coord, format.clone());
                 }

@@ -1,7 +1,7 @@
 //! Sheet tab bar widget for switching between sheets
 
 use super::theme::Theme;
-use eframe::egui::{self, Color32, CornerRadius, Pos2, Sense, Stroke, StrokeKind, Ui, Vec2};
+use eframe::egui::{self, CornerRadius, Pos2, Sense, Stroke, StrokeKind, Ui, Vec2};
 
 /// Response from the sheet tabs widget
 pub struct SheetTabsResponse {
@@ -43,6 +43,12 @@ impl<'a> SheetTabs<'a> {
         let tab_height = 24.0;
         let add_button_width = 28.0;
 
+        // A tab being renamed: (index, text, just started).
+        let rename_id = egui::Id::new("sheet_rename");
+        let mut renaming: Option<(usize, String, bool)> = ui.data(|d| d.get_temp(rename_id));
+        let inactive_bg = self.theme.header_bg;
+        let hover_bg = self.theme.selection_bg;
+
         ui.horizontal(|ui| {
             ui.set_height(tab_height);
 
@@ -60,6 +66,35 @@ impl<'a> SheetTabs<'a> {
             for (index, name) in self.sheet_names.iter().enumerate() {
                 let is_active = index as u32 == self.current_sheet;
 
+                // Renaming: an edit box in place of the tab. Enter or
+                // clicking away keeps the name; Escape cancels.
+                if let Some((_, text, started)) = renaming.as_mut().filter(|(i, _, _)| *i == index)
+                {
+                    let box_id = egui::Id::new("sheet_rename_box");
+                    let edit = ui.add_sized(
+                        [tab_width, tab_height],
+                        egui::TextEdit::singleline(text).id(box_id),
+                    );
+                    if *started {
+                        *started = false;
+                        edit.request_focus();
+                        if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), box_id) {
+                            let all = egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(0),
+                                egui::text::CCursor::new(text.chars().count()),
+                            );
+                            state.cursor.set_char_range(Some(all));
+                            state.store(ui.ctx(), box_id);
+                        }
+                    } else if edit.lost_focus() {
+                        if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            response.rename_sheet = Some((index as u32, text.trim().to_string()));
+                        }
+                        renaming = None;
+                    }
+                    continue;
+                }
+
                 let (rect, tab_response) =
                     ui.allocate_exact_size(Vec2::new(tab_width, tab_height), Sense::click());
 
@@ -67,9 +102,9 @@ impl<'a> SheetTabs<'a> {
                 let bg_color = if is_active {
                     self.theme.cell_bg
                 } else if tab_response.hovered() {
-                    Color32::from_gray(60)
+                    hover_bg
                 } else {
-                    Color32::from_gray(45)
+                    inactive_bg
                 };
 
                 let rounding = CornerRadius {
@@ -124,11 +159,17 @@ impl<'a> SheetTabs<'a> {
                 if tab_response.clicked() {
                     response.switch_to = Some(index as u32);
                 }
+                if tab_response.double_clicked() {
+                    renaming = Some((index, name.clone(), true));
+                }
+                tab_response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name)
+                });
 
                 // Context menu for rename/delete
                 tab_response.context_menu(|ui| {
                     if ui.button("Rename...").clicked() {
-                        // For now, just close the menu - rename UI would need more work
+                        renaming = Some((index, name.clone(), true));
                         ui.close_menu();
                     }
                     if self.sheet_names.len() > 1 && ui.button("Delete").clicked() {
@@ -144,9 +185,9 @@ impl<'a> SheetTabs<'a> {
                 ui.allocate_exact_size(Vec2::new(add_button_width, tab_height), Sense::click());
 
             let add_bg = if add_response.hovered() {
-                Color32::from_gray(60)
+                hover_bg
             } else {
-                Color32::from_gray(45)
+                inactive_bg
             };
 
             ui.painter()
@@ -167,6 +208,10 @@ impl<'a> SheetTabs<'a> {
             add_response.on_hover_text("Add new sheet");
         });
 
+        ui.data_mut(|d| match renaming {
+            Some(r) => d.insert_temp(rename_id, r),
+            None => d.remove::<(usize, String, bool)>(rename_id),
+        });
         response
     }
 }

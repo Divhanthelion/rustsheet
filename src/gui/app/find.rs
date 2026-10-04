@@ -295,6 +295,7 @@ impl SpreadsheetApp {
             "Find"
         };
         egui::Window::new(title)
+            .order(egui::Order::Foreground)
             .id(egui::Id::new("find_dialog"))
             .open(&mut open)
             .collapsible(false)

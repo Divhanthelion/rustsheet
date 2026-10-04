@@ -1,11 +1,14 @@
 //! Write a sample workbook for store screenshots and manual testing.
 //!
-//! cargo run --example demo_workbook -- target/demo.xlsx [target/sales.xlsx]
+//! cargo run --example demo_workbook -- target/demo.xlsx [target/sales.xlsx [target/pivot.xlsx]]
 //!
-//! The optional second file is a filtered sales list.
+//! The optional second file is a filtered sales list, and the third a
+//! PivotTable summarizing it.
 
 use rustsheet::cell::{Axis, CellRange};
 use rustsheet::format::AutoFilter;
+use rustsheet::format::conditional::{CfRule, CfStyle, Cfvo, ConditionalFormat};
+use rustsheet::format::validation::CompareOp;
 use rustsheet::prelude::*;
 use std::collections::BTreeMap;
 
@@ -86,6 +89,7 @@ fn main() {
     style(&mut e, "A1", &|f| {
         f.bold = true;
         f.font_size = Some(16);
+        f.font_name = Some("Georgia".into());
         f.h_align = HAlign::Center;
         f.v_align = rustsheet::format::VAlign::Center;
     });
@@ -131,6 +135,29 @@ fn main() {
             range: CellRange::from_a1("A2:F8").unwrap(),
             allowed: BTreeMap::new(),
         });
+        // Data bars for savings, a red-to-green scale for the savings rate.
+        f.conditional = vec![
+            ConditionalFormat {
+                ranges: vec![CellRange::from_a1("D3:D8").unwrap()],
+                rule: CfRule::DataBar {
+                    min: Cfvo::min(),
+                    max: Cfvo::max(),
+                    color: Rgb(0x63, 0x8E, 0xC6),
+                },
+                stop_if_true: false,
+            },
+            ConditionalFormat {
+                ranges: vec![CellRange::from_a1("E3:E8").unwrap()],
+                rule: CfRule::ColorScale {
+                    stops: vec![
+                        (Cfvo::min(), Rgb(0xF8, 0x69, 0x6B)),
+                        (Cfvo::percentile(50), Rgb(0xFF, 0xEB, 0x84)),
+                        (Cfvo::max(), Rgb(0x63, 0xBE, 0x7B)),
+                    ],
+                },
+                stop_if_true: false,
+            },
+        ];
     }
 
     let range = |a1: &str| CellRange::from_a1(a1).unwrap();
@@ -162,19 +189,20 @@ fn main() {
         write_sales(&sales);
         println!("Wrote {sales}");
     }
+    if let Some(pivot) = std::env::args().nth(3) {
+        write_pivot(&pivot);
+        println!("Wrote {pivot}");
+    }
 }
 
-/// A sales list with a frozen header and an AutoFilter showing two regions.
-fn write_sales(path: &str) {
-    use std::collections::BTreeSet;
-    let mut e = CalcEngine::new();
-    e.set_sheet_names(vec!["Sales".to_string()]);
+/// Forty orders on `sheet`, with a styled header and a frozen top row.
+fn fill_sales(e: &mut CalcEngine, sheet: u32) {
     let headers = [
         "Date", "Region", "Rep", "Product", "Units", "Price", "Revenue",
     ];
     for (c, h) in headers.iter().enumerate() {
         e.set_value(
-            0,
+            sheet,
             CellCoord::new(0, c as u32),
             CellValueInput::Text(h.to_string()),
         );
@@ -192,29 +220,52 @@ fn write_sales(path: &str) {
         let (product, price) = products[(i as usize * 7 + 3) % products.len()];
         let units = ((i * 37 + 11) % 48 + 2) as f64;
         let set = |e: &mut CalcEngine, c: u32, v: CellValueInput| {
-            e.set_value(0, CellCoord::new(row, c), v)
+            e.set_value(sheet, CellCoord::new(row, c), v)
         };
-        set(&mut e, 0, CellValueInput::Number(46023.0 + (i / 2) as f64)); // Jan 2026
+        set(e, 0, CellValueInput::Number(46023.0 + (i / 2) as f64)); // Jan 2026
         set(
-            &mut e,
+            e,
             1,
             CellValueInput::Text(regions[(i as usize * 3) % 4].into()),
         );
         set(
-            &mut e,
+            e,
             2,
             CellValueInput::Text(reps[(i as usize * 5) % reps.len()].into()),
         );
-        set(&mut e, 3, CellValueInput::Text(product.into()));
-        set(&mut e, 4, CellValueInput::Number(units));
-        set(&mut e, 5, CellValueInput::Number(price));
+        set(e, 3, CellValueInput::Text(product.into()));
+        set(e, 4, CellValueInput::Number(units));
+        set(e, 5, CellValueInput::Number(price));
         e.set_formula(
-            0,
+            sheet,
             CellCoord::new(row, 6),
             &format!("=E{}*F{}", row + 1, row + 1),
         )
         .unwrap();
     }
+    let f = e.formatting_mut(sheet);
+    let date = CellFormat {
+        number_format: Some("mmm d, yyyy".into()),
+        ..Default::default()
+    };
+    let money = CellFormat {
+        number_format: Some("$#,##0.00".into()),
+        ..Default::default()
+    };
+    f.set_line_format(Axis::Column, 0, date);
+    f.set_line_format(Axis::Column, 5, money.clone());
+    f.set_line_format(
+        Axis::Column,
+        6,
+        CellFormat {
+            bold: true,
+            ..money
+        },
+    );
+    f.column_widths.insert(0, 110.0);
+    f.column_widths.insert(3, 100.0);
+    f.frozen = (1, 0);
+    // Header formats take precedence over the column formats.
     let header = CellFormat {
         bold: true,
         fill: Some(Rgb(0x1F, 0x4E, 0x79)),
@@ -222,31 +273,42 @@ fn write_sales(path: &str) {
         ..Default::default()
     };
     for c in 0..7 {
-        e.set_cell_format(0, CellCoord::new(0, c), header.clone());
+        e.set_cell_format(sheet, CellCoord::new(0, c), header.clone());
     }
+}
+
+/// A sales list with a frozen header, highlights and an AutoFilter showing
+/// two regions.
+fn write_sales(path: &str) {
+    use std::collections::BTreeSet;
+    let mut e = CalcEngine::new();
+    e.set_sheet_names(vec!["Sales".to_string()]);
+    fill_sales(&mut e, 0);
     {
         let f = e.formatting_mut(0);
-        let date = CellFormat {
-            number_format: Some("mmm d, yyyy".into()),
-            ..Default::default()
-        };
-        let money = CellFormat {
-            number_format: Some("$#,##0.00".into()),
-            ..Default::default()
-        };
-        f.set_line_format(Axis::Column, 0, date);
-        f.set_line_format(Axis::Column, 5, money.clone());
-        f.set_line_format(
-            Axis::Column,
-            6,
-            CellFormat {
-                bold: true,
-                ..money
+        // Best sellers in green, small orders in red.
+        f.conditional = vec![
+            ConditionalFormat {
+                ranges: vec![CellRange::from_a1("G2:G41").unwrap()],
+                rule: CfRule::Top {
+                    bottom: false,
+                    rank: 5,
+                    percent: false,
+                    style: CfStyle::preset(2),
+                },
+                stop_if_true: false,
             },
-        );
-        f.column_widths.insert(0, 110.0);
-        f.column_widths.insert(3, 100.0);
-        f.frozen = (1, 0);
+            ConditionalFormat {
+                ranges: vec![CellRange::from_a1("E2:E41").unwrap()],
+                rule: CfRule::CellIs {
+                    op: CompareOp::Less,
+                    formula1: "10".into(),
+                    formula2: None,
+                    style: CfStyle::preset(0),
+                },
+                stop_if_true: false,
+            },
+        ];
         let mut allowed = BTreeMap::new();
         allowed.insert(1, BTreeSet::from(["North".to_string(), "West".to_string()]));
         f.filter = Some(AutoFilter {
@@ -255,11 +317,50 @@ fn write_sales(path: &str) {
         });
     }
     e.refresh_filter(0);
-    // Header formats take precedence over the column formats.
-    for c in 0..7 {
-        e.set_cell_format(0, CellCoord::new(0, c), header.clone());
-    }
     let mut writer = XlsxWriter::new();
     writer.add_engine_sheet("Sales", &e, 0).unwrap();
+    writer.save(path).unwrap();
+}
+
+/// Revenue by rep and region, with data bars on the totals, from the
+/// sales list on a second sheet.
+fn write_pivot(path: &str) {
+    use rustsheet::pivot::{Aggregate, PivotTable, PivotValue};
+    let mut e = CalcEngine::new();
+    e.set_sheet_names(vec!["Summary".to_string(), "Sales".to_string()]);
+    fill_sales(&mut e, 1);
+    let mut table = PivotTable::new(
+        "Revenue by rep".into(),
+        "Sales".into(),
+        CellRange::from_a1("A1:G41").unwrap(),
+        CellCoord::new(0, 0),
+    );
+    table.rows = vec![2];
+    table.columns = vec![1];
+    table.values = vec![PivotValue {
+        field: 6,
+        aggregate: Aggregate::Sum,
+    }];
+    table.filters = vec![3];
+    e.formatting_mut(0).pivots.push(table);
+    e.refresh_pivot(0, 0).unwrap();
+    // Data bars down the Grand Total column, beside the reps.
+    let out = e.formatting(0).unwrap().pivots[0].output.unwrap();
+    let totals = CellRange::new(
+        CellCoord::new(out.start.row + 4, out.end.col),
+        CellCoord::new(out.end.row - 1, out.end.col),
+    );
+    e.formatting_mut(0).conditional = vec![ConditionalFormat {
+        ranges: vec![totals],
+        rule: CfRule::DataBar {
+            min: Cfvo::min(),
+            max: Cfvo::max(),
+            color: Rgb(0x63, 0x8E, 0xC6),
+        },
+        stop_if_true: false,
+    }];
+    let mut writer = XlsxWriter::new();
+    writer.add_engine_sheet("Summary", &e, 0).unwrap();
+    writer.add_engine_sheet("Sales", &e, 1).unwrap();
     writer.save(path).unwrap();
 }

@@ -39,6 +39,7 @@ pub mod chart;
 pub mod format;
 pub mod formula;
 pub mod grid;
+pub mod pivot;
 
 #[cfg(feature = "xlsx")]
 pub mod xlsx;

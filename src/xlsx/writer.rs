@@ -30,6 +30,9 @@ pub struct XlsxWriter {
     workbook: Workbook,
     /// Charts to add to sheets
     pending_charts: Vec<(u32, ChartDefinition)>,
+    /// Pivot table definitions by sheet name, saved in a manifest so
+    /// RustSheet can refresh them (rust_xlsxwriter can't write pivots)
+    pivots: Vec<(String, Vec<crate::pivot::PivotTable>)>,
 }
 
 impl XlsxWriter {
@@ -38,6 +41,7 @@ impl XlsxWriter {
         Self {
             workbook: Workbook::new(),
             pending_charts: Vec::new(),
+            pivots: Vec::new(),
         }
     }
 
@@ -63,6 +67,9 @@ impl XlsxWriter {
         worksheet.set_name(name)?;
 
         let formatting = engine.formatting(sheet_index);
+        if let Some(f) = formatting.filter(|f| !f.pivots.is_empty()) {
+            self.pivots.push((name.to_string(), f.pivots.clone()));
+        }
         let mut cache = FormatCache::default();
         // Cells carry the format they show (own, row or column), as Excel writes them.
         let format_for = |cache: &mut FormatCache, coord: CellCoord| -> Option<Format> {
@@ -131,6 +138,36 @@ impl XlsxWriter {
             }
             for &row in &formatting.hidden_rows {
                 worksheet.set_row_hidden(row)?;
+            }
+            for dv in &formatting.validations {
+                if let Some(v) = to_xlsx_validation(dv) {
+                    let first = dv.ranges[0];
+                    let mut v = v;
+                    if dv.ranges.len() > 1 {
+                        let all: Vec<String> = dv.ranges.iter().map(|r| r.to_string()).collect();
+                        v = v.set_multi_range(all.join(" "));
+                    }
+                    worksheet.add_data_validation(
+                        first.start.row,
+                        col_num(first.start.col)?,
+                        first.end.row,
+                        col_num(first.end.col)?,
+                        &v,
+                    )?;
+                }
+            }
+            for cf in &formatting.conditional {
+                add_conditional_format(worksheet, cf)?;
+            }
+            for p in &formatting.pictures {
+                insert_picture(worksheet, p)?;
+            }
+            for (coord, note) in &formatting.notes {
+                let mut n = rust_xlsxwriter::Note::new(&note.text);
+                if let Some(author) = &note.author {
+                    n = n.set_author(author);
+                }
+                worksheet.insert_note(coord.row, col_num(coord.col)?, &n)?;
             }
             let (rows, cols) = formatting.frozen;
             if rows > 0 || cols > 0 {
@@ -394,63 +431,95 @@ impl XlsxWriter {
     }
 
     /// Save the workbook to a file
-    pub fn save<P: AsRef<Path>>(mut self, path: P) -> Result<(), XlsxWriteError> {
-        self.workbook.save(path.as_ref())?;
+    pub fn save<P: AsRef<Path>>(self, path: P) -> Result<(), XlsxWriteError> {
+        std::fs::write(path, self.into_bytes(None)?)?;
         Ok(())
     }
 
     /// Save cells plus a rustsheet chart manifest inside the xlsx zip.
     pub fn save_with_charts<P: AsRef<Path>>(
-        mut self,
+        self,
         path: P,
         charts: &[ChartDefinition],
     ) -> Result<(), XlsxWriteError> {
-        let bytes = self.workbook.save_to_buffer()?;
-        embed_chart_manifest(bytes, charts, path.as_ref())
+        std::fs::write(path, self.into_bytes(Some(charts))?)?;
+        Ok(())
     }
 
     /// Save to a Vec<u8> for in-memory use
-    pub fn save_to_buffer(mut self) -> Result<Vec<u8>, XlsxWriteError> {
-        let buffer = self.workbook.save_to_buffer()?;
-        Ok(buffer)
+    pub fn save_to_buffer(self) -> Result<Vec<u8>, XlsxWriteError> {
+        self.into_bytes(None)
+    }
+
+    /// The finished file, with RustSheet's manifests (charts, pivot tables)
+    /// added when there are any.
+    fn into_bytes(mut self, charts: Option<&[ChartDefinition]>) -> Result<Vec<u8>, XlsxWriteError> {
+        let bytes = self.workbook.save_to_buffer()?;
+        let mut files: Vec<(&str, Vec<u8>)> = Vec::new();
+        if let Some(charts) = charts {
+            let data =
+                serde_json::to_vec(charts).map_err(|e| XlsxWriteError::Json(e.to_string()))?;
+            files.push((CHARTS_MANIFEST, data));
+        }
+        if !self.pivots.is_empty() {
+            let data = serde_json::to_vec(&self.pivots)
+                .map_err(|e| XlsxWriteError::Json(e.to_string()))?;
+            files.push((PIVOTS_MANIFEST, data));
+        }
+        if files.is_empty() {
+            return Ok(bytes);
+        }
+        embed_manifests(bytes, &files)
     }
 }
 
-fn embed_chart_manifest(
-    xlsx: Vec<u8>,
-    charts: &[ChartDefinition],
-    path: &Path,
-) -> Result<(), XlsxWriteError> {
-    use std::io::{Cursor, Write};
+pub(super) const CHARTS_MANIFEST: &str = "xl/rustsheet/charts.json";
+pub(super) const PIVOTS_MANIFEST: &str = "xl/rustsheet/pivots.json";
+
+/// Add RustSheet's own files to a saved workbook, replacing older copies,
+/// and declare their type so Excel accepts the package.
+fn embed_manifests(xlsx: Vec<u8>, files: &[(&str, Vec<u8>)]) -> Result<Vec<u8>, XlsxWriteError> {
+    use std::io::{Cursor, Read, Write};
     use zip::write::SimpleFileOptions;
     use zip::{ZipArchive, ZipWriter};
 
-    let mut archive =
-        ZipArchive::new(Cursor::new(xlsx)).map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+    let zip_err = |e: zip::result::ZipError| XlsxWriteError::Zip(e.to_string());
+    let mut archive = ZipArchive::new(Cursor::new(xlsx)).map_err(zip_err)?;
     let mut out = Cursor::new(Vec::new());
     {
         let mut zip = ZipWriter::new(&mut out);
         for i in 0..archive.len() {
-            let mut file = archive
-                .by_index(i)
-                .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+            let mut file = archive.by_index(i).map_err(zip_err)?;
             let name = file.name().to_string();
-            if name == "xl/rustsheet/charts.json" {
+            if files.iter().any(|(n, _)| *n == name) {
                 continue;
             }
             zip.start_file(&name, SimpleFileOptions::default())
-                .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
-            std::io::copy(&mut file, &mut zip).map_err(XlsxWriteError::Io)?;
+                .map_err(zip_err)?;
+            if name == "[Content_Types].xml" {
+                let mut types = String::new();
+                file.read_to_string(&mut types)?;
+                if !types.contains("Extension=\"json\"") {
+                    if let Some(at) = types.find("<Default ") {
+                        types.insert_str(
+                            at,
+                            "<Default Extension=\"json\" ContentType=\"application/json\"/>",
+                        );
+                    }
+                }
+                zip.write_all(types.as_bytes())?;
+            } else {
+                std::io::copy(&mut file, &mut zip)?;
+            }
         }
-        zip.start_file("xl/rustsheet/charts.json", SimpleFileOptions::default())
-            .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
-        let json = serde_json::to_vec(charts).map_err(|e| XlsxWriteError::Json(e.to_string()))?;
-        zip.write_all(&json).map_err(XlsxWriteError::Io)?;
-        zip.finish()
-            .map_err(|e| XlsxWriteError::Zip(e.to_string()))?;
+        for (name, data) in files {
+            zip.start_file(*name, SimpleFileOptions::default())
+                .map_err(zip_err)?;
+            zip.write_all(data)?;
+        }
+        zip.finish().map_err(zip_err)?;
     }
-    std::fs::write(path, out.into_inner())?;
-    Ok(())
+    Ok(out.into_inner())
 }
 
 impl Default for XlsxWriter {
@@ -470,6 +539,324 @@ impl FormatCache {
             .or_insert_with(|| to_xlsx_format(f))
             .clone()
     }
+}
+
+/// A rust_xlsxwriter validation for a rule; `None` if it has no ranges.
+fn to_xlsx_validation(
+    dv: &crate::format::validation::DataValidation,
+) -> Option<rust_xlsxwriter::DataValidation> {
+    use crate::format::validation::{CompareOp, ErrorStyle, ValidationKind};
+    use rust_xlsxwriter::{
+        DataValidation, DataValidationErrorStyle, DataValidationRule as R, Formula,
+    };
+    if dv.ranges.is_empty() {
+        return None;
+    }
+    let f = |s: &str| Formula::new(s.trim_start_matches('='));
+    let a = f(&dv.formula1);
+    let b = f(dv.formula2.as_deref().unwrap_or(&dv.formula1));
+    let rule = match dv.operator {
+        CompareOp::Between => R::Between(a, b),
+        CompareOp::NotBetween => R::NotBetween(a, b),
+        CompareOp::Equal => R::EqualTo(a),
+        CompareOp::NotEqual => R::NotEqualTo(a),
+        CompareOp::Greater => R::GreaterThan(a),
+        CompareOp::Less => R::LessThan(a),
+        CompareOp::GreaterOrEqual => R::GreaterThanOrEqualTo(a),
+        CompareOp::LessOrEqual => R::LessThanOrEqualTo(a),
+    };
+    let mut v = DataValidation::new();
+    v = match dv.kind {
+        ValidationKind::Any => v.allow_any_value(),
+        ValidationKind::Whole => v.allow_whole_number_formula(rule),
+        ValidationKind::Decimal => v.allow_decimal_number_formula(rule),
+        ValidationKind::Date => v.allow_date_formula(rule),
+        ValidationKind::Time => v.allow_time_formula(rule),
+        ValidationKind::TextLength => v.allow_text_length_formula(rule),
+        ValidationKind::Custom => v.allow_custom(f(&dv.formula1)),
+        ValidationKind::List => match dv.literal_items() {
+            Some(items) => v.allow_list_strings(&items).ok()?,
+            None => v.allow_list_formula(f(&dv.formula1)),
+        },
+    };
+    v = v
+        .ignore_blank(dv.allow_blank)
+        .show_dropdown(dv.dropdown)
+        .show_input_message(dv.show_input)
+        .show_error_message(dv.show_error)
+        .set_error_style(match dv.error_style {
+            ErrorStyle::Stop => DataValidationErrorStyle::Stop,
+            ErrorStyle::Warning => DataValidationErrorStyle::Warning,
+            ErrorStyle::Information => DataValidationErrorStyle::Information,
+        });
+    // Titles and messages have Excel's length limits; skip ones that don't fit.
+    if !dv.input_title.is_empty() {
+        v = v.clone().set_input_title(&dv.input_title).unwrap_or(v);
+    }
+    if !dv.input_message.is_empty() {
+        v = v.clone().set_input_message(&dv.input_message).unwrap_or(v);
+    }
+    if !dv.error_title.is_empty() {
+        v = v.clone().set_error_title(&dv.error_title).unwrap_or(v);
+    }
+    if !dv.error_message.is_empty() {
+        v = v.clone().set_error_message(&dv.error_message).unwrap_or(v);
+    }
+    Some(v)
+}
+
+/// Add one conditional formatting rule. Rules are added in priority order;
+/// rust_xlsxwriter numbers them that way, grouped by range.
+fn add_conditional_format(
+    worksheet: &mut Worksheet,
+    cf: &crate::format::conditional::ConditionalFormat,
+) -> Result<(), XlsxWriteError> {
+    use crate::format::conditional::{AverageRule, CfRule, CfStyle, Cfvo, CfvoKind, TextRule};
+    use crate::format::validation::CompareOp;
+    use rust_xlsxwriter::{
+        ConditionalFormat2ColorScale, ConditionalFormat3ColorScale, ConditionalFormatAverage,
+        ConditionalFormatAverageRule as Avg, ConditionalFormatBlank, ConditionalFormatCell,
+        ConditionalFormatCellRule as C, ConditionalFormatDataBar, ConditionalFormatDuplicate,
+        ConditionalFormatError, ConditionalFormatFormula, ConditionalFormatText,
+        ConditionalFormatTextRule as T, ConditionalFormatTop, ConditionalFormatTopRule as Top,
+        ConditionalFormatType as V, ConditionalFormatValue, Formula,
+    };
+    let Some(first) = cf.ranges.first().copied() else {
+        return Ok(());
+    };
+    let multi = (cf.ranges.len() > 1).then(|| {
+        cf.ranges
+            .iter()
+            .map(|r| r.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    let f = |s: &str| Formula::new(s.trim_start_matches('='));
+    let dxf = |s: &CfStyle| {
+        let mut format = Format::new();
+        if s.bold == Some(true) {
+            format = format.set_bold();
+        }
+        if s.italic == Some(true) {
+            format = format.set_italic();
+        }
+        if s.underline == Some(true) {
+            format = format.set_underline(FormatUnderline::Single);
+        }
+        if s.strikethrough == Some(true) {
+            format = format.set_font_strikethrough();
+        }
+        if let Some(c) = s.font_color {
+            format = format.set_font_color(Color::RGB(c.to_u32()));
+        }
+        if let Some(c) = s.fill {
+            format = format.set_background_color(Color::RGB(c.to_u32()));
+        }
+        if let Some(code) = &s.number_format {
+            format = format.set_num_format(code);
+        }
+        format
+    };
+    // A scale point other than the lowest/highest value.
+    let point = |v: &Cfvo| -> Option<(V, ConditionalFormatValue)> {
+        let num = v.value.trim().parse::<f64>().ok();
+        Some(match v.kind {
+            CfvoKind::Min | CfvoKind::Max => return None,
+            CfvoKind::Percent => (V::Percent, num?.into()),
+            CfvoKind::Percentile => (V::Percentile, num?.into()),
+            CfvoKind::Number => match num {
+                Some(n) => (V::Number, n.into()),
+                None => (V::Formula, f(&v.value).into()),
+            },
+            CfvoKind::Formula => (V::Formula, f(&v.value).into()),
+        })
+    };
+    macro_rules! add {
+        ($rule:expr) => {{
+            let mut rule = $rule.set_stop_if_true(cf.stop_if_true);
+            if let Some(m) = &multi {
+                rule = rule.set_multi_range(m.as_str());
+            }
+            worksheet.add_conditional_format(
+                first.start.row,
+                col_num(first.start.col)?,
+                first.end.row,
+                col_num(first.end.col)?,
+                &rule,
+            )?;
+        }};
+    }
+    match &cf.rule {
+        CfRule::CellIs {
+            op,
+            formula1,
+            formula2,
+            style,
+        } => {
+            let (a, b) = (f(formula1), f(formula2.as_deref().unwrap_or(formula1)));
+            let rule = match op {
+                CompareOp::Between => C::Between(a, b),
+                CompareOp::NotBetween => C::NotBetween(a, b),
+                CompareOp::Equal => C::EqualTo(a),
+                CompareOp::NotEqual => C::NotEqualTo(a),
+                CompareOp::Greater => C::GreaterThan(a),
+                CompareOp::Less => C::LessThan(a),
+                CompareOp::GreaterOrEqual => C::GreaterThanOrEqualTo(a),
+                CompareOp::LessOrEqual => C::LessThanOrEqualTo(a),
+            };
+            add!(
+                ConditionalFormatCell::new()
+                    .set_rule(rule)
+                    .set_format(dxf(style))
+            )
+        }
+        CfRule::Text { rule, text, style } => {
+            let rule = match rule {
+                TextRule::Contains => T::Contains(text.clone()),
+                TextRule::NotContains => T::DoesNotContain(text.clone()),
+                TextRule::BeginsWith => T::BeginsWith(text.clone()),
+                TextRule::EndsWith => T::EndsWith(text.clone()),
+            };
+            add!(
+                ConditionalFormatText::new()
+                    .set_rule(rule)
+                    .set_format(dxf(style))
+            )
+        }
+        CfRule::Top {
+            bottom,
+            rank,
+            percent,
+            style,
+        } => {
+            let n = (*rank).clamp(1, if *percent { 100 } else { 1000 }) as u16;
+            let rule = match (bottom, percent) {
+                (false, false) => Top::Top(n),
+                (true, false) => Top::Bottom(n),
+                (false, true) => Top::TopPercent(n),
+                (true, true) => Top::BottomPercent(n),
+            };
+            add!(
+                ConditionalFormatTop::new()
+                    .set_rule(rule)
+                    .set_format(dxf(style))
+            )
+        }
+        CfRule::Average { rule, style } => {
+            let rule = match rule {
+                AverageRule::Above => Avg::AboveAverage,
+                AverageRule::Below => Avg::BelowAverage,
+                AverageRule::EqualOrAbove => Avg::EqualOrAboveAverage,
+                AverageRule::EqualOrBelow => Avg::EqualOrBelowAverage,
+            };
+            add!(
+                ConditionalFormatAverage::new()
+                    .set_rule(rule)
+                    .set_format(dxf(style))
+            )
+        }
+        CfRule::Duplicate { unique, style } => {
+            let mut rule = ConditionalFormatDuplicate::new().set_format(dxf(style));
+            if *unique {
+                rule = rule.invert();
+            }
+            add!(rule)
+        }
+        CfRule::Blanks { not, style } => {
+            let mut rule = ConditionalFormatBlank::new().set_format(dxf(style));
+            if *not {
+                rule = rule.invert();
+            }
+            add!(rule)
+        }
+        CfRule::Errors { not, style } => {
+            let mut rule = ConditionalFormatError::new().set_format(dxf(style));
+            if *not {
+                rule = rule.invert();
+            }
+            add!(rule)
+        }
+        CfRule::Expression { formula, style } => {
+            add!(
+                ConditionalFormatFormula::new()
+                    .set_rule(f(formula))
+                    .set_format(dxf(style))
+            )
+        }
+        CfRule::ColorScale { stops } => match stops.as_slice() {
+            [(lo, lo_color), (hi, hi_color)] => {
+                let mut rule = ConditionalFormat2ColorScale::new()
+                    .set_minimum_color(Color::RGB(lo_color.to_u32()))
+                    .set_maximum_color(Color::RGB(hi_color.to_u32()));
+                if let Some((kind, value)) = point(lo) {
+                    rule = rule.set_minimum(kind, value);
+                }
+                if let Some((kind, value)) = point(hi) {
+                    rule = rule.set_maximum(kind, value);
+                }
+                add!(rule)
+            }
+            [(lo, lo_color), (mid, mid_color), (hi, hi_color)] => {
+                let mut rule = ConditionalFormat3ColorScale::new()
+                    .set_minimum_color(Color::RGB(lo_color.to_u32()))
+                    .set_midpoint_color(Color::RGB(mid_color.to_u32()))
+                    .set_maximum_color(Color::RGB(hi_color.to_u32()));
+                if let Some((kind, value)) = point(lo) {
+                    rule = rule.set_minimum(kind, value);
+                }
+                if let Some((kind, value)) = point(mid) {
+                    rule = rule.set_midpoint(kind, value);
+                }
+                if let Some((kind, value)) = point(hi) {
+                    rule = rule.set_maximum(kind, value);
+                }
+                add!(rule)
+            }
+            _ => {}
+        },
+        CfRule::DataBar { min, max, color } => {
+            let mut rule = ConditionalFormatDataBar::new()
+                .set_fill_color(Color::RGB(color.to_u32()))
+                .set_border_color(Color::RGB(color.to_u32()));
+            if let Some((kind, value)) = point(min) {
+                rule = rule.set_minimum(kind, value);
+            }
+            if let Some((kind, value)) = point(max) {
+                rule = rule.set_maximum(kind, value);
+            }
+            add!(rule)
+        }
+    }
+    Ok(())
+}
+
+/// Place a picture at its cell. Images rust_xlsxwriter can't read are left
+/// out rather than failing the save.
+fn insert_picture(
+    worksheet: &mut Worksheet,
+    p: &crate::format::picture::Picture,
+) -> Result<(), XlsxWriteError> {
+    use super::drawing::ROW_POINTS_PER_PIXEL;
+    use crate::format::picture::POINTS_PER_PIXEL;
+    let Ok(mut image) = rust_xlsxwriter::Image::new_from_buffer(&p.data) else {
+        return Ok(());
+    };
+    image = image.set_scale_to_size(
+        f64::from(p.size.0 / POINTS_PER_PIXEL),
+        f64::from(p.size.1 / POINTS_PER_PIXEL),
+        false,
+    );
+    if !p.description.is_empty() {
+        image = image.set_alt_text(&p.description);
+    }
+    worksheet.insert_image_with_offset(
+        p.anchor.row,
+        col_num(p.anchor.col)?,
+        &image,
+        (p.offset.0 / POINTS_PER_PIXEL).round().max(0.0) as u32,
+        (p.offset.1 / ROW_POINTS_PER_PIXEL).round().max(0.0) as u32,
+    )?;
+    Ok(())
 }
 
 fn col_num(col: u32) -> Result<u16, XlsxWriteError> {
@@ -493,6 +880,9 @@ fn to_xlsx_format(f: &CellFormat) -> Format {
     }
     if let Some(size) = f.font_size {
         format = format.set_font_size(size as f64);
+    }
+    if let Some(name) = &f.font_name {
+        format = format.set_font_name(name);
     }
     if let Some(color) = f.font_color {
         format = format.set_font_color(Color::RGB(color.to_u32()));

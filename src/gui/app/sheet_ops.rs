@@ -606,6 +606,7 @@ impl SpreadsheetApp {
         let mut apply = false;
         let mut sort: Option<bool> = None;
         egui::Window::new("filter_popup")
+            .order(egui::Order::Foreground)
             .title_bar(false)
             .fixed_pos(popup.pos)
             .resizable(false)
@@ -705,6 +706,7 @@ impl SpreadsheetApp {
             format!("Column {letter}")
         };
         egui::Window::new("Sort")
+            .order(egui::Order::Foreground)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)

@@ -4,8 +4,11 @@
 //! `CalcEngine`, and is independent of cell values: clearing a cell keeps its
 //! format, as in Excel.
 
+pub mod conditional;
 mod input;
 mod number;
+pub mod picture;
+pub mod validation;
 
 pub use input::parse_typed_number;
 pub use number::{
@@ -121,6 +124,8 @@ pub struct CellFormat {
     pub strikethrough: bool,
     /// Font size in points; `None` is [`DEFAULT_FONT_SIZE`].
     pub font_size: Option<u8>,
+    /// Font family, e.g. "Arial"; `None` is the workbook's default font.
+    pub font_name: Option<String>,
     /// Text color; `None` follows the theme.
     pub font_color: Option<Rgb>,
     /// Solid background fill.
@@ -143,6 +148,13 @@ impl CellFormat {
     pub fn font_size_or_default(&self) -> u8 {
         self.font_size.unwrap_or(DEFAULT_FONT_SIZE)
     }
+}
+
+/// A note (Excel's legacy comment) attached to a cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Note {
+    pub text: String,
+    pub author: Option<String>,
 }
 
 /// An AutoFilter: a header row plus the data below it. Rows whose value in a
@@ -175,6 +187,16 @@ pub struct SheetFormatting {
     /// Rows and columns kept on screen while scrolling: (rows, columns)
     pub frozen: (u32, u32),
     pub filter: Option<AutoFilter>,
+    /// Notes, by cell
+    pub notes: BTreeMap<CellCoord, Note>,
+    /// Data validation rules; where they overlap, the last one applies
+    pub validations: Vec<validation::DataValidation>,
+    /// Conditional formatting rules, highest priority first
+    pub conditional: Vec<conditional::ConditionalFormat>,
+    /// Pictures, back to front
+    pub pictures: Vec<picture::Picture>,
+    /// Pivot tables on this sheet
+    pub pivots: Vec<crate::pivot::PivotTable>,
 }
 
 impl SheetFormatting {
@@ -244,6 +266,14 @@ impl SheetFormatting {
             .into_iter()
             .filter_map(|(c, f)| Some((edit.map_coord(c)?, f)))
             .collect();
+        self.notes = std::mem::take(&mut self.notes)
+            .into_iter()
+            .filter_map(|(c, n)| Some((edit.map_coord(c)?, n)))
+            .collect();
+        validation::apply_line_edit(&mut self.validations, edit);
+        conditional::apply_line_edit(&mut self.conditional, edit);
+        picture::apply_line_edit(&mut self.pictures, edit);
+        crate::pivot::apply_line_edit(&mut self.pivots, edit);
         match edit.axis {
             Axis::Row => {
                 map_keys(&mut self.row_formats, edit);

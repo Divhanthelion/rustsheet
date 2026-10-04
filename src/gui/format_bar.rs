@@ -12,6 +12,8 @@ pub enum FormatAction {
     ToggleUnderline,
     ToggleStrikethrough,
     FontSize(Option<u8>),
+    /// `None` returns to the default font
+    FontName(Option<String>),
     FontColor(Option<Rgb>),
     Fill(Option<Rgb>),
     Align(HAlign),
@@ -75,14 +77,40 @@ fn color32(c: Rgb) -> Color32 {
     Color32::from_rgb(c.0, c.1, c.2)
 }
 
-/// Draw the toolbar for the active cell's format.
-pub fn show(ui: &mut Ui, current: &CellFormat) -> Option<FormatAction> {
+/// Draw the toolbar for the active cell's format. `fonts` lists installed
+/// font families (empty until they've been scanned).
+pub fn show(ui: &mut Ui, current: &CellFormat, fonts: &[String]) -> Option<FormatAction> {
     let mut action = None;
     let mut set = |a: FormatAction| action = Some(a);
     let button_size = Vec2::new(26.0, 22.0);
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
+
+        let name = current.font_name.as_deref().unwrap_or("Default font");
+        egui::ComboBox::from_id_salt("font_name")
+            .width(130.0)
+            .height(320.0)
+            .selected_text(name)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(current.font_name.is_none(), "Default font")
+                    .clicked()
+                {
+                    set(FormatAction::FontName(None));
+                }
+                if fonts.is_empty() {
+                    ui.label(RichText::new("Looking for installed fonts...").weak());
+                }
+                for f in fonts {
+                    let on = current.font_name.as_deref() == Some(f.as_str());
+                    if ui.selectable_label(on, f).clicked() {
+                        set(FormatAction::FontName(Some(f.clone())));
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Font");
 
         let size = current.font_size_or_default();
         egui::ComboBox::from_id_salt("font_size")

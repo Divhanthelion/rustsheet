@@ -40,6 +40,16 @@ pub(super) enum Command {
     FreezeFirstColumn,
     Unfreeze,
     InsertChart,
+    InsertPicture,
+    InsertPivot,
+    EditPivot,
+    RefreshPivot,
+    RefreshAllPivots,
+    EditNote,
+    DeleteNote,
+    DataValidation,
+    ConditionalFormatting,
+    OpenList,
     Format(FormatAction),
     Theme(ThemeChoice),
     Help,
@@ -58,9 +68,13 @@ impl From<ContextAction> for Command {
             ContextAction::Delete(axis) => Command::Delete(axis),
             ContextAction::Hide(axis) => Command::Hide(axis),
             ContextAction::Unhide(axis) => Command::Unhide(axis),
+            ContextAction::EditNote => Command::EditNote,
+            ContextAction::DeleteNote => Command::DeleteNote,
             ContextAction::SortAscending => Command::SortAscending,
             ContextAction::SortDescending => Command::SortDescending,
             ContextAction::ToggleFilter => Command::ToggleFilter,
+            ContextAction::RefreshPivot => Command::RefreshPivot,
+            ContextAction::EditPivot => Command::EditPivot,
         }
     }
 }
@@ -167,6 +181,9 @@ impl SpreadsheetApp {
                 item(ui, "Columns", "", Command::Insert(Axis::Column), &mut out);
                 ui.separator();
                 item(ui, "Chart...", "", Command::InsertChart, &mut out);
+                item(ui, "Picture...", "", Command::InsertPicture, &mut out);
+                item(ui, "PivotTable...", "", Command::InsertPivot, &mut out);
+                item(ui, "Note", "Shift+F2", Command::EditNote, &mut out);
             });
 
             ui.menu_button("Format", |ui| {
@@ -214,6 +231,14 @@ impl SpreadsheetApp {
                     &mut out,
                 );
                 ui.separator();
+                item(
+                    ui,
+                    "Conditional Formatting...",
+                    "",
+                    Command::ConditionalFormatting,
+                    &mut out,
+                );
+                ui.separator();
                 ui.menu_button("Rows", |ui| {
                     item(ui, "Hide", "Ctrl+9", Command::Hide(Axis::Row), &mut out);
                     item(
@@ -251,6 +276,33 @@ impl SpreadsheetApp {
                     .is_some_and(|f| f.filter.is_some());
                 let label = if on { "Remove Filter" } else { "Filter" };
                 item(ui, label, "Ctrl+Shift+L", Command::ToggleFilter, &mut out);
+                ui.separator();
+                item(
+                    ui,
+                    "Data Validation...",
+                    "",
+                    Command::DataValidation,
+                    &mut out,
+                );
+                ui.separator();
+                let in_pivot = self.pivot_at_active().is_some();
+                if in_pivot {
+                    item(ui, "PivotTable Fields...", "", Command::EditPivot, &mut out);
+                    item(
+                        ui,
+                        "Refresh PivotTable",
+                        "Alt+F5",
+                        Command::RefreshPivot,
+                        &mut out,
+                    );
+                }
+                item(
+                    ui,
+                    "Refresh All",
+                    "Ctrl+Alt+F5",
+                    Command::RefreshAllPivots,
+                    &mut out,
+                );
             });
 
             ui.menu_button("View", |ui| {
@@ -341,6 +393,18 @@ impl SpreadsheetApp {
         if take(cmd, Key::Z) {
             return Some(Command::Undo);
         }
+        if take(Modifiers::ALT, Key::ArrowDown) {
+            return Some(Command::OpenList);
+        }
+        if take(Modifiers::SHIFT, Key::F2) {
+            return Some(Command::EditNote);
+        }
+        if take(Modifiers::COMMAND | Modifiers::ALT, Key::F5) {
+            return Some(Command::RefreshAllPivots);
+        }
+        if take(Modifiers::ALT, Key::F5) {
+            return Some(Command::RefreshPivot);
+        }
         if take(cmd_shift, Key::L) {
             return Some(Command::ToggleFilter);
         }
@@ -411,7 +475,10 @@ impl SpreadsheetApp {
             Command::Cut => self.copy_selection(ctx, true),
             Command::Copy => self.copy_selection(ctx, false),
             Command::Paste => self.paste_from_system_clipboard(),
-            Command::ClearContents => self.delete_selection(),
+            Command::ClearContents => match self.selected_picture {
+                Some(i) => self.delete_picture(i),
+                None => self.delete_selection(),
+            },
             Command::SelectAll => self.select_all_or_region(),
             Command::Find => self.open_find(false),
             Command::Replace => self.open_find(true),
@@ -433,6 +500,22 @@ impl SpreadsheetApp {
             Command::FreezeFirstColumn => self.freeze(0, 1),
             Command::Unfreeze => self.freeze(0, 0),
             Command::InsertChart => self.open_new_chart_editor(),
+            Command::InsertPicture => self.insert_picture_from_file(),
+            Command::InsertPivot => self.open_pivot_dialog(false),
+            Command::EditPivot => self.open_pivot_dialog(true),
+            Command::RefreshPivot => self.refresh_pivot(),
+            Command::RefreshAllPivots => self.refresh_all_pivots(),
+            Command::EditNote => self.open_note_editor(),
+            Command::DeleteNote => self.delete_note(),
+            Command::DataValidation => self.open_validation_dialog(),
+            Command::ConditionalFormatting => self.open_conditional_dialog(),
+            Command::OpenList => {
+                let a = self.selection.active;
+                let c = &self.grid_config;
+                let pos = self.cell_screen_pos(a)
+                    + Vec2::new(-c.column_width(a.col), c.row_height(a.row));
+                self.open_list_popup(pos);
+            }
             Command::Format(action) => self.handle_format_action(action),
             Command::Theme(choice) => {
                 self.settings.theme = choice;
