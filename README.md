@@ -20,11 +20,17 @@
 
 - **100+ Excel functions** across math, statistics, text, logic, lookup and dates: `SUM`, `AVERAGE`, `IF`, `VLOOKUP`, `INDEX`/`MATCH`, `SUMIF`/`COUNTIF` with wildcards, `TEXT`, `ROUND`, and more. Press **F1** for the full list with examples.
 - **Live recalculation** with dependency tracking and cycle detection (`#CIRC!`).
-- **Multiple sheets** with cross-sheet references (`Sheet2!A1`, `SUM(Sheet2!A1:A10)`). Renaming a sheet rewrites the formulas that use it.
+- **Multiple sheets** with cross-sheet references (`Sheet2!A1`, `SUM(Sheet2!A1:A10)`). Double-click a tab to rename it; the formulas that use it follow.
 - **Formatting**: bold, italic, underline, strikethrough, font size and color, fills, borders, alignment, and Excel number formats (currency, percent, dates, times, fractions, custom codes like `#,##0.00_);[Red](#,##0.00)`). Resize columns and rows by dragging, or double-click a column border to fit it.
 - **Smart entry**: typing `12%`, `$1,234.50`, `2026-10-03` or `2:30 PM` stores a number and picks the matching format.
 - **Charts**: line, bar, scatter, area, pie and doughnut, saved into the workbook.
-- **Excel files**: read and write values, formulas, formatting, column widths, row heights and charts in `.xlsx`.
+- **PivotTables**: summarize a range by rows, columns and report filters with sum, count, average, min or max, subtotals and grand totals, and hide items you don't want. Refresh after the data changes (Alt+F5, or Ctrl+Alt+F5 for all). PivotTables made in Excel open ready to refresh.
+- **Conditional formatting**: highlight cells by value, text, rank, average, duplicates, blanks, errors or a formula, plus data bars and 2- and 3-color scales.
+- **Data validation**: whole numbers, decimals, dates, times, text length, custom formulas, or a list with an in-cell drop-down, with an input message and a stop, warning or information alert.
+- **Notes** on cells (Shift+F2), shown when you point at the red corner.
+- **Pictures**: insert PNG, JPEG, GIF or BMP files or paste a screenshot; move, resize, reorder and add alt text. They print and save with the workbook.
+- **Fonts**: any font installed on your PC, by name.
+- **Excel files**: read and write values, formulas, formatting, column widths, row heights, charts, conditional formatting, data validation, notes and pictures in `.xlsx`.
 - **CSV**: import and export, formulas included.
 - **Copy and paste** within RustSheet (formulas follow their new position, formats come along) and with Excel, Google Sheets or any app that copies tab-separated text. Cut and paste moves cells.
 - **Full-size sheets**: Excel's 1,048,576 rows by 16,384 columns, with scrollbars and Excel-style navigation (Ctrl+Arrow, Ctrl+End, Ctrl+A).
@@ -48,10 +54,12 @@
 
 | Format | Open | Save |
 |--------|------|------|
-| `.xlsx` | Workbook, formulas, formatting, charts | Workbook, formulas, formatting, charts |
+| `.xlsx` | Workbook, formulas, formatting, charts, pictures, PivotTables | Workbook, formulas, formatting, charts, pictures, PivotTables (see below) |
 | `.csv` | One sheet | Current sheet only |
 
-`.xls` and `.ods` are not supported. From `.xlsx`, RustSheet keeps fonts (bold, italic, underline, strikethrough, size, color), solid fills, borders (drawn as thin lines), alignment, wrapped text, number formats, row and column formats, column widths, row heights, hidden rows and columns, merged cells, frozen panes and AutoFilters. It does not keep font names, conditional formatting, data validation, comments, images or pivot tables.
+`.xls` and `.ods` are not supported. From `.xlsx`, RustSheet keeps fonts (name, bold, italic, underline, strikethrough, size, color), solid fills, borders (drawn as thin lines), alignment, wrapped text, number formats, row and column formats, column widths, row heights, hidden rows and columns, merged cells, frozen panes, AutoFilters, conditional formatting, data validation, notes and pictures. It skips icon sets, sparklines, shapes and text boxes.
+
+PivotTables are saved as their values and formats, plus a definition RustSheet uses to refresh them. Excel shows them as ordinary cells (rust_xlsxwriter, which writes the file, can't write Excel's PivotTable parts). PivotTables made in Excel open in RustSheet ready to refresh, with their rows, columns, values, filters and hidden items.
 
 ## Install
 
@@ -91,7 +99,10 @@ Needs the Windows 10/11 SDK. See [packaging/windows/STORE.md](packaging/windows/
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy / Cut / Paste |
 | Ctrl+F / Ctrl+H | Find / Replace |
 | Ctrl+D / Ctrl+R | Fill down / right |
-| Delete | Clear the selected cells |
+| Delete | Clear the selected cells, or delete the selected picture |
+| Shift+F2 | Add or edit a note |
+| Alt+Down | Open a cell's drop-down list |
+| Alt+F5 / Ctrl+Alt+F5 | Refresh a PivotTable / all PivotTables |
 | Ctrl+B / Ctrl+I / Ctrl+U | Bold / Italic / Underline |
 | F2 or type | Edit the active cell |
 | Enter / Tab | Move down / right (Shift goes back) |
@@ -109,7 +120,8 @@ Needs the Windows 10/11 SDK. See [packaging/windows/STORE.md](packaging/windows/
 |--------|------|
 | `cell/` | Coordinates, values, string interning |
 | `grid/` | Sparse sheet storage |
-| `format/` | Cell formats, number format codes, typed-input parsing |
+| `format/` | Cell formats, number format codes, typed-input parsing, conditional formats, validation, pictures |
+| `pivot` | PivotTable definitions and layout |
 | `formula/` | pest grammar and Pratt parser |
 | `calc/` | `CalcEngine`, function library, dependency graph |
 | `chart/` | Chart definitions, rendering, LTTB downsampling |

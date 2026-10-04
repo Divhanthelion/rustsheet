@@ -66,7 +66,9 @@ Alternatively, push a tag `vX.Y.Z` and download `RustSheet_<version>.msixbundle`
 >
 > Sort and filter your data, find and replace across sheets, and drag to fill a series of numbers, dates or months. Insert, delete, hide and freeze rows and columns, merge cells and wrap text. Print, or export a PDF to share.
 >
-> Open the .xlsx files you already have, edit them, and save them back with their formulas, formatting and charts intact. Import and export CSV as well. If RustSheet ever closes unexpectedly, your unsaved work is waiting when you open it again.
+> Summarize a list with a PivotTable: totals by region, by month, by anything, with filters, subtotals and grand totals, refreshed in one click when the data changes. Spot what matters with conditional formatting, from highlight rules to data bars and color scales. Keep entries tidy with drop-down lists and data validation, leave notes on cells, and drop in pictures or screenshots.
+>
+> Open the .xlsx files you already have, edit them, and save them back with their formulas, formatting, charts, notes, validation and pictures intact. PivotTables made in Excel open ready to refresh. Import and export CSV as well. If RustSheet ever closes unexpectedly, your unsaved work is waiting when you open it again.
 >
 > RustSheet has no account, no subscription, no ads and no telemetry. It never connects to the internet.
 >
@@ -79,43 +81,45 @@ Alternatively, push a tag `vX.Y.Z` and download `RustSheet_<version>.msixbundle`
 **Product features** (one per line, up to 20):
 
 - 100+ Excel-compatible functions with autocomplete and built-in help
-- Opens and saves Excel .xlsx files, including formulas, formatting and charts
-- Fonts, colors, fills, borders, alignment and number formats
-- Currency, percent, date and time entry that formats itself
-- Resizable columns and rows, with fit-to-contents
+- Opens and saves Excel .xlsx files with formulas, formatting, charts and pictures
+- PivotTables with filters, subtotals and one-click refresh
+- Conditional formatting: highlight rules, data bars and color scales
+- Data validation with drop-down lists
+- Cell notes and pictures
+- Fonts, colors, borders and number formats; typed dates and amounts format themselves
 - Copy and paste with Excel and other apps
 - Sort, filter, and find and replace
-- Insert, delete, hide and freeze rows and columns
+- Insert, delete, hide, resize and freeze rows and columns
 - Fill series by dragging (numbers, dates, months, weekdays)
 - Merged cells, wrapped text and full-size sheets
+- Line, bar, scatter, area, pie and doughnut charts
+- Multiple sheets with cross-sheet references
 - Print, or export to PDF
 - Autosave and crash recovery
 - CSV import and export
-- Line, bar, scatter, area, pie and doughnut charts
-- Multiple sheets with cross-sheet references
-- Instant recalculation with circular-reference detection
-- Undo and redo
-- Light and dark themes
-- Excel-style keyboard navigation and shortcuts
+- Instant recalculation, undo and redo
+- Light and dark themes and Excel-style shortcuts
 - No account, no ads, no telemetry; works fully offline
 
 **Search terms** (up to 7):
 
-`spreadsheet`, `xlsx`, `csv`, `excel alternative`, `formulas`, `charts`, `offline`
+`spreadsheet`, `xlsx`, `excel alternative`, `pivot table`, `formulas`, `charts`, `csv`
 
 **Screenshots** (1500x1000; the Store accepts 1 to 10 at 1366x768 or larger):
 
-1. [assets/screenshot.png](../../assets/screenshot.png): a formatted budget with a merged title, frozen header, filter buttons and a chart
+1. [assets/screenshot.png](../../assets/screenshot.png): a formatted budget with a merged title, data bars, a color scale, filter buttons and a chart
 2. [assets/screenshot-dark.png](../../assets/screenshot-dark.png): the same in dark mode
-3. [assets/screenshot-filter.png](../../assets/screenshot-filter.png): a sales list filtered to two regions
+3. [assets/screenshot-filter.png](../../assets/screenshot-filter.png): a sales list filtered to two regions, with highlights
+4. [assets/screenshot-pivot.png](../../assets/screenshot-pivot.png): a PivotTable of revenue by rep and region
 
 Regenerate them after building (`cargo build --release`):
 
 ```powershell
-cargo run --release --example demo_workbook -- target\demo.xlsx target\sales.xlsx
+cargo run --release --example demo_workbook -- target\demo.xlsx target\sales.xlsx target\pivot.xlsx
 .\packaging\windows\screenshot.ps1
 .\packaging\windows\screenshot.ps1 -Theme Dark -Out assets\screenshot-dark.png
 .\packaging\windows\screenshot.ps1 -Workbook target\sales.xlsx -Out assets\screenshot-filter.png
+.\packaging\windows\screenshot.ps1 -Workbook target\pivot.xlsx -Out assets\screenshot-pivot.png
 ```
 
 **Store logos:** use [assets/icon-1024.png](../../assets/icon-1024.png) for the 1:1 box art and app tile icon (the Store asks for 300x300 or larger; it downscales).

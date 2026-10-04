@@ -1,9 +1,18 @@
 //! Reading a pivot table's source data from its sheet.
 
-use super::engine::{CalcEngine, CellResult};
-use crate::cell::{CellCoord, LineEdit};
-use crate::format::display_text;
-use crate::pivot::{Item, PivotTable};
+use super::engine::{CalcEngine, CellResult, CellValueInput};
+use crate::cell::{CellCoord, CellRange, LineEdit, MAX_COL, MAX_ROW};
+use crate::format::{CellFormat, Rgb, display_text, format_general, format_number};
+use crate::pivot::{self, Aggregate, Item, PivotCell, PivotTable, RowKind};
+
+/// Fill for header and grand total rows
+const HEADER_FILL: Rgb = Rgb(0xDD, 0xEB, 0xF7);
+/// The grid's default column width, in points
+const DEFAULT_WIDTH: f32 = 80.0;
+
+fn inside(r: CellRange, c: CellCoord) -> bool {
+    (r.start.row..=r.end.row).contains(&c.row) && (r.start.col..=r.end.col).contains(&c.col)
+}
 
 /// A pivot table's source: field names, records (the rows under the field
 /// names, without blank rows) and each field's number format.
@@ -71,6 +80,146 @@ impl CalcEngine {
             records,
             formats,
         })
+    }
+
+    /// Lay out pivot table `index` on `sheet` and write its cells as values
+    /// with formats, replacing what it wrote before. Nothing changes if it
+    /// fails: the source is gone, or other data is in the way.
+    pub fn refresh_pivot(&mut self, sheet: u32, index: usize) -> Result<(), String> {
+        let table = self
+            .formatting(sheet)
+            .and_then(|f| f.pivots.get(index))
+            .cloned()
+            .ok_or("That PivotTable is gone.")?;
+        let src = self.pivot_source(&table)?;
+        let out = pivot::compute(&table, &src.headers, &src.records);
+        let (h, w) = (out.cells.len() as u32, out.width() as u32);
+        let a = table.anchor;
+        if h == 0 || w == 0 {
+            return Err("The PivotTable is empty.".into());
+        }
+        if a.row as u64 + h as u64 > MAX_ROW as u64 + 1
+            || a.col as u64 + w as u64 > MAX_COL as u64 + 1
+        {
+            return Err("The PivotTable doesn't fit on the sheet there.".into());
+        }
+        let area = CellRange::new(a, CellCoord::new(a.row + h - 1, a.col + w - 1));
+        let ours = |c: CellCoord| table.output.is_some_and(|o| inside(o, c));
+        if self
+            .iter_sheet_inputs(sheet)
+            .any(|(c, _)| inside(area, c) && !ours(c))
+        {
+            return Err(
+                "There's data where the PivotTable would go. Move it, or put the PivotTable somewhere else."
+                    .into(),
+            );
+        }
+        if let Some(old) = table.output {
+            self.clear_area(sheet, old);
+        }
+
+        let mut widths = vec![0usize; w as usize];
+        for (r, row) in out.cells.iter().enumerate() {
+            let kind = out.kinds[r];
+            for (c, cell) in row.iter().enumerate() {
+                let coord = CellCoord::new(a.row + r as u32, a.col + c as u32);
+                // Values keep their source's number format; counts don't.
+                let number_format = out.value_columns[c]
+                    .map(|v| table.values[v])
+                    .filter(|v| v.aggregate != Aggregate::Count)
+                    .and_then(|v| src.formats.get(v.field).cloned().flatten());
+                let mut format = CellFormat::default();
+                match kind {
+                    RowKind::Header => {
+                        format.bold = true;
+                        format.fill = Some(HEADER_FILL);
+                        format.borders.bottom =
+                            r + 1 < out.kinds.len() && out.kinds[r + 1] != RowKind::Header;
+                    }
+                    RowKind::Filter => format.bold = c == 0,
+                    RowKind::Subtotal => format.bold = true,
+                    RowKind::GrandTotal => {
+                        format.bold = true;
+                        format.fill = Some(HEADER_FILL);
+                        format.borders.top = true;
+                    }
+                    RowKind::Data => {}
+                }
+                let shown = match cell {
+                    PivotCell::Empty => String::new(),
+                    PivotCell::Text(t) => {
+                        self.set_value(sheet, coord, CellValueInput::Text(t.clone()));
+                        t.clone()
+                    }
+                    PivotCell::Number(n) => {
+                        self.set_value(sheet, coord, CellValueInput::Number(*n));
+                        format.number_format = number_format.clone();
+                        match &number_format {
+                            Some(code) => format_number(*n, code).text,
+                            None => format_general(*n, 11),
+                        }
+                    }
+                };
+                widths[c] = widths[c].max(shown.chars().count());
+                if !format.is_default() {
+                    self.set_cell_format(sheet, coord, format);
+                }
+            }
+        }
+
+        // Widen columns to fit, as Excel does on refresh.
+        let f = self.formatting_mut(sheet);
+        for (c, chars) in widths.into_iter().enumerate() {
+            let col = a.col + c as u32;
+            let fit = (chars as f32 * 7.5 + 16.0).min(360.0);
+            if fit > f.column_widths.get(&col).copied().unwrap_or(DEFAULT_WIDTH) {
+                f.column_widths.insert(col, fit);
+            }
+        }
+        if let Some(t) = f.pivots.get_mut(index) {
+            t.output = Some(area);
+        }
+        Ok(())
+    }
+
+    /// Remove pivot table `index` on `sheet` and the cells it wrote.
+    pub fn delete_pivot(&mut self, sheet: u32, index: usize) -> bool {
+        let Some(table) = self
+            .formatting(sheet)
+            .and_then(|f| f.pivots.get(index))
+            .cloned()
+        else {
+            return false;
+        };
+        if let Some(out) = table.output {
+            self.clear_area(sheet, out);
+        }
+        self.formatting_mut(sheet).pivots.remove(index);
+        true
+    }
+
+    /// Clear the values and formats in `area`.
+    fn clear_area(&mut self, sheet: u32, area: CellRange) {
+        let cells: Vec<CellCoord> = self
+            .iter_sheet_inputs(sheet)
+            .map(|(c, _)| c)
+            .filter(|c| inside(area, *c))
+            .collect();
+        for c in cells {
+            self.clear(sheet, c);
+        }
+        let formatted: Vec<CellCoord> = self
+            .formatting(sheet)
+            .map(|f| {
+                f.cells()
+                    .map(|(c, _)| c)
+                    .filter(|c| inside(area, *c))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for c in formatted {
+            self.set_cell_format(sheet, c, CellFormat::default());
+        }
     }
 
     /// Pivot tables whose source is on `sheet` follow its inserted and
@@ -154,6 +303,34 @@ mod tests {
             e.formatting(1).unwrap().pivots[0].source_sheet,
             "Sales data"
         );
+
+        // Writing it: values and formats, then a refresh replaces them.
+        let mut e2 = CalcEngine::new();
+        e2.set_value(0, at("A1"), CellValueInput::Text("Region".into()));
+        e2.set_value(0, at("B1"), CellValueInput::Text("Sales".into()));
+        e2.set_value(0, at("A2"), CellValueInput::Text("North".into()));
+        e2.set_value(0, at("B2"), CellValueInput::Number(5.0));
+        let mut t = PivotTable::new(
+            "P".into(),
+            "Sheet1".into(),
+            CellRange::from_a1("A1:B2").unwrap(),
+            at("D1"),
+        );
+        t.rows = vec![0];
+        t.values = vec![crate::pivot::PivotValue {
+            field: 1,
+            aggregate: Aggregate::Sum,
+        }];
+        e2.formatting_mut(0).pivots.push(t);
+        e2.refresh_pivot(0, 0).unwrap();
+        assert_eq!(e2.get_value(0, at("E2")), CellResult::Value(5.0));
+        assert!(e2.cell_format(0, at("D1")).is_some_and(|f| f.bold));
+        e2.set_value(0, at("B2"), CellValueInput::Number(9.0));
+        e2.refresh_pivot(0, 0).unwrap();
+        assert_eq!(e2.get_value(0, at("E3")), CellResult::Value(9.0));
+        assert!(e2.delete_pivot(0, 0));
+        assert_eq!(e2.get_value(0, at("D1")), CellResult::Empty);
+        assert!(e2.cell_format(0, at("D1")).is_none());
 
         let missing = PivotTable::new(
             "P".into(),

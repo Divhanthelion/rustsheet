@@ -305,8 +305,8 @@ fn picture_menu(ui: &mut Ui, index: usize, out: &mut Option<(usize, PictureActio
     }
 }
 
-/// A conditional-format data bar: `fraction` of the cell, fading into the
-/// background to the right like Excel's gradient bars.
+/// A conditional-format data bar: `fraction` of the cell, in a solid tint
+/// of its color so the bar's end is plain and the number stays readable.
 fn draw_data_bar(painter: &egui::Painter, cell: Rect, fraction: f64, color: Rgb, bg: Color32) {
     let inner = cell.shrink2(Vec2::new(2.0, 2.0));
     let bar = Rect::from_min_size(
@@ -314,16 +314,8 @@ fn draw_data_bar(painter: &egui::Painter, cell: Rect, fraction: f64, color: Rgb,
         Vec2::new(inner.width() * fraction as f32, inner.height()),
     );
     let bg = Rgb(bg.r(), bg.g(), bg.b());
-    let solid = to_color32(crate::format::conditional::mix(color, bg, 0.15));
-    let faded = to_color32(crate::format::conditional::mix(color, bg, 0.85));
-    let mut mesh = egui::Mesh::default();
-    mesh.colored_vertex(bar.left_top(), solid);
-    mesh.colored_vertex(bar.right_top(), faded);
-    mesh.colored_vertex(bar.right_bottom(), faded);
-    mesh.colored_vertex(bar.left_bottom(), solid);
-    mesh.add_triangle(0, 1, 2);
-    mesh.add_triangle(0, 2, 3);
-    painter.add(mesh);
+    let tint = to_color32(crate::format::conditional::mix(color, bg, 0.35));
+    painter.rect_filled(bar, 1.0, tint);
 }
 
 /// The font a cell draws with, and whether bold or italic must be faked

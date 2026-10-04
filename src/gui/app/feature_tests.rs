@@ -833,3 +833,18 @@ fn sheet_names_follow_excel_rules() {
         assert_eq!(app.sheet_names[1], "Q1 sales", "{bad:?} is refused");
     }
 }
+
+#[test]
+fn pasted_images_become_pictures() {
+    let mut app = app();
+    app.last_viewport = Vec2::new(1000.0, 800.0);
+    select(&mut app, "C2", "C2");
+    app.paste_image(arboard::ImageData {
+        width: 4,
+        height: 2,
+        bytes: std::borrow::Cow::Owned(vec![200; 4 * 2 * 4]),
+    });
+    let p = &app.sheet_pictures()[0];
+    assert_eq!(p.kind, crate::format::picture::PictureKind::Png);
+    assert_eq!((p.anchor, p.size), (at("C2"), (5.0, 2.5)));
+}

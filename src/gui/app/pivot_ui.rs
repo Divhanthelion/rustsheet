@@ -2,8 +2,7 @@
 //! and refreshing.
 
 use super::*;
-use crate::format::Rgb;
-use crate::pivot::{self, Aggregate, PivotCell, PivotTable, PivotValue, RowKind};
+use crate::pivot::{self, Aggregate, PivotTable, PivotValue};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Area {
@@ -19,8 +18,6 @@ const AREAS: [(Area, &str); 4] = [
     (Area::Rows, "Rows"),
     (Area::Values, "Values"),
 ];
-
-const HEADER_FILL: Rgb = Rgb(0xDD, 0xEB, 0xF7);
 
 pub(super) struct PivotDialog {
     /// The table being changed, as (sheet, index); `None` for a new one
@@ -221,140 +218,6 @@ impl SpreadsheetApp {
         });
     }
 
-    /// Lay out pivot table `index` on `sheet` and write its cells, replacing
-    /// what it wrote before. Nothing changes if it fails.
-    pub(super) fn write_pivot(&mut self, sheet: u32, index: usize) -> Result<(), String> {
-        let table = self
-            .engine
-            .formatting(sheet)
-            .and_then(|f| f.pivots.get(index))
-            .cloned()
-            .ok_or("That PivotTable is gone.")?;
-        let src = self.engine.pivot_source(&table)?;
-        let out = pivot::compute(&table, &src.headers, &src.records);
-        let (h, w) = (out.cells.len() as u32, out.width() as u32);
-        let a = table.anchor;
-        if h == 0 || w == 0 {
-            return Err("The PivotTable is empty.".into());
-        }
-        if a.row as u64 + h as u64 > crate::cell::MAX_ROW as u64 + 1
-            || a.col as u64 + w as u64 > crate::cell::MAX_COL as u64 + 1
-        {
-            return Err("The PivotTable doesn't fit on the sheet there.".into());
-        }
-        let area = CellRange::new(a, CellCoord::new(a.row + h - 1, a.col + w - 1));
-        let inside = |r: CellRange, c: CellCoord| {
-            (r.start.row..=r.end.row).contains(&c.row) && (r.start.col..=r.end.col).contains(&c.col)
-        };
-        let ours = |c: CellCoord| table.output.is_some_and(|o| inside(o, c));
-        if self
-            .engine
-            .iter_sheet_inputs(sheet)
-            .any(|(c, _)| inside(area, c) && !ours(c))
-        {
-            return Err(
-                "There's data where the PivotTable would go. Move it, or put the PivotTable somewhere else."
-                    .into(),
-            );
-        }
-
-        // Clear the old table's cells and formats.
-        if let Some(old) = table.output {
-            let cells: Vec<CellCoord> = self
-                .engine
-                .iter_sheet_inputs(sheet)
-                .map(|(c, _)| c)
-                .filter(|c| inside(old, *c))
-                .collect();
-            for c in cells {
-                self.engine.clear(sheet, c);
-            }
-            let formatted: Vec<CellCoord> = self
-                .engine
-                .formatting(sheet)
-                .map(|f| {
-                    f.cells()
-                        .map(|(c, _)| c)
-                        .filter(|c| inside(old, *c))
-                        .collect()
-                })
-                .unwrap_or_default();
-            for c in formatted {
-                self.engine.set_cell_format(sheet, c, CellFormat::default());
-            }
-        }
-
-        // Write the new one.
-        let mut widths = vec![0usize; w as usize];
-        for (r, row) in out.cells.iter().enumerate() {
-            let kind = out.kinds[r];
-            for (c, cell) in row.iter().enumerate() {
-                let coord = CellCoord::new(a.row + r as u32, a.col + c as u32);
-                let number_format = out.value_columns[c]
-                    .map(|v| table.values[v])
-                    .filter(|v| v.aggregate != Aggregate::Count)
-                    .and_then(|v| src.formats.get(v.field).cloned().flatten());
-                let mut format = CellFormat::default();
-                match kind {
-                    RowKind::Header => {
-                        format.bold = true;
-                        format.fill = Some(HEADER_FILL);
-                        format.borders.bottom =
-                            r + 1 < out.kinds.len() && out.kinds[r + 1] != RowKind::Header;
-                    }
-                    RowKind::Filter => format.bold = c == 0,
-                    RowKind::Subtotal => format.bold = true,
-                    RowKind::GrandTotal => {
-                        format.bold = true;
-                        format.fill = Some(HEADER_FILL);
-                        format.borders.top = true;
-                    }
-                    RowKind::Data => {}
-                }
-                let shown = match cell {
-                    PivotCell::Empty => String::new(),
-                    PivotCell::Text(t) => {
-                        self.engine
-                            .set_value(sheet, coord, CellValueInput::Text(t.clone()));
-                        t.clone()
-                    }
-                    PivotCell::Number(n) => {
-                        self.engine
-                            .set_value(sheet, coord, CellValueInput::Number(*n));
-                        format.number_format = number_format.clone();
-                        match &number_format {
-                            Some(code) => format_number(*n, code).text,
-                            None => format_general(*n, 11),
-                        }
-                    }
-                };
-                widths[c] = widths[c].max(shown.chars().count());
-                if !format.is_default() {
-                    self.engine.set_cell_format(sheet, coord, format);
-                }
-            }
-        }
-
-        // Widen columns to fit, as Excel does on refresh.
-        let f = self.engine.formatting_mut(sheet);
-        for (c, chars) in widths.into_iter().enumerate() {
-            let col = a.col + c as u32;
-            let fit = (chars as f32 * 7.5 + 16.0).min(360.0);
-            let current = f
-                .column_widths
-                .get(&col)
-                .copied()
-                .unwrap_or(DEFAULT_COLUMN_WIDTH);
-            if fit > current {
-                f.column_widths.insert(col, fit);
-            }
-        }
-        if let Some(t) = f.pivots.get_mut(index) {
-            t.output = Some(area);
-        }
-        Ok(())
-    }
-
     /// Refresh the pivot table at the active cell.
     pub(super) fn refresh_pivot(&mut self) {
         match self.pivot_at_active() {
@@ -382,7 +245,7 @@ impl SpreadsheetApp {
         self.with_snapshot(|app| {
             let mut any = false;
             for &(sheet, i) in list {
-                match app.write_pivot(sheet, i) {
+                match app.engine.refresh_pivot(sheet, i) {
                     Ok(()) => any = true,
                     Err(e) => errors.push(e),
                 }
@@ -398,41 +261,7 @@ impl SpreadsheetApp {
 
     /// Remove a pivot table and its cells.
     pub(super) fn delete_pivot(&mut self, sheet: u32, index: usize) {
-        self.with_snapshot(|app| {
-            let Some(table) = app
-                .engine
-                .formatting(sheet)
-                .and_then(|f| f.pivots.get(index))
-                .cloned()
-            else {
-                return false;
-            };
-            if let Some(out) = table.output {
-                let inside = |c: &CellCoord| {
-                    (out.start.row..=out.end.row).contains(&c.row)
-                        && (out.start.col..=out.end.col).contains(&c.col)
-                };
-                let cells: Vec<CellCoord> = app
-                    .engine
-                    .iter_sheet_inputs(sheet)
-                    .map(|(c, _)| c)
-                    .filter(inside)
-                    .collect();
-                for c in cells {
-                    app.engine.clear(sheet, c);
-                }
-                let formatted: Vec<CellCoord> = app
-                    .engine
-                    .formatting(sheet)
-                    .map(|f| f.cells().map(|(c, _)| c).filter(inside).collect())
-                    .unwrap_or_default();
-                for c in formatted {
-                    app.engine.set_cell_format(sheet, c, CellFormat::default());
-                }
-            }
-            app.engine.formatting_mut(sheet).pivots.remove(index);
-            true
-        });
+        self.with_snapshot(|app| app.engine.delete_pivot(sheet, index));
         self.set_status("Deleted the PivotTable");
     }
 
@@ -491,7 +320,7 @@ impl SpreadsheetApp {
                     (list.len() - 1, None)
                 }
             };
-            result = app.write_pivot(sheet, i);
+            result = app.engine.refresh_pivot(sheet, i);
             if result.is_err() {
                 let list = &mut app.engine.formatting_mut(sheet).pivots;
                 match old {

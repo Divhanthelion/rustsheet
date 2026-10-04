@@ -681,15 +681,9 @@ fn rule_sample(ui: &mut Ui, rule: &CfRule) {
         CfRule::DataBar { color, .. } => {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(90.0, 18.0), Sense::hover());
             let bar = Rect::from_min_size(rect.min, Vec2::new(rect.width() * 0.7, rect.height()));
-            let mut mesh = egui::Mesh::default();
-            let faded = color32(mix(*color, Rgb::WHITE, 0.85));
-            mesh.colored_vertex(bar.left_top(), color32(*color));
-            mesh.colored_vertex(bar.right_top(), faded);
-            mesh.colored_vertex(bar.right_bottom(), faded);
-            mesh.colored_vertex(bar.left_bottom(), color32(*color));
-            mesh.add_triangle(0, 1, 2);
-            mesh.add_triangle(0, 2, 3);
-            ui.painter().add(mesh);
+            let bg = ui.visuals().extreme_bg_color;
+            let tint = mix(*color, Rgb(bg.r(), bg.g(), bg.b()), 0.35);
+            ui.painter().rect_filled(bar, 1.0, color32(tint));
         }
         _ => {
             if let Some(style) = rule.style() {
