@@ -487,4 +487,74 @@ mod tests {
             Some("yyyy-mm-dd")
         );
     }
+
+    #[test]
+    fn layout_roundtrip_through_xlsx() {
+        use crate::cell::{Axis, CellRange};
+        use crate::format::{AutoFilter, CellFormat, VAlign};
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let mut engine = CalcEngine::new();
+        let r = |a1: &str| CellRange::from_a1(a1).unwrap();
+        for (a1, v) in [
+            ("A1", "Fruit"),
+            ("A2", "Tea"),
+            ("A3", "Cake"),
+            ("A4", "Tea"),
+        ] {
+            engine.set_value(
+                0,
+                CellCoord::from_a1(a1).unwrap(),
+                CellValueInput::Text(v.into()),
+            );
+        }
+        let bold = CellFormat {
+            bold: true,
+            ..Default::default()
+        };
+        let wrapped = CellFormat {
+            wrap: true,
+            v_align: VAlign::Top,
+            ..Default::default()
+        };
+        {
+            let f = engine.formatting_mut(0);
+            f.set_line_format(Axis::Column, 3, bold.clone());
+            f.set_line_format(Axis::Column, 4, bold.clone());
+            f.set_line_format(Axis::Row, 7, wrapped.clone());
+            f.merges.push(r("C10:E11"));
+            f.frozen = (1, 1);
+            f.hidden_columns.insert(6);
+            f.hidden_rows.insert(2);
+            let mut allowed = BTreeMap::new();
+            allowed.insert(0, BTreeSet::from(["Tea".to_string()]));
+            f.filter = Some(AutoFilter {
+                range: r("A1:A4"),
+                allowed,
+            });
+        }
+        engine.set_cell_format(0, CellCoord::from_a1("B2").unwrap(), wrapped.clone());
+
+        let path = temp_xlsx("layout");
+        let mut writer = XlsxWriter::new();
+        writer.add_engine_sheet("Sheet1", &engine, 0).unwrap();
+        writer.save(&path).unwrap();
+        let read = super::read_formatting_from_path(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let f = &read[0].1;
+
+        assert_eq!(f.column_formats.get(&3), Some(&bold));
+        assert_eq!(f.column_formats.get(&4), Some(&bold));
+        assert_eq!(f.row_formats.get(&7), Some(&wrapped));
+        assert_eq!(f.get(CellCoord::from_a1("B2").unwrap()), Some(&wrapped));
+        // Cells in a formatted column show (and save) that format.
+        assert_eq!(f.effective(CellCoord::from_a1("D2").unwrap()), Some(&bold));
+        assert_eq!(f.merges, vec![r("C10:E11")]);
+        assert_eq!(f.frozen, (1, 1));
+        assert!(f.hidden_columns.contains(&6));
+        assert!(f.hidden_rows.contains(&2));
+        let filter = f.filter.as_ref().unwrap();
+        assert_eq!(filter.range, r("A1:A4"));
+        assert!(filter.allowed[&0].contains("Tea"));
+    }
 }

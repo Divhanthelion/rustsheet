@@ -11,18 +11,35 @@ use super::chart_widget::ChartWindowManager;
 use super::format_bar::{self, BorderPreset, FormatAction};
 use super::formula_bar::FormulaBar;
 use super::grid::{
-    ContextAction, DEFAULT_COLUMN_WIDTH, DEFAULT_ROW_HEIGHT, GridConfig, HEADER_HEIGHT,
-    HEADER_WIDTH, NavigationKey, ResizeAxis, ScrollState, SpreadsheetGrid, display_text,
-    fit_column_width,
+    DEFAULT_COLUMN_WIDTH, DEFAULT_ROW_HEIGHT, GridConfig, HEADER_HEIGHT, HEADER_WIDTH,
+    NavigationKey, ResizeAxis, ScrollState, SpreadsheetGrid, display_text, fit_column_width,
 };
 use super::help_panel::HelpPanel;
 use super::selection::Selection;
 use super::sheet_tabs::SheetTabs;
 use super::theme::Theme;
+
+mod commands;
+#[cfg(test)]
+mod feature_tests;
+mod fill;
+mod find;
+mod printing;
+mod recovery;
+mod sheet_ops;
+
+use super::grid::fit_row_height;
+use super::settings::{Settings, ThemeChoice};
 use crate::format::{
     Borders, CellFormat, format_general, format_number, is_date_format, parse_typed_number,
 };
 use crate::formula::FormulaParser;
+use commands::Command;
+use eframe::egui::RichText;
+use find::FindDialog;
+use printing::PrintDialog;
+use recovery::{Recoverable, Recovery};
+use sheet_ops::{FilterPopup, SortDialog, WorkbookState};
 use std::collections::{HashMap, HashSet};
 
 /// Modifier key name shown in menu shortcut hints.
@@ -90,6 +107,14 @@ enum UndoAction {
     },
     /// Several actions undone and redone together
     Group(Vec<UndoAction>),
+    /// Whole-row/column formats: (index, old, new)
+    LineFormat {
+        sheet: u32,
+        axis: ResizeAxis,
+        changes: Vec<(u32, Option<CellFormat>, Option<CellFormat>)>,
+    },
+    /// The whole workbook before and after a structural edit
+    Snapshot(Box<(WorkbookState, WorkbookState)>),
 }
 
 /// Cells copied or cut inside RustSheet. When the system clipboard still
@@ -249,10 +274,34 @@ pub struct SpreadsheetApp {
     input_mode: InputMode,
     /// Edit buffer for inline cell editing
     edit_buffer: String,
-    /// Maximum row index with data
-    max_row: u32,
-    /// Maximum column index with data
-    max_col: u32,
+    /// Where a header click started, for Shift-click and drag
+    header_anchor: Option<(ResizeAxis, u32)>,
+    /// AutoFilter menu, when open
+    filter_popup: Option<FilterPopup>,
+    /// Data > Sort dialog, when open
+    sort_dialog: Option<SortDialog>,
+    /// Find and Replace, when open
+    find_dialog: Option<FindDialog>,
+    /// Export/Print options, when open
+    print_dialog: Option<PrintDialog>,
+    /// Page setup from the last export or print
+    last_page_setup: super::print::PageSetup,
+    /// Where the fill handle is being dragged
+    fill_target: Option<CellCoord>,
+    /// Size of the grid's area in the last frame
+    last_viewport: Vec2,
+    /// Theme and recent files
+    settings: Settings,
+    /// Which theme is applied (true = dark)
+    dark_mode: Option<bool>,
+    /// This session's autosave
+    recovery: Option<Recovery>,
+    /// Autosaves left by sessions that crashed
+    recoverable: Vec<Recoverable>,
+    /// Save As suggests this name (after recovering an unsaved file)
+    suggested_name: Option<String>,
+    /// The file recovered work came from
+    recovered_from: Option<PathBuf>,
     /// Current file path (if saved)
     current_file: Option<PathBuf>,
     /// Whether the document has unsaved changes
@@ -307,8 +356,20 @@ impl SpreadsheetApp {
             theme: Theme::light(),
             input_mode: InputMode::Navigation,
             edit_buffer: String::new(),
-            max_row: 999,
-            max_col: 25,
+            header_anchor: None,
+            filter_popup: None,
+            sort_dialog: None,
+            find_dialog: None,
+            print_dialog: None,
+            last_page_setup: Default::default(),
+            fill_target: None,
+            last_viewport: Vec2::new(1200.0, 800.0),
+            settings: Settings::in_memory(),
+            dark_mode: None,
+            recovery: None,
+            recoverable: Vec::new(),
+            suggested_name: None,
+            recovered_from: None,
             current_file: None,
             modified: false,
             window_title: String::new(),
@@ -424,8 +485,7 @@ impl SpreadsheetApp {
         // Dates and percents edit as typed (2026-10-03, 12%), not as raw numbers.
         if let (CellResult::Value(n), Some(code)) = (
             self.engine.get_value(self.current_sheet, coord),
-            self.engine
-                .cell_format(self.current_sheet, coord)
+            self.effective_format(self.current_sheet, coord)
                 .and_then(|f| f.number_format.as_deref()),
         ) {
             if is_date_format(code) {
@@ -513,12 +573,11 @@ impl SpreadsheetApp {
 
         // Typing 12% or a date into an unformatted cell gives it that format.
         let old_format = self.engine.cell_format(sheet, coord).cloned();
+        let shown = self.effective_format(sheet, coord).cloned();
         let typed_format = match parse_typed_number(content) {
             Some((_, Some(code)))
                 if !content.starts_with('=')
-                    && old_format
-                        .as_ref()
-                        .is_none_or(|f| f.number_format.is_none()) =>
+                    && shown.as_ref().is_none_or(|f| f.number_format.is_none()) =>
             {
                 Some(code)
             }
@@ -526,7 +585,7 @@ impl SpreadsheetApp {
         };
         match typed_format {
             Some(code) => {
-                let mut new_format = old_format.clone().unwrap_or_default();
+                let mut new_format = shown.unwrap_or_default();
                 new_format.number_format = Some(code.to_string());
                 self.engine
                     .set_cell_format(sheet, coord, new_format.clone());
@@ -554,8 +613,7 @@ impl SpreadsheetApp {
             // Text-formatted (@) cells keep what was typed as text.
             Some(s)
                 if self
-                    .engine
-                    .cell_format(sheet, coord)
+                    .effective_format(sheet, coord)
                     .is_some_and(|f| f.number_format.as_deref() == Some("@")) =>
             {
                 self.engine
@@ -643,6 +701,25 @@ impl SpreadsheetApp {
                 let size = if forward { *new } else { *old };
                 self.set_size(*sheet, *axis, *index, size);
             }
+            UndoAction::LineFormat {
+                sheet,
+                axis,
+                changes,
+            } => {
+                for (index, old, new) in changes {
+                    let format = if forward { new } else { old };
+                    self.engine.formatting_mut(*sheet).set_line_format(
+                        *axis,
+                        *index,
+                        format.clone().unwrap_or_default(),
+                    );
+                }
+                self.modified = true;
+            }
+            UndoAction::Snapshot(states) => {
+                let state = if forward { &states.1 } else { &states.0 };
+                self.restore_workbook_state(state);
+            }
             UndoAction::Group(actions) => {
                 if forward {
                     for a in actions {
@@ -676,14 +753,14 @@ impl SpreadsheetApp {
     /// clipboard as tab-separated text; formulas and formats stay here.
     fn copy_selection(&mut self, ctx: &egui::Context, cut: bool) {
         let sheet = self.current_sheet;
-        let range = self.selection.primary_range();
+        let range = self.clamp_to_used_or_self(self.selection.primary_range());
         let mut cells = HashMap::new();
         let mut lines = Vec::new();
         for row in range.start.row..=range.end.row {
             let mut fields = Vec::new();
             for col in range.start.col..=range.end.col {
                 let coord = CellCoord::new(row, col);
-                let format = self.engine.cell_format(sheet, coord).cloned();
+                let format = self.effective_format(sheet, coord).cloned();
                 let value = self.engine.get_value(sheet, coord);
                 fields.push(tsv_field(&display_text(&value, format.as_ref())));
                 let content = self.cell_content_string(sheet, coord);
@@ -738,7 +815,7 @@ impl SpreadsheetApp {
     /// Top-left corners to paste a `rows` x `cols` block at. A single cell
     /// fills the whole selection, as in Excel.
     fn paste_targets(&self, rows: u32, cols: u32) -> Vec<CellCoord> {
-        let range = self.selection.primary_range();
+        let range = self.clamp_to_used_or_self(self.selection.primary_range());
         if rows == 1 && cols == 1 {
             (range.start.row..=range.end.row)
                 .flat_map(|r| (range.start.col..=range.end.col).map(move |c| CellCoord::new(r, c)))
@@ -956,9 +1033,7 @@ impl SpreadsheetApp {
     /// Ctrl+C / X / V arrive as egui events. Text fields (formula bar,
     /// dialogs) handle their own, so act only when the grid or nothing has focus.
     fn handle_clipboard_events(&mut self, ctx: &egui::Context) {
-        let grid_id = egui::Id::new("spreadsheet_grid");
-        let grid_has_keys = ctx.memory(|m| m.focused()).is_none_or(|id| id == grid_id);
-        if self.is_editing() || !grid_has_keys {
+        if self.is_editing() || text_field_focused(ctx) {
             return;
         }
         let events: Vec<egui::Event> = ctx.input(|i| {
@@ -983,36 +1058,85 @@ impl SpreadsheetApp {
         }
     }
 
-    fn handle_context_action(&mut self, ctx: &egui::Context, action: ContextAction) {
-        match action {
-            ContextAction::Cut => self.copy_selection(ctx, true),
-            ContextAction::Copy => self.copy_selection(ctx, false),
-            ContextAction::Paste => self.paste_from_system_clipboard(),
-            ContextAction::ClearContents => self.delete_selection(),
-            ContextAction::ClearFormatting => self.handle_format_action(FormatAction::Clear),
-        }
-    }
-
     // ------------------------------------------------------------------
     // Formatting
     // ------------------------------------------------------------------
 
+    /// The format a cell shows: its own, else its row's, else its column's.
+    fn effective_format(&self, sheet: u32, coord: CellCoord) -> Option<&CellFormat> {
+        self.engine.formatting(sheet)?.effective(coord)
+    }
+
     fn active_format(&self) -> CellFormat {
-        self.engine
-            .cell_format(self.current_sheet, self.selection.active)
+        self.effective_format(self.current_sheet, self.selection.active)
             .cloned()
             .unwrap_or_default()
     }
 
     /// Change every selected cell's format as one undo step. `change` gets
-    /// each cell's position and the selection's bounds.
+    /// each cell's position and the selection's bounds. Whole rows or
+    /// columns get row/column formats instead of a million cell formats.
     fn apply_format(&mut self, change: impl Fn(CellCoord, CellRange, &mut CellFormat)) {
         let sheet = self.current_sheet;
         let range = self.selection.primary_range();
+        let whole_cols = range.start.row == 0 && range.end.row == crate::cell::MAX_ROW;
+        let whole_rows = range.start.col == 0 && range.end.col == crate::cell::MAX_COL;
+        let mut actions = Vec::new();
         let mut changes = Vec::new();
-        for row in range.start.row..=range.end.row {
-            for col in range.start.col..=range.end.col {
-                let coord = CellCoord::new(row, col);
+
+        if whole_cols || whole_rows {
+            let axis = if whole_cols {
+                ResizeAxis::Column
+            } else {
+                ResizeAxis::Row
+            };
+            let (first, last) = match axis {
+                ResizeAxis::Column => (range.start.col, range.end.col),
+                ResizeAxis::Row => (range.start.row, range.end.row),
+            };
+            let mut line_changes = Vec::new();
+            for i in first..=last {
+                let old = self
+                    .engine
+                    .formatting(sheet)
+                    .and_then(|f| f.line_format(axis, i))
+                    .cloned();
+                let mut new = old.clone().unwrap_or_default();
+                // A coordinate inside the line, away from the selection's
+                // top/bottom (or left/right) edge.
+                let coord = match axis {
+                    ResizeAxis::Column => CellCoord::new(1, i),
+                    ResizeAxis::Row => CellCoord::new(i, 1),
+                };
+                change(coord, range, &mut new);
+                let new = (!new.is_default()).then_some(new);
+                if new != old {
+                    self.engine.formatting_mut(sheet).set_line_format(
+                        axis,
+                        i,
+                        new.clone().unwrap_or_default(),
+                    );
+                    line_changes.push((i, old, new));
+                }
+            }
+            if !line_changes.is_empty() {
+                actions.push(UndoAction::LineFormat {
+                    sheet,
+                    axis,
+                    changes: line_changes,
+                });
+            }
+            // Cells with their own format in those lines change too.
+            let in_range = |c: &CellCoord| {
+                (range.start.row..=range.end.row).contains(&c.row)
+                    && (range.start.col..=range.end.col).contains(&c.col)
+            };
+            let own: Vec<CellCoord> = self
+                .engine
+                .formatting(sheet)
+                .map(|f| f.cells().map(|(c, _)| c).filter(in_range).collect())
+                .unwrap_or_default();
+            for coord in own {
                 let old = self.engine.cell_format(sheet, coord).cloned();
                 let mut new = old.clone().unwrap_or_default();
                 change(coord, range, &mut new);
@@ -1023,10 +1147,42 @@ impl SpreadsheetApp {
                     changes.push((coord, old, new));
                 }
             }
+        } else {
+            for row in range.start.row..=range.end.row {
+                for col in range.start.col..=range.end.col {
+                    let coord = CellCoord::new(row, col);
+                    let old = self.engine.cell_format(sheet, coord).cloned();
+                    // Start from what the cell shows, so a column's fill
+                    // survives making one of its cells bold.
+                    let mut new = self
+                        .effective_format(sheet, coord)
+                        .cloned()
+                        .unwrap_or_default();
+                    change(coord, range, &mut new);
+                    let shown = self
+                        .effective_format(sheet, coord)
+                        .cloned()
+                        .unwrap_or_default();
+                    if new == shown {
+                        continue;
+                    }
+                    let new = (!new.is_default()).then_some(new);
+                    self.engine
+                        .set_cell_format(sheet, coord, new.clone().unwrap_or_default());
+                    changes.push((coord, old, new));
+                }
+            }
         }
         if !changes.is_empty() {
-            self.undo_history
-                .push(UndoAction::Format { sheet, changes });
+            actions.push(UndoAction::Format { sheet, changes });
+        }
+        if !actions.is_empty() {
+            let action = if actions.len() == 1 {
+                actions.pop().unwrap()
+            } else {
+                UndoAction::Group(actions)
+            };
+            self.undo_history.push(action);
             self.modified = true;
         }
     }
@@ -1078,6 +1234,12 @@ impl SpreadsheetApp {
                 self.apply_format(|_, _, f| f.number_format = code.clone());
             }
             FormatAction::Clear => self.apply_format(|_, _, f| *f = CellFormat::default()),
+            FormatAction::ToggleWrap => {
+                let on = !current.wrap;
+                self.apply_format(|_, _, f| f.wrap = on);
+            }
+            FormatAction::VAlign(v) => self.apply_format(|_, _, f| f.v_align = v),
+            FormatAction::Merge => self.toggle_merge(),
         }
     }
 
@@ -1109,122 +1271,6 @@ impl SpreadsheetApp {
     /// Point the grid at the current sheet's column widths and row heights.
     fn sync_grid_config(&mut self) {
         self.grid_config = GridConfig::for_sheet(self.engine.formatting(self.current_sheet));
-    }
-
-    /// Handle navigation keys
-    fn handle_navigation(&mut self, key: NavigationKey, shift: bool, viewport_size: Vec2) {
-        let (row_delta, col_delta) = match key {
-            NavigationKey::Up => (-1, 0),
-            NavigationKey::Down => (1, 0),
-            NavigationKey::Left => (0, -1),
-            NavigationKey::Right => (0, 1),
-            NavigationKey::Home => {
-                if !shift {
-                    self.selection
-                        .move_to(CellCoord::new(self.selection.active.row, 0));
-                } else {
-                    self.selection
-                        .extend_to(CellCoord::new(self.selection.active.row, 0));
-                }
-                self.scroll
-                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
-                return;
-            }
-            NavigationKey::End => {
-                if !shift {
-                    self.selection
-                        .move_to(CellCoord::new(self.selection.active.row, self.max_col));
-                } else {
-                    self.selection
-                        .extend_to(CellCoord::new(self.selection.active.row, self.max_col));
-                }
-                self.scroll
-                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
-                return;
-            }
-            NavigationKey::CtrlHome => {
-                if !shift {
-                    self.selection.move_to(CellCoord::new(0, 0));
-                } else {
-                    self.selection.extend_to(CellCoord::new(0, 0));
-                }
-                self.scroll
-                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
-                return;
-            }
-            NavigationKey::CtrlEnd => {
-                if !shift {
-                    self.selection
-                        .move_to(CellCoord::new(self.max_row, self.max_col));
-                } else {
-                    self.selection
-                        .extend_to(CellCoord::new(self.max_row, self.max_col));
-                }
-                self.scroll
-                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
-                return;
-            }
-            NavigationKey::PageUp => (-20, 0),
-            NavigationKey::PageDown => (20, 0),
-            NavigationKey::CtrlUp => {
-                // Jump to top of data region or row 0
-                let new_row = 0;
-                if !shift {
-                    self.selection
-                        .move_to(CellCoord::new(new_row, self.selection.active.col));
-                } else {
-                    self.selection
-                        .extend_to(CellCoord::new(new_row, self.selection.active.col));
-                }
-                self.scroll
-                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
-                return;
-            }
-            NavigationKey::CtrlDown => {
-                let new_row = self.max_row;
-                if !shift {
-                    self.selection
-                        .move_to(CellCoord::new(new_row, self.selection.active.col));
-                } else {
-                    self.selection
-                        .extend_to(CellCoord::new(new_row, self.selection.active.col));
-                }
-                self.scroll
-                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
-                return;
-            }
-            NavigationKey::CtrlLeft => {
-                let new_col = 0;
-                if !shift {
-                    self.selection
-                        .move_to(CellCoord::new(self.selection.active.row, new_col));
-                } else {
-                    self.selection
-                        .extend_to(CellCoord::new(self.selection.active.row, new_col));
-                }
-                self.scroll
-                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
-                return;
-            }
-            NavigationKey::CtrlRight => {
-                let new_col = self.max_col;
-                if !shift {
-                    self.selection
-                        .move_to(CellCoord::new(self.selection.active.row, new_col));
-                } else {
-                    self.selection
-                        .extend_to(CellCoord::new(self.selection.active.row, new_col));
-                }
-                self.scroll
-                    .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
-                return;
-            }
-        };
-
-        self.selection
-            .move_by(row_delta, col_delta, shift, self.max_row, self.max_col);
-        self.scroll
-            .scroll_to_cell(self.selection.active, &self.grid_config, viewport_size);
     }
 
     /// Start editing the current cell - initiates TransitionToEdit state
@@ -1260,10 +1306,10 @@ impl SpreadsheetApp {
 
         if move_down {
             self.selection
-                .move_by(1, 0, false, self.max_row, self.max_col);
+                .move_to(self.step(self.selection.active, 1, 0));
         } else if move_right {
             self.selection
-                .move_by(0, 1, false, self.max_row, self.max_col);
+                .move_to(self.step(self.selection.active, 0, 1));
         }
     }
 
@@ -1289,6 +1335,8 @@ impl SpreadsheetApp {
 
     /// Load a sheet's state after switching
     fn load_sheet_state(&mut self, sheet_index: u32) {
+        self.filter_popup = None;
+        self.fill_target = None;
         if let Some(state) = self.sheet_states.get(sheet_index as usize) {
             self.selection = state.selection.clone();
             self.scroll = state.scroll.clone();
@@ -1521,6 +1569,13 @@ impl SpreadsheetApp {
     }
 
     fn finish_open(&mut self, path: &Path) {
+        // Autosaves being recovered aren't "recent files".
+        let from_recovery = self.recovery.as_ref().is_some_and(|r| r.holds(path));
+        if !from_recovery {
+            self.settings.add_recent(path);
+        }
+        self.suggested_name = None;
+        self.recovered_from = None;
         self.current_sheet = 0;
         self.sync_grid_config();
         self.current_file = Some(path.to_path_buf());
@@ -1654,11 +1709,16 @@ impl SpreadsheetApp {
         {
             dialog = dialog.add_filter("CSV", &["csv"]);
         }
-        let default_name = if cfg!(feature = "xlsx") {
-            "workbook.xlsx"
-        } else {
-            "workbook.csv"
-        };
+        let default_name = self.suggested_name.clone().unwrap_or_else(|| {
+            if cfg!(feature = "xlsx") {
+                "workbook.xlsx".into()
+            } else {
+                "workbook.csv".into()
+            }
+        });
+        if let Some(dir) = self.recovered_from.as_ref().and_then(|p| p.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
         let file = dialog.set_file_name(default_name).save_file();
 
         if let Some(path) = file {
@@ -1680,12 +1740,31 @@ impl SpreadsheetApp {
         self.set_status("Excel support not enabled. Rebuild with --features xlsx");
     }
 
+    /// Bookkeeping after any successful save.
+    fn saved_to(&mut self, path: &Path) {
+        self.current_file = Some(path.to_path_buf());
+        self.modified = false;
+        self.suggested_name = None;
+        self.recovered_from = None;
+        self.settings.add_recent(path);
+        if let Some(rec) = &mut self.recovery {
+            rec.clear();
+        }
+    }
+
     #[cfg(feature = "csv")]
     fn save_csv(&mut self, path: &Path) {
-        match crate::csv_io::write_path(&self.engine, self.current_sheet, path) {
+        // Write beside the file, then swap it in, so a crash can't truncate it.
+        let tmp = printing::temp_beside(path);
+        let written = crate::csv_io::write_path(&self.engine, self.current_sheet, &tmp)
+            .map_err(|e| e.to_string())
+            .and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string()));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        match written {
             Ok(()) => {
-                self.current_file = Some(path.to_path_buf());
-                self.modified = false;
+                self.saved_to(path);
                 let extra = if self.sheet_names.len() > 1 {
                     " (current sheet only)"
                 } else {
@@ -1697,27 +1776,38 @@ impl SpreadsheetApp {
         }
     }
 
+    /// Write the workbook as .xlsx without touching the document's state
+    /// (also used for autosave). The file is replaced atomically.
     #[cfg(feature = "xlsx")]
-    fn save_xlsx(&mut self, path: &Path) {
+    fn write_xlsx(&self, path: &Path) -> Result<(), String> {
         let mut writer = XlsxWriter::new();
-
         let charts = self.chart_windows.all_charts();
         for (sheet_index, sheet_name) in self.sheet_names.iter().enumerate() {
-            if let Err(e) = writer.add_engine_sheet_with_charts(
-                sheet_name,
-                &self.engine,
-                sheet_index as u32,
-                &charts,
-            ) {
-                self.set_status(&format!("Error creating sheet '{sheet_name}': {e:?}"));
-                return;
-            }
+            writer
+                .add_engine_sheet_with_charts(sheet_name, &self.engine, sheet_index as u32, &charts)
+                .map_err(|e| format!("sheet '{sheet_name}': {e}"))?;
         }
+        let tmp = printing::temp_beside(path);
+        let result = writer
+            .save_with_charts(&tmp, &charts)
+            .map_err(|e| e.to_string())
+            .and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string()));
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        result
+    }
 
-        match writer.save_with_charts(path, &charts) {
+    #[cfg(not(feature = "xlsx"))]
+    fn write_xlsx(&self, _path: &Path) -> Result<(), String> {
+        Err("Excel support not enabled".into())
+    }
+
+    #[cfg(feature = "xlsx")]
+    fn save_xlsx(&mut self, path: &Path) {
+        match self.write_xlsx(path) {
             Ok(()) => {
-                self.current_file = Some(path.to_path_buf());
-                self.modified = false;
+                self.saved_to(path);
                 let sheet_count = self.sheet_names.len();
                 self.set_status(&format!(
                     "Saved: {} ({} sheet{})",
@@ -1726,7 +1816,17 @@ impl SpreadsheetApp {
                     if sheet_count == 1 { "" } else { "s" }
                 ));
             }
-            Err(e) => self.set_status(&format!("Failed to save: {e:?}")),
+            Err(e) => {
+                let _ = rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Error)
+                    .set_title("Couldn't save")
+                    .set_description(format!(
+                        "RustSheet couldn't save {}.\n\n{e}",
+                        path.display()
+                    ))
+                    .show();
+                self.set_status(&format!("Failed to save: {e}"));
+            }
         }
     }
 
@@ -1811,9 +1911,62 @@ impl SpreadsheetApp {
 
 impl eframe::App for SpreadsheetApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // A bug must not take the user's work with it: save what we can
+        // where the next launch will offer it back, then explain and exit.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.frame(ctx)));
+        if let Err(panic) = result {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown error".into());
+            let saved = self.modified && {
+                self.autosave();
+                self.recovery.as_ref().is_some_and(|r| r.has_autosave)
+            };
+            let detail = if saved {
+                "Your unsaved changes were kept. Open RustSheet again to recover them."
+            } else if self.modified {
+                "RustSheet couldn't keep your unsaved changes."
+            } else {
+                "You had no unsaved changes."
+            };
+            if let Some(dir) = super::settings::data_dir() {
+                let _ = std::fs::write(dir.join("last-crash.txt"), &message);
+            }
+            let _ = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Error)
+                .set_title("RustSheet has to close")
+                .set_description(format!("RustSheet ran into a problem and has to close.\n\n{detail}\n\nDetails: {message}"))
+                .show();
+            std::process::exit(1);
+        }
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // A normal exit leaves nothing to recover.
+        self.end_recovery();
+    }
+}
+
+impl SpreadsheetApp {
+    fn frame(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) && !self.confirm_discard() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
+
+        // Theme: follow Windows, or the user's choice.
+        ctx.set_theme(match self.settings.theme {
+            ThemeChoice::System => egui::ThemePreference::System,
+            ThemeChoice::Light => egui::ThemePreference::Light,
+            ThemeChoice::Dark => egui::ThemePreference::Dark,
+        });
+        let dark = ctx.theme() == egui::Theme::Dark;
+        if self.dark_mode != Some(dark) {
+            self.theme = if dark { Theme::dark() } else { Theme::light() };
+            self.dark_mode = Some(dark);
+        }
+        self.tick_recovery(ctx);
 
         let title = format!(
             "{}{} - RustSheet",
@@ -1862,137 +2015,13 @@ impl eframe::App for SpreadsheetApp {
         let mut formula_bar_has_focus = false;
 
         let mut format_action: Option<FormatAction> = None;
+        let mut command: Option<Command> = None;
 
         // Top panel for toolbar
         TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button(format!("New ({MOD}+N)")).clicked() {
-                        self.request_new_workbook();
-                        ui.close_menu();
-                    }
-                    if ui.button(format!("Open ({MOD}+O)")).clicked() {
-                        self.open_file();
-                        ui.close_menu();
-                    }
-                    if ui.button(format!("Save ({MOD}+S)")).clicked() {
-                        self.save_file();
-                        ui.close_menu();
-                    }
-                    if ui.button("Save As...").clicked() {
-                        self.save_file_as();
-                        ui.close_menu();
-                    }
-                });
-
-                ui.menu_button("Edit", |ui| {
-                    let can_undo = self.undo_history.can_undo();
-                    let can_redo = self.undo_history.can_redo();
-
-                    if ui
-                        .add_enabled(can_undo, egui::Button::new(format!("Undo ({MOD}+Z)")))
-                        .clicked()
-                    {
-                        self.undo();
-                        ui.close_menu();
-                    }
-                    if ui
-                        .add_enabled(can_redo, egui::Button::new(format!("Redo ({MOD}+Y)")))
-                        .clicked()
-                    {
-                        self.redo();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    let items = [
-                        (format!("Cut ({MOD}+X)"), ContextAction::Cut),
-                        (format!("Copy ({MOD}+C)"), ContextAction::Copy),
-                        (format!("Paste ({MOD}+V)"), ContextAction::Paste),
-                        (
-                            "Clear Contents (Del)".to_string(),
-                            ContextAction::ClearContents,
-                        ),
-                    ];
-                    for (label, action) in items {
-                        if ui.button(label).clicked() {
-                            self.handle_context_action(ctx, action);
-                            ui.close_menu();
-                        }
-                    }
-                });
-
-                ui.menu_button("Insert", |ui| {
-                    if ui.button("Chart...").clicked() {
-                        self.open_new_chart_editor();
-                        ui.close_menu();
-                    }
-                });
-
-                ui.menu_button("Format", |ui| {
-                    let items = [
-                        (format!("Bold ({MOD}+B)"), FormatAction::ToggleBold),
-                        (format!("Italic ({MOD}+I)"), FormatAction::ToggleItalic),
-                        (
-                            format!("Underline ({MOD}+U)"),
-                            FormatAction::ToggleUnderline,
-                        ),
-                        (
-                            "Strikethrough".to_string(),
-                            FormatAction::ToggleStrikethrough,
-                        ),
-                        ("Clear Formatting".to_string(), FormatAction::Clear),
-                    ];
-                    for (label, action) in items {
-                        if action == FormatAction::Clear {
-                            ui.separator();
-                        }
-                        if ui.button(label).clicked() {
-                            format_action = Some(action);
-                            ui.close_menu();
-                        }
-                    }
-                });
-
-                ui.menu_button("View", |ui| {
-                    if ui.button("Light Theme").clicked() {
-                        self.theme = Theme::light();
-                        ui.close_menu();
-                    }
-                    if ui.button("Dark Theme").clicked() {
-                        self.theme = Theme::dark();
-                        ui.close_menu();
-                    }
-                });
-
-                ui.menu_button("Help", |ui| {
-                    if ui.button("Help (F1)").clicked() {
-                        self.help_panel.toggle();
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("About").clicked() {
-                        self.help_panel.visible = true;
-                        self.help_panel.tab = super::help_panel::HelpTab::About;
-                        ui.close_menu();
-                    }
-                });
-
-                // Show modified indicator and filename
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(path) = &self.current_file {
-                        if let Some(name) = path.file_name() {
-                            let display = if self.modified {
-                                format!("{}*", name.to_string_lossy())
-                            } else {
-                                name.to_string_lossy().to_string()
-                            };
-                            ui.label(display);
-                        }
-                    } else if self.modified {
-                        ui.label("Untitled*");
-                    }
-                });
-            });
+            if let Some(c) = self.menu_bar(ui) {
+                command = Some(c);
+            }
         });
 
         // Formatting toolbar
@@ -2132,64 +2161,26 @@ impl eframe::App for SpreadsheetApp {
             None => {}
         }
 
-        // Global keyboard shortcuts (only when not editing in formula bar)
+        // Keyboard shortcuts. While a text field has focus it gets the keys.
         let shift = ctx.input(|i| i.modifiers.shift);
-
-        if !formula_bar_has_focus {
-            // F1 for help
-            if ctx.input(|i| i.key_pressed(Key::F1)) {
-                self.help_panel.toggle();
+        let typing = formula_bar_has_focus || text_field_focused(ctx);
+        if let Some(c) = self.shortcut(ctx, typing) {
+            command = Some(c);
+        }
+        if !typing {
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                if self.help_panel.visible {
+                    self.help_panel.visible = false;
+                }
+                self.fill_target = None;
             }
-
-            // Escape to close help
-            if ctx.input(|i| i.key_pressed(Key::Escape)) && self.help_panel.visible {
-                self.help_panel.visible = false;
-            }
-
             // Delete clears every selected cell (with undo support)
             if ctx.input(|i| i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace))
                 && !self.is_editing()
             {
                 self.delete_selection();
             }
-        }
-
-        if !formula_bar_has_focus {
             self.handle_clipboard_events(ctx);
-        }
-
-        // Ctrl (Cmd on macOS) shortcuts work globally
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::S)) {
-            self.save_file();
-        }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::O)) {
-            self.open_file();
-        }
-        if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::N)) {
-            self.request_new_workbook();
-        }
-        // Bold / italic / underline, unless typing in the formula bar
-        if !self.is_editing() && !formula_bar_has_focus {
-            for (key, action) in [
-                (Key::B, FormatAction::ToggleBold),
-                (Key::I, FormatAction::ToggleItalic),
-                (Key::U, FormatAction::ToggleUnderline),
-            ] {
-                if ctx.input(|i| i.modifiers.command && i.key_pressed(key)) {
-                    self.handle_format_action(action);
-                }
-            }
-        }
-        // Undo: Ctrl+Z
-        if ctx.input(|i| i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::Z)) {
-            self.undo();
-        }
-        // Redo: Ctrl+Shift+Z or Ctrl+Y
-        if ctx.input(|i| {
-            i.modifiers.command
-                && (i.modifiers.shift && i.key_pressed(Key::Z) || i.key_pressed(Key::Y))
-        }) {
-            self.redo();
         }
 
         // Main grid area
@@ -2198,6 +2189,12 @@ impl eframe::App for SpreadsheetApp {
             self.grid_origin =
                 Some(ui.available_rect_before_wrap().min + Vec2::new(HEADER_WIDTH, HEADER_HEIGHT));
 
+            self.last_viewport = viewport_size;
+            let used = self.used_extent();
+            let fill_preview = self
+                .fill_target
+                .and_then(|t| self.fill_plan(t))
+                .map(|p| p.0);
             let grid = SpreadsheetGrid::new(
                 self.current_sheet,
                 &self.engine,
@@ -2205,9 +2202,74 @@ impl eframe::App for SpreadsheetApp {
                 &self.grid_config,
                 &self.scroll,
                 &self.theme,
-            );
+            )
+            .with_used_extent(used)
+            .with_fill_handle(!self.is_editing())
+            .with_fill_preview(fill_preview);
 
             let grid_response = grid.show(ui);
+
+            if let Some(offset) = grid_response.scroll_to {
+                self.scroll
+                    .set_offset(offset.x, offset.y, &self.grid_config);
+            }
+            if let Some(hs) = grid_response.header_select {
+                if self.is_editing() {
+                    self.edit_buffer = self.formula_bar.content.clone();
+                    self.confirm_edit(false, false);
+                }
+                self.handle_header_select(hs);
+                ctx.memory_mut(|m| m.request_focus(egui::Id::new("spreadsheet_grid")));
+            }
+            if grid_response.select_all {
+                self.select_everything();
+            }
+            if let Some((axis, index)) = grid_response.right_clicked_header {
+                let r = self.selection.primary_range();
+                let (lo, hi) = match axis {
+                    ResizeAxis::Row => (r.start.row, r.end.row),
+                    ResizeAxis::Column => (r.start.col, r.end.col),
+                };
+                let whole = match axis {
+                    ResizeAxis::Row => r.start.col == 0 && r.end.col == crate::cell::MAX_COL,
+                    ResizeAxis::Column => r.start.row == 0 && r.end.row == crate::cell::MAX_ROW,
+                };
+                if !whole || !(lo..=hi).contains(&index) {
+                    self.select_lines(axis, index, index);
+                }
+            }
+            if let Some((col, pos)) = grid_response.filter_button {
+                self.open_filter_popup(col, pos);
+            }
+            if let Some(target) = grid_response.fill_to {
+                self.fill_target = Some(target);
+            }
+            if grid_response.fill_released {
+                if let Some(target) = self.fill_target.take() {
+                    self.fill_to(target);
+                }
+            }
+            if let Some(row) = grid_response.autofit_row {
+                let height = fit_row_height(
+                    ctx,
+                    &self.engine,
+                    &self.grid_config,
+                    self.current_sheet,
+                    row,
+                );
+                let old = self.current_size(ResizeAxis::Row, row);
+                self.set_size(self.current_sheet, ResizeAxis::Row, row, Some(height));
+                let new = self.current_size(ResizeAxis::Row, row);
+                if new != old {
+                    self.undo_history.push(UndoAction::Resize {
+                        sheet: self.current_sheet,
+                        axis: ResizeAxis::Row,
+                        index: row,
+                        old,
+                        new,
+                    });
+                }
+            }
 
             // Right-click outside the selection selects that cell first.
             if let Some(coord) = grid_response.right_clicked_cell {
@@ -2216,7 +2278,7 @@ impl eframe::App for SpreadsheetApp {
                 }
             }
             if let Some(action) = grid_response.context_action {
-                self.handle_context_action(ctx, action);
+                command = Some(action.into());
             }
 
             // Column and row resizing; one undo step per drag
@@ -2265,7 +2327,7 @@ impl eframe::App for SpreadsheetApp {
                     self.edit_buffer = self.formula_bar.content.clone();
                     self.confirm_edit(false, false);
                 }
-                self.selection.move_to(coord);
+                self.selection.move_to(self.snap_to_merge(coord));
                 // Request focus on drag start
                 let grid_id = egui::Id::new("spreadsheet_grid");
                 ctx.memory_mut(|m| m.request_focus(grid_id));
@@ -2285,7 +2347,12 @@ impl eframe::App for SpreadsheetApp {
                     self.edit_buffer = self.formula_bar.content.clone();
                     self.confirm_edit(false, false);
                 }
-                self.selection.move_to(coord);
+                let coord = self.snap_to_merge(coord);
+                if grid_response.clicked_with_shift {
+                    self.selection.extend_to(coord);
+                } else {
+                    self.selection.move_to(coord);
+                }
                 self.scroll
                     .scroll_to_cell(coord, &self.grid_config, viewport_size);
                 // Request focus on click
@@ -2295,7 +2362,7 @@ impl eframe::App for SpreadsheetApp {
 
             // Handle double-click for editing
             if let Some(coord) = grid_response.double_clicked_cell {
-                self.selection.move_to(coord);
+                self.selection.move_to(self.snap_to_merge(coord));
                 // Start editing - FSM will handle focus in next pre-render
                 self.start_editing(None);
             }
@@ -2319,7 +2386,7 @@ impl eframe::App for SpreadsheetApp {
             // Handle navigation (only when formula bar doesn't have focus and not editing)
             if !formula_bar_has_focus && !self.is_editing() {
                 if let Some(nav) = grid_response.navigation {
-                    self.handle_navigation(nav, shift, viewport_size);
+                    self.navigate(nav, shift, viewport_size);
                     // Keep focus on grid
                     let grid_id = egui::Id::new("spreadsheet_grid");
                     ctx.memory_mut(|m| m.request_focus(grid_id));
@@ -2327,17 +2394,23 @@ impl eframe::App for SpreadsheetApp {
             }
         });
 
-        // Handle scroll with mouse wheel
-        ctx.input(|i| {
-            let scroll_delta = i.raw_scroll_delta;
-            if scroll_delta != Vec2::ZERO {
-                self.scroll.offset_x = (self.scroll.offset_x - scroll_delta.x).max(0.0);
-                self.scroll.offset_y = (self.scroll.offset_y - scroll_delta.y).max(0.0);
-                self.scroll.first_visible_col = self.grid_config.column_at_x(self.scroll.offset_x);
-                self.scroll.first_visible_row = self.grid_config.row_at_y(self.scroll.offset_y);
-            }
-        });
+        // Dialogs and popups float above everything.
+        self.show_recovery_prompt(ctx);
+        self.show_find_dialog(ctx);
+        self.show_filter_popup(ctx);
+        self.show_sort_dialog(ctx);
+        self.show_print_dialog(ctx);
+
+        if let Some(c) = command {
+            self.run_command(ctx, c);
+        }
     }
+}
+
+/// Whether a text field (formula bar, dialog box, sheet rename) has focus.
+fn text_field_focused(ctx: &egui::Context) -> bool {
+    ctx.memory(|m| m.focused())
+        .is_some_and(|id| egui::text_edit::TextEditState::load(ctx, id).is_some())
 }
 
 /// Stored formulas already include `=`. Do not prefix another one.
@@ -2376,6 +2449,9 @@ pub fn run_with_file(path: Option<PathBuf>) -> Result<(), eframe::Error> {
         options,
         Box::new(move |_cc| {
             let mut app = SpreadsheetApp::new();
+            app.settings = Settings::load();
+            app.recoverable = recovery::find_recoverable();
+            app.recovery = Recovery::new();
             if let Some(path) = path {
                 app.load_file(&path);
             }
@@ -2907,7 +2983,12 @@ mod tests {
             ..Default::default()
         };
         ctx.run(input, |ctx| {
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new(focus)));
+            let id = egui::Id::new(focus);
+            if focus != "spreadsheet_grid" {
+                // A real text field has stored text-edit state.
+                egui::text_edit::TextEditState::default().store(ctx, id);
+            }
+            ctx.memory_mut(|m| m.request_focus(id));
             app.handle_clipboard_events(ctx);
         })
     }

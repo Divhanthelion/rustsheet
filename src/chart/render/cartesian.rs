@@ -188,7 +188,12 @@ impl ChartRenderer for CartesianRenderer {
                         LegendPosition::Bottom => Corner::RightBottom,
                         LegendPosition::None => unreachable!(),
                     };
-                    Some(Legend::default().position(corner))
+                    // Series in the order they were added, not alphabetically.
+                    Some(
+                        Legend::default()
+                            .position(corner)
+                            .follow_insertion_order(true),
+                    )
                 }
             };
 
@@ -235,6 +240,18 @@ impl ChartRenderer for CartesianRenderer {
             }
             if let (Some(min), Some(max)) = (chart.y_axis.min, chart.y_axis.max) {
                 plot = plot.include_y(min).include_y(max);
+            } else if chart.legend.position != LegendPosition::None {
+                // Headroom above the tallest value, so the legend in the top
+                // corner doesn't sit on the data.
+                let (lo, hi) = data
+                    .series
+                    .iter()
+                    .flat_map(|s| s.y_values.iter().copied())
+                    .filter(|y| y.is_finite())
+                    .fold((0.0f64, 0.0f64), |(lo, hi), y| (lo.min(y), hi.max(y)));
+                if hi > lo {
+                    plot = plot.include_y(hi + (hi - lo) * 0.18);
+                }
             }
 
             // Render at plot_rect

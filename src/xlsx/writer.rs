@@ -1,11 +1,11 @@
 use crate::calc::{CalcEngine, CellInput, CellValueInput};
 use crate::cell::{CellCoord, CellValue};
 use crate::chart::{ChartDefinition, ChartKind, ChartSeries, LegendPosition};
-use crate::format::{CellFormat, HAlign};
+use crate::format::{CellFormat, HAlign, VAlign};
 use crate::grid::Sheet;
 use rust_xlsxwriter::{
-    Chart, ChartLegendPosition, ChartType, Color, Format, FormatAlign, FormatBorder,
-    FormatUnderline, Workbook, Worksheet, XlsxError,
+    Chart, ChartLegendPosition, ChartType, Color, FilterCondition, Format, FormatAlign,
+    FormatBorder, FormatUnderline, Workbook, Worksheet, XlsxError,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -63,20 +63,32 @@ impl XlsxWriter {
         worksheet.set_name(name)?;
 
         let formatting = engine.formatting(sheet_index);
-        let mut formats: HashMap<&CellFormat, Format> = HashMap::new();
-        let mut format_for = |coord: CellCoord| -> Option<Format> {
-            let cell_format = formatting?.get(coord)?;
-            Some(
-                formats
-                    .entry(cell_format)
-                    .or_insert_with(|| to_xlsx_format(cell_format))
-                    .clone(),
-            )
+        let mut cache = FormatCache::default();
+        // Cells carry the format they show (own, row or column), as Excel writes them.
+        let format_for = |cache: &mut FormatCache, coord: CellCoord| -> Option<Format> {
+            Some(cache.get(formatting?.effective(coord)?))
         };
+
+        if let Some(formatting) = formatting {
+            // Merge first: merge_range writes the top-left cell, which the
+            // value loop below then overwrites with the real value.
+            for m in &formatting.merges {
+                let format = format_for(&mut cache, m.start).unwrap_or_default();
+                worksheet.merge_range(
+                    m.start.row,
+                    col_num(m.start.col)?,
+                    m.end.row,
+                    col_num(m.end.col)?,
+                    "",
+                    &format,
+                )?;
+            }
+        }
 
         let mut written = HashSet::new();
         for (coord, input) in engine.iter_sheet_inputs(sheet_index) {
-            Self::write_engine_cell(worksheet, coord, input, format_for(coord).as_ref())?;
+            let format = format_for(&mut cache, coord);
+            Self::write_engine_cell(worksheet, coord, input, format.as_ref())?;
             written.insert(coord);
         }
 
@@ -84,7 +96,7 @@ impl XlsxWriter {
             // Formatted cells with no value still carry their style.
             for (coord, _) in formatting.cells() {
                 if !written.contains(&coord) {
-                    if let Some(format) = format_for(coord) {
+                    if let Some(format) = format_for(&mut cache, coord) {
                         let col = u16::try_from(coord.col)
                             .map_err(|_| XlsxWriteError::ColumnLimit(coord.col))?;
                         worksheet.write_blank(coord.row, col, &format)?;
@@ -97,6 +109,54 @@ impl XlsxWriter {
             }
             for (&row, &points) in &formatting.row_heights {
                 worksheet.set_row_height(row, super::styles::points_to_excel_height(points))?;
+            }
+            // Runs of columns with the same format become one <col> range.
+            let mut runs: Vec<(u32, u32, &CellFormat)> = Vec::new();
+            for (&col, f) in &formatting.column_formats {
+                match runs.last_mut() {
+                    Some((_, last, prev)) if *last + 1 == col && *prev == f => *last = col,
+                    _ => runs.push((col, col, f)),
+                }
+            }
+            for (first, last, f) in runs {
+                let format = cache.get(f);
+                worksheet.set_column_range_format(col_num(first)?, col_num(last)?, &format)?;
+            }
+            for (&row, f) in &formatting.row_formats {
+                let format = cache.get(f);
+                worksheet.set_row_format(row, &format)?;
+            }
+            for &col in &formatting.hidden_columns {
+                worksheet.set_column_hidden(col_num(col)?)?;
+            }
+            for &row in &formatting.hidden_rows {
+                worksheet.set_row_hidden(row)?;
+            }
+            let (rows, cols) = formatting.frozen;
+            if rows > 0 || cols > 0 {
+                worksheet.set_freeze_panes(rows, col_num(cols)?)?;
+            }
+            if let Some(filter) = &formatting.filter {
+                let r = filter.range;
+                worksheet.autofilter(
+                    r.start.row,
+                    col_num(r.start.col)?,
+                    r.end.row,
+                    col_num(r.end.col)?,
+                )?;
+                // Rows are already hidden to match; don't let the writer redo it.
+                worksheet.filter_automatic_off();
+                for (&offset, values) in &filter.allowed {
+                    let mut condition = FilterCondition::new();
+                    for v in values {
+                        condition = if v.is_empty() {
+                            condition.add_list_blanks_filter()
+                        } else {
+                            condition.add_list_filter(v.as_str())
+                        };
+                    }
+                    worksheet.filter_column(col_num(r.start.col + offset)?, &condition)?;
+                }
             }
         }
 
@@ -399,6 +459,23 @@ impl Default for XlsxWriter {
     }
 }
 
+/// One rust_xlsxwriter `Format` per distinct `CellFormat`.
+#[derive(Default)]
+struct FormatCache(HashMap<CellFormat, Format>);
+
+impl FormatCache {
+    fn get(&mut self, f: &CellFormat) -> Format {
+        self.0
+            .entry(f.clone())
+            .or_insert_with(|| to_xlsx_format(f))
+            .clone()
+    }
+}
+
+fn col_num(col: u32) -> Result<u16, XlsxWriteError> {
+    u16::try_from(col).map_err(|_| XlsxWriteError::ColumnLimit(col))
+}
+
 /// The rust_xlsxwriter format for a cell. Sizes and widths use Excel units.
 fn to_xlsx_format(f: &CellFormat) -> Format {
     let mut format = Format::new();
@@ -429,6 +506,14 @@ fn to_xlsx_format(f: &CellFormat) -> Format {
         HAlign::Center => format.set_align(FormatAlign::Center),
         HAlign::Right => format.set_align(FormatAlign::Right),
     };
+    format = match f.v_align {
+        VAlign::Bottom => format,
+        VAlign::Center => format.set_align(FormatAlign::VerticalCenter),
+        VAlign::Top => format.set_align(FormatAlign::Top),
+    };
+    if f.wrap {
+        format = format.set_text_wrap();
+    }
     if f.borders.top {
         format = format.set_border_top(FormatBorder::Thin);
     }

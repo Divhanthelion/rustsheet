@@ -1,7 +1,7 @@
 //! Formatting toolbar: font style and size, colors, alignment, borders and
 //! number formats for the selected cells.
 
-use crate::format::{CellFormat, HAlign, Rgb, is_date_format};
+use crate::format::{CellFormat, HAlign, Rgb, VAlign, is_date_format};
 use eframe::egui::{self, Color32, RichText, Sense, Stroke, Ui, Vec2};
 
 /// A formatting change the user asked for.
@@ -20,6 +20,10 @@ pub enum FormatAction {
     /// Add (+1) or remove (-1) a decimal place.
     Decimals(i32),
     Clear,
+    ToggleWrap,
+    VAlign(VAlign),
+    /// Merge & Center, or unmerge
+    Merge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +173,10 @@ pub fn show(ui: &mut Ui, current: &CellFormat) -> Option<FormatAction> {
                         .min_size(button_size),
                 )
                 .on_hover_text(tip);
+            // Icon-only: give screen readers the name.
+            r.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, tip)
+            });
             paint_align_icon(ui, r.rect, align);
             if r.clicked() {
                 // Clicking the active alignment returns to General, as in Excel.
@@ -178,6 +186,42 @@ pub fn show(ui: &mut Ui, current: &CellFormat) -> Option<FormatAction> {
                     align
                 }));
             }
+        }
+
+        for (v, tip) in [
+            (VAlign::Top, "Align top"),
+            (VAlign::Center, "Align middle"),
+            (VAlign::Bottom, "Align bottom"),
+        ] {
+            let selected = current.v_align == v;
+            let r = ui
+                .add(
+                    egui::Button::new("")
+                        .selected(selected)
+                        .min_size(button_size),
+                )
+                .on_hover_text(tip);
+            r.widget_info(|| {
+                egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, tip)
+            });
+            paint_valign_icon(ui, r.rect, v);
+            if r.clicked() {
+                set(FormatAction::VAlign(v));
+            }
+        }
+
+        let r = ui
+            .add(egui::Button::new("Wrap").selected(current.wrap))
+            .on_hover_text("Wrap text onto several lines");
+        if r.clicked() {
+            set(FormatAction::ToggleWrap);
+        }
+        if ui
+            .button("Merge")
+            .on_hover_text("Merge & Center the selection (click again to unmerge)")
+            .clicked()
+        {
+            set(FormatAction::Merge);
         }
 
         ui.menu_button("Borders", |ui| {
@@ -255,6 +299,11 @@ fn palette(ui: &mut Ui, none_label: &str, current: Option<Rgb>) -> Option<Option
                 for hex in row {
                     let c = rgb(hex);
                     let (rect, r) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+                    let name = format!("Color #{:06X}", c.to_u32());
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name)
+                    });
+                    let r = r.on_hover_text(&name);
                     ui.painter().rect_filled(rect, 2.0, color32(c));
                     let outline = if current == Some(c) || r.hovered() {
                         ui.visuals().selection.stroke
@@ -286,6 +335,29 @@ fn paint_color_bar(ui: &Ui, rect: egui::Rect, color: Option<Rgb>) {
         egui::pos2(rect.right() - 4.0, rect.bottom() - 2.0),
     );
     ui.painter().rect_filled(bar, 0.0, color32(c));
+}
+
+/// A bar placed at the top, middle or bottom of a box.
+fn paint_valign_icon(ui: &Ui, rect: egui::Rect, v: VAlign) {
+    let stroke = Stroke::new(1.5_f32, ui.visuals().text_color());
+    let faint = Stroke::new(1.0_f32, ui.visuals().weak_text_color());
+    let b = egui::Rect::from_center_size(rect.center(), Vec2::new(14.0, 12.0));
+    ui.painter()
+        .line_segment([b.left_top(), b.right_top()], faint);
+    ui.painter()
+        .line_segment([b.left_bottom(), b.right_bottom()], faint);
+    let y = match v {
+        VAlign::Top => b.top() + 3.0,
+        VAlign::Center => b.center().y,
+        VAlign::Bottom => b.bottom() - 3.0,
+    };
+    ui.painter().line_segment(
+        [
+            egui::pos2(b.left() + 3.0, y),
+            egui::pos2(b.right() - 3.0, y),
+        ],
+        stroke,
+    );
 }
 
 /// Four lines, aligned the way the button aligns text.

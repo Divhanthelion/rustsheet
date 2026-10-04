@@ -10,7 +10,9 @@ mod formula_bar;
 mod functions_help;
 mod grid;
 mod help_panel;
+pub mod print;
 mod selection;
+pub mod settings;
 mod sheet_tabs;
 mod theme;
 

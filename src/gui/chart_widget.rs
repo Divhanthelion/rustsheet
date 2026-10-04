@@ -86,6 +86,32 @@ impl ChartWindowManager {
         self.windows.iter().map(|w| w.chart.id).collect()
     }
 
+    /// Adjust every chart on `sheet` for inserted or deleted rows/columns.
+    pub fn apply_line_edit(&mut self, sheet: u32, edit: &crate::cell::LineEdit) {
+        for w in self
+            .windows
+            .iter_mut()
+            .filter(|w| w.chart.sheet_index == sheet)
+        {
+            w.chart.apply_line_edit(edit);
+        }
+    }
+
+    /// Replace all charts, keeping open windows where the chart still exists.
+    pub fn replace_all(&mut self, charts: Vec<ChartDefinition>) {
+        let mut old = std::mem::take(&mut self.windows);
+        for chart in charts {
+            match old.iter().position(|w| w.chart.id == chart.id) {
+                Some(i) => {
+                    let mut w = old.swap_remove(i);
+                    w.chart = chart;
+                    self.windows.push(w);
+                }
+                None => self.windows.push(ChartWindowState::new(chart)),
+            }
+        }
+    }
+
     pub fn all_charts(&self) -> Vec<ChartDefinition> {
         self.windows.iter().map(|w| w.chart.clone()).collect()
     }
@@ -155,7 +181,17 @@ impl ChartWindowManager {
 
                 // Render the chart
                 if let Some(data) = &window_state.data {
-                    render_chart(ui, &window_state.chart, data, available);
+                    // The window's title bar already shows the title.
+                    let mut chart = window_state.chart.clone();
+                    chart.title = None;
+                    // The default white plot area would glare in dark mode.
+                    if ui.visuals().dark_mode
+                        && chart.style.background_color == [255, 255, 255, 255]
+                    {
+                        let bg = ui.visuals().extreme_bg_color;
+                        chart.style.background_color = [bg.r(), bg.g(), bg.b(), 255];
+                    }
+                    render_chart(ui, &chart, data, available);
                 } else {
                     ui.centered_and_justified(|ui| {
                         ui.label("Loading chart data...");

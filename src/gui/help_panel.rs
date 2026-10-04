@@ -166,87 +166,120 @@ impl HelpPanel {
     }
 
     fn show_shortcuts_tab(&mut self, ui: &mut Ui) {
+        let section = |ui: &mut Ui, title: &str, rows: &[(&str, &str)]| {
+            ui.heading(title);
+            ui.separator();
+            for (keys, what) in rows {
+                shortcut_row(ui, keys, what);
+            }
+            ui.add_space(10.0);
+        };
         ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("Navigation");
-            ui.separator();
-            shortcut_row(ui, "Arrow Keys", "Move one cell in direction");
-            shortcut_row(ui, "Tab", "Move right, confirm edit");
-            shortcut_row(ui, "Enter", "Move down, confirm edit");
-            shortcut_row(ui, "Ctrl+Home", "Go to cell A1");
-            shortcut_row(ui, "Ctrl+End", "Go to last used cell");
-            shortcut_row(ui, "Ctrl+Arrow", "Jump to edge of data region");
-            shortcut_row(ui, "Page Up/Down", "Scroll one screen");
-            shortcut_row(ui, "Home", "Go to column A in current row");
-            shortcut_row(ui, "End", "Go to last column in current row");
-
-            ui.add_space(10.0);
-            ui.heading("Selection");
-            ui.separator();
-            shortcut_row(ui, "Shift+Arrow", "Extend selection");
-            shortcut_row(ui, "Shift+Click", "Select range from active cell");
-            shortcut_row(ui, "Ctrl+A", "Select all cells");
-            shortcut_row(ui, "Ctrl+Space", "Select entire column");
-            shortcut_row(ui, "Shift+Space", "Select entire row");
-
-            ui.add_space(10.0);
-            ui.heading("Editing");
-            ui.separator();
-            shortcut_row(ui, "F2", "Edit current cell");
-            shortcut_row(ui, "Enter", "Confirm edit and move down");
-            shortcut_row(ui, "Tab", "Confirm edit and move right");
-            shortcut_row(ui, "Escape", "Cancel editing");
-            shortcut_row(ui, "Delete", "Clear cell contents");
-            shortcut_row(ui, "Backspace", "Clear cell and start editing");
-            shortcut_row(
+            section(
                 ui,
-                "Type any character",
-                "Start editing with that character",
+                "Navigation",
+                &[
+                    ("Arrow keys", "Move one cell"),
+                    ("Ctrl+Arrow", "Jump to the edge of the data"),
+                    ("Home", "Go to column A"),
+                    ("End", "Go to the last filled cell in the row"),
+                    ("Ctrl+Home", "Go to the first cell (below frozen panes)"),
+                    ("Ctrl+End", "Go to the last used cell"),
+                    ("Page Up / Page Down", "Move one screen"),
+                ],
             );
-
-            ui.add_space(10.0);
-            ui.heading("Formulas");
-            ui.separator();
-            shortcut_row(ui, "= (equals)", "Start formula entry");
-            shortcut_row(ui, "F4", "Toggle absolute/relative reference ($)");
-            shortcut_row(ui, "Tab (while typing)", "Accept autocomplete suggestion");
-            shortcut_row(ui, "Arrow Down (in autocomplete)", "Select next suggestion");
-            shortcut_row(
+            section(
                 ui,
-                "Arrow Up (in autocomplete)",
-                "Select previous suggestion",
+                "Selection",
+                &[
+                    ("Shift+Arrow", "Extend the selection"),
+                    ("Shift+Click", "Select from the active cell"),
+                    (
+                        "Click a row or column header",
+                        "Select the row or column (drag for several)",
+                    ),
+                    ("Ctrl+A", "Select the data around the cell, then everything"),
+                    ("Ctrl+Space", "Select the whole column"),
+                    ("Shift+Space", "Select the whole row"),
+                ],
             );
-
-            ui.add_space(10.0);
-            ui.heading("File Operations");
-            ui.separator();
-            shortcut_row(ui, "Ctrl+S", "Save");
-            shortcut_row(ui, "Ctrl+O", "Open");
-            shortcut_row(ui, "Ctrl+N", "New");
-            shortcut_row(ui, "Ctrl+Z", "Undo");
-            shortcut_row(ui, "Ctrl+Y", "Redo");
-            shortcut_row(ui, "Ctrl+C / Ctrl+X", "Copy / cut the selection");
-            shortcut_row(ui, "Ctrl+V", "Paste (from RustSheet, Excel, or text)");
-            shortcut_row(ui, "Delete", "Clear the selected cells");
-
-            ui.add_space(10.0);
-            ui.heading("Formatting");
-            ui.separator();
-            shortcut_row(ui, "Ctrl+B", "Bold");
-            shortcut_row(ui, "Ctrl+I", "Italic");
-            shortcut_row(ui, "Ctrl+U", "Underline");
-            shortcut_row(ui, "Drag header border", "Resize a column or row");
-            shortcut_row(ui, "Double-click column border", "Fit column to contents");
-            shortcut_row(
+            section(
                 ui,
-                "Type 12%, $5 or 2026-10-03",
-                "Enter a percent, amount or date",
+                "Editing",
+                &[
+                    ("F2", "Edit the active cell"),
+                    ("Type any character", "Start editing with that character"),
+                    (
+                        "Enter / Tab",
+                        "Move down / right (confirms an edit); Shift goes back",
+                    ),
+                    ("Escape", "Cancel editing"),
+                    ("Delete or Backspace", "Clear the selected cells"),
+                    ("Ctrl+Z / Ctrl+Y", "Undo / Redo"),
+                    ("Ctrl+C / Ctrl+X", "Copy / cut"),
+                    ("Ctrl+V", "Paste (from RustSheet, Excel, or text)"),
+                    ("Ctrl+D / Ctrl+R", "Fill down / right"),
+                    (
+                        "Drag the corner square",
+                        "Fill a series (1, 2, 3... Jan, Feb...)",
+                    ),
+                    ("Ctrl+F / Ctrl+H", "Find / Replace"),
+                ],
             );
-
-            ui.add_space(10.0);
-            ui.heading("View");
-            ui.separator();
-            shortcut_row(ui, "F1", "Open Help");
-            shortcut_row(ui, "Ctrl+`", "Show/hide formulas");
+            section(
+                ui,
+                "Formulas",
+                &[
+                    ("= (equals)", "Start a formula"),
+                    ("F4", "Toggle absolute/relative reference ($)"),
+                    ("Tab (while typing)", "Accept the autocomplete suggestion"),
+                    ("Arrow Up / Down (in autocomplete)", "Choose a suggestion"),
+                ],
+            );
+            section(
+                ui,
+                "Rows and columns",
+                &[
+                    (
+                        "Ctrl+Shift+=",
+                        "Insert rows (or columns, if whole columns are selected)",
+                    ),
+                    ("Ctrl+-", "Delete rows (or columns)"),
+                    ("Ctrl+9 / Ctrl+Shift+9", "Hide / unhide rows"),
+                    ("Ctrl+0", "Hide columns"),
+                    ("Drag a header border", "Resize a column or row"),
+                    ("Double-click a header border", "Fit to contents"),
+                ],
+            );
+            section(
+                ui,
+                "Formatting",
+                &[
+                    ("Ctrl+B / Ctrl+I / Ctrl+U", "Bold / italic / underline"),
+                    (
+                        "Type 12%, $5 or 2026-10-03",
+                        "Enter a percent, amount or date",
+                    ),
+                ],
+            );
+            section(
+                ui,
+                "Data",
+                &[
+                    ("Ctrl+Shift+L", "Turn the filter on or off"),
+                    ("Right-click > Sort A to Z", "Sort the data around the cell"),
+                ],
+            );
+            section(
+                ui,
+                "Files",
+                &[
+                    ("Ctrl+N / Ctrl+O", "New / Open"),
+                    ("Ctrl+S / Ctrl+Shift+S", "Save / Save As"),
+                    ("Ctrl+P", "Print"),
+                    ("F1", "Help"),
+                ],
+            );
         });
     }
 

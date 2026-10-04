@@ -4,10 +4,14 @@
 //! `xl/styles.xml`, the theme and each worksheet's XML directly.
 
 use crate::cell::CellCoord;
-use crate::format::{Borders, CellFormat, HAlign, Rgb, SheetFormatting, builtin_number_format};
+use crate::cell::CellRange;
+use crate::format::{
+    AutoFilter, Borders, CellFormat, HAlign, Rgb, SheetFormatting, VAlign, builtin_number_format,
+};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek};
 
 /// A `<col width>` from the file to UI points. The stored width includes
@@ -255,7 +259,17 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
     let mut fonts: Vec<Font> = Vec::new();
     let mut fills: Vec<Option<Rgb>> = Vec::new();
     let mut borders: Vec<Borders> = Vec::new();
-    let mut xfs: Vec<(u32, usize, usize, usize, HAlign)> = Vec::new();
+    #[derive(Default)]
+    struct Xf {
+        num_fmt: u32,
+        font: usize,
+        fill: usize,
+        border: usize,
+        h_align: HAlign,
+        v_align: VAlign,
+        wrap: bool,
+    }
+    let mut xfs: Vec<Xf> = Vec::new();
 
     let mut font = Font::default();
     let mut fill: Option<Rgb> = None;
@@ -318,21 +332,27 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
                 }
             }
 
-            (b"xf", Some(e)) if section == Section::CellXfs => xfs.push((
-                attr_num(e, b"numFmtId").unwrap_or(0),
-                attr_num(e, b"fontId").unwrap_or(0),
-                attr_num(e, b"fillId").unwrap_or(0),
-                attr_num(e, b"borderId").unwrap_or(0),
-                HAlign::General,
-            )),
+            (b"xf", Some(e)) if section == Section::CellXfs => xfs.push(Xf {
+                num_fmt: attr_num(e, b"numFmtId").unwrap_or(0),
+                font: attr_num(e, b"fontId").unwrap_or(0),
+                fill: attr_num(e, b"fillId").unwrap_or(0),
+                border: attr_num(e, b"borderId").unwrap_or(0),
+                ..Default::default()
+            }),
             (b"alignment", Some(e)) if section == Section::CellXfs => {
                 if let Some(xf) = xfs.last_mut() {
-                    xf.4 = match attr(e, b"horizontal").as_deref() {
+                    xf.h_align = match attr(e, b"horizontal").as_deref() {
                         Some("left") => HAlign::Left,
                         Some("center" | "centerContinuous") => HAlign::Center,
                         Some("right") => HAlign::Right,
                         _ => HAlign::General,
                     };
+                    xf.v_align = match attr(e, b"vertical").as_deref() {
+                        Some("top") => VAlign::Top,
+                        Some("center") => VAlign::Center,
+                        _ => VAlign::Bottom,
+                    };
+                    xf.wrap = matches!(attr(e, b"wrapText").as_deref(), Some("1" | "true"));
                 }
             }
             _ => {}
@@ -343,8 +363,8 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
     let default_size = fonts.first().and_then(|f| f.size);
     let xfs = xfs
         .into_iter()
-        .map(|(num_fmt, font_id, fill_id, border_id, h_align)| {
-            let font = fonts.get(font_id).cloned().unwrap_or_default();
+        .map(|xf| {
+            let font = fonts.get(xf.font).cloned().unwrap_or_default();
             CellFormat {
                 bold: font.bold,
                 italic: font.italic,
@@ -356,13 +376,15 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
                     .map(|s| s.round().clamp(1.0, 255.0) as u8),
                 // Black text is the default; leave it to the theme so it reads in dark mode.
                 font_color: font.color.filter(|&c| c != Rgb::BLACK),
-                fill: fills.get(fill_id).copied().flatten(),
-                h_align,
-                borders: borders.get(border_id).copied().unwrap_or_default(),
+                fill: fills.get(xf.fill).copied().flatten(),
+                h_align: xf.h_align,
+                v_align: xf.v_align,
+                wrap: xf.wrap,
+                borders: borders.get(xf.border).copied().unwrap_or_default(),
                 number_format: num_fmts
-                    .get(&num_fmt)
+                    .get(&xf.num_fmt)
                     .cloned()
-                    .or_else(|| builtin_number_format(num_fmt).map(str::to_string))
+                    .or_else(|| builtin_number_format(xf.num_fmt).map(str::to_string))
                     .filter(|c| !c.eq_ignore_ascii_case("general")),
             }
         })
@@ -373,45 +395,108 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
 fn parse_sheet(xml: &str, styles: &StyleTable) -> Result<SheetFormatting, String> {
     let mut formatting = SheetFormatting::default();
     let default_points = excel_height_to_points(15.0);
+    let style = |e: &BytesStart, name: &[u8]| -> Option<CellFormat> {
+        let format = styles.xfs.get(attr_num::<usize>(e, name)?)?;
+        (!format.is_default()).then(|| format.clone())
+    };
+    // AutoFilter: <autoFilter ref><filterColumn colId><filters><filter val/>
+    let mut filter: Option<AutoFilter> = None;
+    let mut filter_col: Option<u32> = None;
+
     walk(xml, |name, e, _| match (name, e) {
         (b"col", Some(e)) => {
             let (Some(min), Some(max)) = (attr_num::<u32>(e, b"min"), attr_num::<u32>(e, b"max"))
             else {
                 return;
             };
-            let hidden = attr(e, b"hidden").as_deref() == Some("1");
-            let width = if hidden {
-                Some(0.0)
-            } else {
-                attr_num::<f64>(e, b"width").map(excel_width_to_points)
-            };
-            // Ranges like min=1 max=16384 cover every column; cap them.
-            if let Some(w) = width {
-                for col in min.max(1)..=max.min(min.max(1) + 1024) {
-                    formatting.column_widths.insert(col - 1, w);
+            let (first, last) = (min.max(1) - 1, max.clamp(1, crate::cell::MAX_COL + 1) - 1);
+            let hidden = matches!(attr(e, b"hidden").as_deref(), Some("1" | "true"));
+            let width = attr_num::<f64>(e, b"width").map(excel_width_to_points);
+            let format = style(e, b"style");
+            for col in first..=last {
+                if hidden {
+                    formatting.hidden_columns.insert(col);
+                }
+                // Excel's "every column" range carries only a width or style;
+                // per-column widths are kept for a reasonable span.
+                if let Some(w) = width {
+                    if col - first <= 1024 {
+                        formatting.column_widths.insert(col, w);
+                    }
+                }
+                if let Some(f) = &format {
+                    formatting.column_formats.insert(col, f.clone());
                 }
             }
         }
         (b"row", Some(e)) => {
-            if let (Some(r), Some(ht)) = (attr_num::<u32>(e, b"r"), attr_num::<f64>(e, b"ht")) {
+            let Some(r) = attr_num::<u32>(e, b"r").and_then(|r| r.checked_sub(1)) else {
+                return;
+            };
+            if let Some(ht) = attr_num::<f64>(e, b"ht") {
                 let points = excel_height_to_points(ht);
                 if (points - default_points).abs() > 0.5 {
-                    formatting.row_heights.insert(r.saturating_sub(1), points);
+                    formatting.row_heights.insert(r, points);
+                }
+            }
+            if matches!(attr(e, b"hidden").as_deref(), Some("1" | "true")) {
+                formatting.hidden_rows.insert(r);
+            }
+            if matches!(attr(e, b"customFormat").as_deref(), Some("1" | "true")) {
+                if let Some(f) = style(e, b"s") {
+                    formatting.row_formats.insert(r, f);
                 }
             }
         }
         (b"c", Some(e)) => {
-            let (Some(r), Some(s)) = (attr(e, b"r"), attr_num::<usize>(e, b"s")) else {
+            let Some(coord) = attr(e, b"r").and_then(|r| CellCoord::from_a1(&r)) else {
                 return;
             };
-            if let (Some(coord), Some(format)) = (CellCoord::from_a1(&r), styles.xfs.get(s)) {
-                if !format.is_default() {
-                    formatting.set(coord, format.clone());
+            if let Some(format) = style(e, b"s") {
+                formatting.set(coord, format);
+            }
+        }
+        (b"mergeCell", Some(e)) => {
+            if let Some(range) = attr(e, b"ref").and_then(|r| CellRange::from_a1(&r)) {
+                if range.start != range.end {
+                    formatting.merges.push(range);
                 }
+            }
+        }
+        (b"pane", Some(e)) => {
+            if matches!(attr(e, b"state").as_deref(), Some("frozen" | "frozenSplit")) {
+                let rows = attr_num::<f64>(e, b"ySplit").unwrap_or(0.0) as u32;
+                let cols = attr_num::<f64>(e, b"xSplit").unwrap_or(0.0) as u32;
+                formatting.frozen = (rows, cols);
+            }
+        }
+        (b"autoFilter", Some(e)) => {
+            filter = attr(e, b"ref")
+                .and_then(|r| CellRange::from_a1(&r))
+                .map(|range| AutoFilter {
+                    range,
+                    allowed: BTreeMap::new(),
+                });
+        }
+        (b"filterColumn", Some(e)) => filter_col = attr_num(e, b"colId"),
+        (b"filterColumn", None) => filter_col = None,
+        (b"filters", Some(e)) => {
+            if let (Some(f), Some(col)) = (filter.as_mut(), filter_col) {
+                let values = f.allowed.entry(col).or_insert_with(BTreeSet::new);
+                if matches!(attr(e, b"blank").as_deref(), Some("1" | "true")) {
+                    values.insert(String::new());
+                }
+            }
+        }
+        (b"filter", Some(e)) => {
+            if let (Some(f), Some(col), Some(val)) = (filter.as_mut(), filter_col, attr(e, b"val"))
+            {
+                f.allowed.entry(col).or_default().insert(val);
             }
         }
         _ => {}
     })?;
+    formatting.filter = filter;
     let default_width = excel_width_to_points(9.140625);
     formatting
         .column_widths
@@ -526,5 +611,44 @@ mod tests {
         assert_eq!(theme[4], Rgb(0xAA, 0, 0));
         // Missing slots fall back to the Office palette.
         assert_eq!(theme[5], Rgb(0xED, 0x7D, 0x31));
+    }
+
+    #[test]
+    fn reads_sheet_layout() {
+        let styles = parse_styles(STYLES, &default_theme()).unwrap();
+        let xml = r##"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetViews><sheetView workbookViewId="0"><pane xSplit="1" ySplit="2" topLeftCell="B3" activePane="bottomRight" state="frozen"/></sheetView></sheetViews>
+  <cols><col min="2" max="3" width="9.140625" style="1" customWidth="1"/><col min="5" max="5" width="0" hidden="1"/></cols>
+  <sheetData>
+    <row r="1" s="2" customFormat="1"><c r="A1" t="s"><v>0</v></c></row>
+    <row r="4" hidden="1"><c r="A4"><v>1</v></c></row>
+  </sheetData>
+  <autoFilter ref="A1:C9"><filterColumn colId="1"><filters blank="1"><filter val="Tea"/><filter val="Cake"/></filters></filterColumn></autoFilter>
+  <mergeCells count="1"><mergeCell ref="A6:C6"/></mergeCells>
+</worksheet>"##;
+        let sheet = parse_sheet(xml, &styles).unwrap();
+        assert_eq!(sheet.frozen, (2, 1));
+        assert!(sheet.column_formats.get(&1).is_some_and(|f| f.bold));
+        assert!(sheet.column_formats.get(&2).is_some_and(|f| f.bold));
+        assert!(sheet.hidden_columns.contains(&4));
+        assert!(sheet.row_formats.get(&0).is_some_and(|f| f.italic));
+        assert!(sheet.hidden_rows.contains(&3));
+        assert_eq!(sheet.merges, vec![CellRange::from_a1("A6:C6").unwrap()]);
+        let filter = sheet.filter.unwrap();
+        assert_eq!(filter.range, CellRange::from_a1("A1:C9").unwrap());
+        let allowed: Vec<&str> = filter.allowed[&1].iter().map(String::as_str).collect();
+        assert_eq!(allowed, vec!["", "Cake", "Tea"]);
+    }
+
+    #[test]
+    fn reads_vertical_alignment_and_wrap() {
+        let xml = STYLES.replace(
+            r#"<alignment horizontal="center"/>"#,
+            r#"<alignment horizontal="center" vertical="top" wrapText="1"/>"#,
+        );
+        let styles = parse_styles(&xml, &default_theme()).unwrap();
+        assert_eq!(styles.xfs[1].v_align, VAlign::Top);
+        assert!(styles.xfs[1].wrap);
+        assert!(!styles.xfs[2].wrap);
     }
 }

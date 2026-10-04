@@ -1,0 +1,465 @@
+//! App-level tests for navigation, sheet operations, fill, find and recovery.
+
+use super::*;
+use crate::cell::{Axis, MAX_COL, MAX_ROW};
+use crate::format::CellFormat;
+
+fn app() -> SpreadsheetApp {
+    let mut app = SpreadsheetApp::new();
+    app.new_workbook();
+    app
+}
+
+fn at(a1: &str) -> CellCoord {
+    CellCoord::from_a1(a1).unwrap()
+}
+
+fn put(app: &mut SpreadsheetApp, a1: &str, content: &str) {
+    app.set_cell_content(at(a1), content);
+}
+
+fn val(app: &SpreadsheetApp, a1: &str) -> CellResult {
+    app.engine.get_value(app.current_sheet, at(a1))
+}
+
+fn text(s: &str) -> CellResult {
+    CellResult::Text(s.into())
+}
+
+fn select(app: &mut SpreadsheetApp, from: &str, to: &str) {
+    app.selection.move_to(at(from));
+    app.selection.extend_to(at(to));
+}
+
+const VIEW: Vec2 = Vec2::new(1200.0, 800.0);
+
+#[test]
+fn ctrl_arrows_jump_to_data_edges() {
+    let mut app = app();
+    for a1 in ["A1", "A2", "A3", "A7", "A8"] {
+        put(&mut app, a1, "1");
+    }
+    app.selection.move_to(at("A1"));
+    app.navigate(NavigationKey::CtrlDown, false, VIEW);
+    assert_eq!(app.selection.active, at("A3"), "end of the first block");
+    app.navigate(NavigationKey::CtrlDown, false, VIEW);
+    assert_eq!(app.selection.active, at("A7"), "start of the next block");
+    app.navigate(NavigationKey::CtrlDown, false, VIEW);
+    assert_eq!(app.selection.active, at("A8"));
+    app.navigate(NavigationKey::CtrlDown, false, VIEW);
+    assert_eq!(
+        app.selection.active,
+        CellCoord::new(MAX_ROW, 0),
+        "sheet edge"
+    );
+    app.navigate(NavigationKey::CtrlUp, true, VIEW);
+    assert_eq!(app.selection.active, at("A8"));
+    assert_eq!(
+        app.selection.anchor,
+        CellCoord::new(MAX_ROW, 0),
+        "shift extends"
+    );
+
+    put(&mut app, "D5", "x");
+    app.navigate(NavigationKey::CtrlEnd, false, VIEW);
+    assert_eq!(app.selection.active, at("D8"), "last used row and column");
+}
+
+#[test]
+fn navigation_reaches_the_whole_sheet_and_skips_hidden_rows() {
+    let mut app = app();
+    app.selection.move_to(CellCoord::new(5000, 300));
+    app.navigate(NavigationKey::Down, false, VIEW);
+    assert_eq!(app.selection.active, CellCoord::new(5001, 300));
+    app.engine.formatting_mut(0).hidden_rows.insert(5002);
+    app.navigate(NavigationKey::Down, false, VIEW);
+    assert_eq!(app.selection.active, CellCoord::new(5003, 300));
+    app.selection.move_to(CellCoord::new(MAX_ROW, MAX_COL));
+    app.navigate(NavigationKey::Right, false, VIEW);
+    assert_eq!(app.selection.active, CellCoord::new(MAX_ROW, MAX_COL));
+}
+
+#[test]
+fn header_clicks_select_whole_lines() {
+    let mut app = app();
+    app.handle_header_select(HeaderSelectFixture::col(2, false));
+    let r = app.selection.primary_range();
+    assert_eq!(
+        (r.start, r.end),
+        (CellCoord::new(0, 2), CellCoord::new(MAX_ROW, 2))
+    );
+    assert_eq!(
+        app.selection.active,
+        CellCoord::new(0, 2),
+        "active is the top cell"
+    );
+    app.handle_header_select(HeaderSelectFixture::col(4, true));
+    let r = app.selection.primary_range();
+    assert_eq!((r.start.col, r.end.col), (2, 4));
+
+    app.navigate(NavigationKey::SelectRow, false, VIEW);
+    let r = app.selection.primary_range();
+    assert_eq!((r.start.col, r.end.col), (0, MAX_COL));
+}
+
+/// Builds the grid's header click events.
+struct HeaderSelectFixture;
+impl HeaderSelectFixture {
+    fn col(index: u32, extend: bool) -> crate::gui::grid::HeaderSelect {
+        crate::gui::grid::HeaderSelect {
+            axis: Axis::Column,
+            index,
+            extend,
+        }
+    }
+}
+
+#[test]
+fn formatting_a_whole_column_uses_a_column_format() {
+    let mut app = app();
+    put(&mut app, "B2", "5");
+    app.engine.set_cell_format(
+        0,
+        at("B3"),
+        CellFormat {
+            italic: true,
+            ..Default::default()
+        },
+    );
+    app.select_lines(Axis::Column, 1, 1);
+    app.handle_format_action(FormatAction::ToggleBold);
+    let f = app.engine.formatting(0).unwrap();
+    assert!(f.column_formats.get(&1).is_some_and(|c| c.bold));
+    assert!(f.cells().count() <= 1, "no per-cell formats were created");
+    // A cell with its own format in that column gets the change too.
+    let b3 = f.get(at("B3")).unwrap();
+    assert!(b3.bold && b3.italic);
+    assert!(f.effective(at("B900000")).is_some_and(|c| c.bold));
+
+    app.undo();
+    let f = app.engine.formatting(0).unwrap();
+    assert!(f.column_formats.is_empty());
+    assert!(!f.get(at("B3")).unwrap().bold);
+}
+
+#[test]
+fn bolding_a_cell_keeps_its_column_fill() {
+    let mut app = app();
+    app.engine.formatting_mut(0).set_line_format(
+        Axis::Column,
+        0,
+        CellFormat {
+            fill: Some(crate::format::Rgb(255, 255, 0)),
+            ..Default::default()
+        },
+    );
+    select(&mut app, "A4", "A4");
+    app.handle_format_action(FormatAction::ToggleBold);
+    let a4 = app.engine.cell_format(0, at("A4")).unwrap();
+    assert!(a4.bold && a4.fill.is_some());
+    assert!(
+        app.active_format().bold,
+        "the toolbar shows what the cell shows"
+    );
+}
+
+#[test]
+fn inserting_and_deleting_rows_undo_as_one_step() {
+    let mut app = app();
+    put(&mut app, "A1", "1");
+    put(&mut app, "A2", "2");
+    put(&mut app, "A3", "=A1+A2");
+    select(&mut app, "A2", "A3");
+    app.insert_lines(Axis::Row);
+    assert_eq!(val(&app, "A4"), CellResult::Value(2.0));
+    assert_eq!(
+        app.engine.get_formula(0, at("A5")).as_deref(),
+        Some("=(A1+A4)")
+    );
+    assert_eq!(val(&app, "A5"), CellResult::Value(3.0));
+    app.undo();
+    assert_eq!(
+        app.engine.get_formula(0, at("A3")).as_deref(),
+        Some("=A1+A2")
+    );
+    assert_eq!(val(&app, "A5"), CellResult::Empty);
+
+    select(&mut app, "A1", "A1");
+    app.delete_lines(Axis::Row);
+    assert_eq!(val(&app, "A1"), CellResult::Value(2.0));
+    assert_eq!(
+        val(&app, "A2"),
+        CellResult::Error(crate::cell::CellError::Ref)
+    );
+    app.undo();
+    assert_eq!(val(&app, "A3"), CellResult::Value(3.0));
+}
+
+#[test]
+fn hiding_and_unhiding_columns() {
+    let mut app = app();
+    select(&mut app, "B1", "C1");
+    app.set_lines_hidden(Axis::Column, true);
+    assert!(app.grid_config.is_hidden(Axis::Column, 1));
+    assert!(app.grid_config.is_hidden(Axis::Column, 2));
+    select(&mut app, "A1", "D1");
+    app.set_lines_hidden(Axis::Column, false);
+    assert!(!app.grid_config.is_hidden(Axis::Column, 1));
+    app.undo();
+    assert!(app.grid_config.is_hidden(Axis::Column, 2));
+}
+
+#[test]
+fn quick_sort_finds_the_data_and_its_header() {
+    let mut app = app();
+    for (a1, v) in [
+        ("A1", "Name"),
+        ("B1", "Qty"),
+        ("A2", "pear"),
+        ("B2", "3"),
+        ("A3", "apple"),
+        ("B3", "9"),
+    ] {
+        put(&mut app, a1, v);
+    }
+    app.selection.move_to(at("B2"));
+    app.quick_sort(false);
+    assert_eq!(val(&app, "A1"), text("Name"), "header stays");
+    assert_eq!(val(&app, "A2"), text("apple"), "9 sorts first descending");
+    app.undo();
+    assert_eq!(val(&app, "A2"), text("pear"));
+}
+
+#[test]
+fn filter_on_and_off() {
+    let mut app = app();
+    for (a1, v) in [
+        ("A1", "Fruit"),
+        ("A2", "Tea"),
+        ("A3", "Cake"),
+        ("A4", "Tea"),
+    ] {
+        put(&mut app, a1, v);
+    }
+    app.selection.move_to(at("A2"));
+    app.toggle_filter();
+    let range = app
+        .engine
+        .formatting(0)
+        .unwrap()
+        .filter
+        .as_ref()
+        .unwrap()
+        .range;
+    assert_eq!(range, CellRange::from_a1("A1:A4").unwrap());
+
+    app.open_filter_popup(0, egui::Pos2::ZERO);
+    let mut popup = app.filter_popup.take().unwrap();
+    for (v, on) in &mut popup.values {
+        *on = v == "Tea";
+    }
+    app.filter_popup = Some(popup);
+    let popup = app.filter_popup.take().unwrap();
+    app.apply_filter_popup(&popup);
+    assert!(app.grid_config.is_hidden(Axis::Row, 2), "Cake is hidden");
+    assert!(!app.grid_config.is_hidden(Axis::Row, 1));
+
+    app.toggle_filter();
+    assert!(app.engine.formatting(0).unwrap().filter.is_none());
+    assert!(!app.grid_config.is_hidden(Axis::Row, 2), "rows come back");
+}
+
+#[test]
+fn fill_handle_continues_series() {
+    let mut app = app();
+    put(&mut app, "A1", "2");
+    put(&mut app, "A2", "4");
+    select(&mut app, "A1", "A2");
+    app.fill_to(at("A5"));
+    assert_eq!(val(&app, "A5"), CellResult::Value(10.0));
+
+    put(&mut app, "B1", "Item 9");
+    select(&mut app, "B1", "B1");
+    app.fill_to(at("B3"));
+    assert_eq!(val(&app, "B3"), text("Item 11"));
+
+    put(&mut app, "C1", "Mar");
+    select(&mut app, "C1", "C1");
+    app.fill_to(at("F1"));
+    assert_eq!(val(&app, "F1"), text("Jun"));
+
+    put(&mut app, "D3", "2023-03-15");
+    select(&mut app, "D3", "D3");
+    app.fill_to(at("D5"));
+    assert_eq!(val(&app, "D5"), CellResult::Value(45002.0));
+    assert!(
+        app.engine
+            .cell_format(0, at("D5"))
+            .is_some_and(|f| f.number_format.is_some())
+    );
+
+    // A single number repeats, as in Excel.
+    put(&mut app, "E1", "7");
+    select(&mut app, "E1", "E1");
+    app.fill_to(at("E3"));
+    assert_eq!(val(&app, "E3"), CellResult::Value(7.0));
+
+    // Upward fill counts down.
+    put(&mut app, "G5", "10");
+    put(&mut app, "G6", "20");
+    select(&mut app, "G5", "G6");
+    app.fill_to(at("G3"));
+    assert_eq!(val(&app, "G3"), CellResult::Value(-10.0));
+
+    app.undo();
+    assert_eq!(val(&app, "G3"), CellResult::Empty);
+}
+
+#[test]
+fn fill_down_copies_formulas() {
+    let mut app = app();
+    put(&mut app, "A1", "1");
+    put(&mut app, "A2", "2");
+    put(&mut app, "B1", "=A1*10");
+    select(&mut app, "B1", "B2");
+    app.fill_down();
+    assert_eq!(val(&app, "B2"), CellResult::Value(20.0));
+    // A one-row selection copies from the row above.
+    select(&mut app, "B3", "B3");
+    put(&mut app, "A3", "3");
+    app.fill_down();
+    assert_eq!(val(&app, "B3"), CellResult::Value(30.0));
+}
+
+#[test]
+fn find_and_replace_across_the_workbook() {
+    let mut app = app();
+    put(&mut app, "A1", "Green tea");
+    put(&mut app, "C5", "tea time");
+    app.add_sheet();
+    put(&mut app, "B2", "TEA");
+    app.switch_sheet(0);
+
+    app.open_find(true);
+    {
+        let d = app.find_dialog.as_mut().unwrap();
+        d.query = "tea".into();
+        d.whole_workbook = true;
+        d.replacement = "coffee".into();
+    }
+    let query = find::Query::new("tea", false, false);
+    let hits = app.find_all(&query, true, true);
+    assert_eq!(hits.len(), 3);
+    let n = app.replace_everywhere();
+    assert_eq!(n, 3);
+    assert_eq!(val(&app, "A1"), text("Green coffee"));
+    assert_eq!(app.engine.get_value(1, at("B2")), text("coffee"));
+    app.undo();
+    assert_eq!(app.engine.get_value(1, at("B2")), text("TEA"));
+}
+
+#[test]
+fn merging_keeps_the_top_left_value_and_unmerges() {
+    let mut app = app();
+    put(&mut app, "A1", "Title");
+    select(&mut app, "A1", "C1");
+    app.toggle_merge();
+    let merges = app.engine.formatting(0).unwrap().merges.clone();
+    assert_eq!(merges, vec![CellRange::from_a1("A1:C1").unwrap()]);
+    assert_eq!(app.snap_to_merge(at("B1")), at("A1"));
+    // Moving right from the merge leaves it.
+    app.selection.move_to(at("A1"));
+    app.navigate(NavigationKey::Right, false, VIEW);
+    assert_eq!(app.selection.active, at("D1"));
+    select(&mut app, "B1", "B1");
+    app.toggle_merge();
+    assert!(app.engine.formatting(0).unwrap().merges.is_empty());
+}
+
+#[test]
+fn freezing_panes() {
+    let mut app = app();
+    app.freeze(1, 2);
+    assert_eq!(
+        (app.grid_config.frozen_rows, app.grid_config.frozen_cols),
+        (1, 2)
+    );
+    app.navigate(NavigationKey::CtrlHome, false, VIEW);
+    assert_eq!(
+        app.selection.active,
+        CellCoord::new(1, 2),
+        "first unfrozen cell"
+    );
+}
+
+#[test]
+fn whole_column_copy_and_delete_stay_within_the_data() {
+    let mut app = app();
+    put(&mut app, "A1", "1");
+    put(&mut app, "A3", "3");
+    app.select_lines(Axis::Column, 0, 0);
+    let ctx = egui::Context::default();
+    app.copy_selection(&ctx, false);
+    let clip = app.clipboard.as_ref().unwrap();
+    assert_eq!(clip.rows, 3, "trimmed to the used rows");
+    app.delete_selection();
+    assert_eq!(val(&app, "A3"), CellResult::Empty);
+}
+
+#[test]
+fn autosave_and_recovery_round_trip() {
+    let dir = std::env::temp_dir().join(format!("rustsheet_recovery_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Recovery")).unwrap();
+    let xlsx = dir.join("Recovery").join("crashed.xlsx");
+    let meta = dir.join("Recovery").join("crashed.json");
+
+    // A session that autosaved, then died long ago.
+    let mut old = app();
+    put(&mut old, "A1", "unsaved work");
+    old.write_xlsx(&xlsx).unwrap();
+    let stale = recovery::RecoveryMeta {
+        original: Some(PathBuf::from("C:/Budget.xlsx")),
+        saved_at: 1,
+        heartbeat: 1,
+    };
+    std::fs::write(&meta, serde_json::to_string(&stale).unwrap()).unwrap();
+
+    let found = recovery::find_recoverable_in(&dir.join("Recovery"));
+    assert_eq!(found.len(), 1);
+    let mut app = app();
+    app.load_file(&found[0].xlsx);
+    assert_eq!(val(&app, "A1"), text("unsaved work"));
+
+    // A live session (fresh heartbeat) is not offered.
+    let live = recovery::RecoveryMeta {
+        heartbeat: u64::MAX / 2,
+        ..stale
+    };
+    std::fs::write(&meta, serde_json::to_string(&live).unwrap()).unwrap();
+    assert!(recovery::find_recoverable_in(&dir.join("Recovery")).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn saves_are_atomic_and_leave_no_temp_files() {
+    let dir = std::env::temp_dir().join(format!("rustsheet_atomic_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("book.xlsx");
+    let mut app = app();
+    put(&mut app, "A1", "v1");
+    app.save_to_path(&path);
+    put(&mut app, "A1", "v2");
+    app.save_to_path(&path);
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, vec!["book.xlsx".to_string()]);
+    let mut back = SpreadsheetApp::new();
+    back.load_file(&path);
+    assert_eq!(val(&back, "A1"), text("v2"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
