@@ -836,8 +836,13 @@ fn insert_picture(
     worksheet: &mut Worksheet,
     p: &crate::format::picture::Picture,
 ) -> Result<(), XlsxWriteError> {
-    use super::drawing::ROW_POINTS_PER_PIXEL;
+    use super::drawing::{ROW_POINTS_PER_PIXEL, image_size};
     use crate::format::picture::POINTS_PER_PIXEL;
+    // rust_xlsxwriter indexes the header unchecked; a truncated image read
+    // from some file must not panic the save.
+    if image_size(&p.data).is_none() {
+        return Ok(());
+    }
     let Ok(mut image) = rust_xlsxwriter::Image::new_from_buffer(&p.data) else {
         return Ok(());
     };
@@ -924,16 +929,9 @@ fn to_xlsx_format(f: &CellFormat) -> Format {
 
 /// Format a CellRange as an Excel formula reference
 fn format_range_reference(sheet_name: &str, range: &crate::cell::CellRange) -> String {
-    // Handle sheet names with spaces
-    let quoted_sheet = if sheet_name.contains(' ') || sheet_name.contains('\'') {
-        format!("'{}'", sheet_name.replace('\'', "''"))
-    } else {
-        sheet_name.to_string()
-    };
-
     format!(
         "{}!${}${}:${}${}",
-        quoted_sheet,
+        crate::formula::quote_sheet_name(sheet_name),
         col_to_letters(range.start.col),
         range.start.row + 1,
         col_to_letters(range.end.col),

@@ -8,7 +8,8 @@ use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 use thiserror::Error;
 
-use crate::cell::CellRange;
+use super::limits;
+use crate::cell::{CellRange, MAX_COL, MAX_ROW};
 use crate::chart::{ChartDefinition, ChartKind, ChartSeries, LegendPosition};
 
 #[derive(Error, Debug)]
@@ -40,20 +41,27 @@ impl ChartReader {
         Self::read_charts_from_reader(reader)
     }
 
-    /// Read charts from a reader
+    /// Read charts from a reader. A chart part that can't be read is left
+    /// out; the others still load.
     pub fn read_charts_from_reader<R: Read + Seek>(
         reader: R,
     ) -> Result<Vec<(u32, ChartDefinition)>, ChartReadError> {
+        limits::contain("A chart", || Self::read_all(reader)).map_err(ChartReadError::Xml)?
+    }
+
+    fn read_all<R: Read + Seek>(reader: R) -> Result<Vec<(u32, ChartDefinition)>, ChartReadError> {
         let mut archive =
             zip::ZipArchive::new(reader).map_err(|e| ChartReadError::Zip(e.to_string()))?;
 
-        if let Ok(mut file) = archive.by_name("xl/rustsheet/charts.json") {
-            let mut json = String::new();
-            file.read_to_string(&mut json)?;
-            drop(file);
-            let charts: Vec<ChartDefinition> =
-                serde_json::from_str(&json).map_err(|e| ChartReadError::Xml(e.to_string()))?;
-            return Ok(charts.into_iter().map(|c| (c.sheet_index, c)).collect());
+        // RustSheet's own definitions, unless damaged: then Excel's charts.
+        let saved = read_text(&mut archive, super::writer::CHARTS_MANIFEST)
+            .and_then(|json| serde_json::from_str::<Vec<ChartDefinition>>(&json).ok());
+        if let Some(charts) = saved {
+            return Ok(charts
+                .into_iter()
+                .map(sanitize)
+                .map(|c| (c.sheet_index, c))
+                .collect());
         }
 
         let names: Vec<String> = archive
@@ -64,19 +72,73 @@ impl ChartReader {
 
         let mut charts = Vec::new();
         for name in names {
-            let mut file = archive
-                .by_name(&name)
-                .map_err(|e| ChartReadError::Zip(e.to_string()))?;
-            let mut xml = String::new();
-            file.read_to_string(&mut xml)?;
-            drop(file);
+            let Some(xml) = read_text(&mut archive, &name) else {
+                continue;
+            };
             if let Ok(chart) = parse_chart_xml(&xml, 0) {
-                charts.push((0, chart));
+                charts.push((0, sanitize(chart)));
             }
         }
         Ok(charts)
     }
 }
+
+fn read_text<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
+    String::from_utf8(limits::read_part(archive, name)?).ok()
+}
+
+/// Points in one series at most: a full column. A series is a row or a
+/// column of cells, and resolving it allocates a value per cell.
+const MAX_SERIES_CELLS: u64 = MAX_ROW as u64 + 1;
+
+/// A chart from a file, with series off the sheet dropped and unusable
+/// sizes put back to the defaults. The JSON part's numbers are whatever
+/// the file says.
+fn sanitize(mut chart: ChartDefinition) -> ChartDefinition {
+    let ok = |r: &CellRange| limits::fits(*r) && r.cell_count() <= MAX_SERIES_CELLS;
+    chart
+        .series
+        .retain(|s| ok(&s.y_range) && s.x_range.as_ref().is_none_or(ok));
+    let defaults = ChartDefinition::default();
+    let fix = |v: &mut f32, default: f32, max: f32| {
+        *v = limits::size(f64::from(*v), f64::from(max)).map_or(default, |v| v as f32);
+    };
+    let offset = |v: &mut f32, default: f32| {
+        *v = if v.is_finite() {
+            v.clamp(-MAX_CHART_SIZE, MAX_CHART_SIZE)
+        } else {
+            default
+        };
+    };
+    let area = &mut chart.overlay_area;
+    let (row, col) = area.anchor_cell;
+    area.anchor_cell = (row.min(MAX_ROW), col.min(MAX_COL));
+    let d = defaults.overlay_area;
+    offset(&mut area.anchor_offset.0, d.anchor_offset.0);
+    offset(&mut area.anchor_offset.1, d.anchor_offset.1);
+    fix(&mut area.size.0, d.size.0, MAX_CHART_SIZE);
+    fix(&mut area.size.1, d.size.1, MAX_CHART_SIZE);
+    let (style, d) = (&mut chart.style, defaults.style);
+    fix(&mut style.border_width, d.border_width, 100.0);
+    fix(&mut style.title_font_size, d.title_font_size, 400.0);
+    fix(&mut style.axis_font_size, d.axis_font_size, 400.0);
+    fix(&mut style.legend_font_size, d.legend_font_size, 400.0);
+    fix(&mut style.line_width, d.line_width, 100.0);
+    fix(&mut style.marker_size, d.marker_size, 100.0);
+    fix(&mut style.bar_gap_ratio, d.bar_gap_ratio, 10.0);
+    fix(&mut style.inner_radius_ratio, d.inner_radius_ratio, 0.95);
+    for axis in [&mut chart.x_axis, &mut chart.y_axis]
+        .into_iter()
+        .chain(chart.y_axis_secondary.as_mut())
+    {
+        axis.min = axis.min.filter(|v| v.is_finite());
+        axis.max = axis.max.filter(|v| v.is_finite());
+    }
+    chart
+}
+
+/// Largest chart window side or offset, in pixels.
+const MAX_CHART_SIZE: f32 = 10_000.0;
 
 /// Parse chart XML content into a ChartDefinition (utility function)
 pub fn parse_chart_xml(content: &str, sheet_index: u32) -> Result<ChartDefinition, ChartReadError> {
@@ -223,8 +285,7 @@ fn parse_range_reference(formula: &str) -> Option<CellRange> {
         formula
     };
 
-    let cleaned = range_part.replace('$', "");
-    CellRange::from_a1(&cleaned)
+    limits::range(range_part)
 }
 
 /// Extract series color from spPr/solidFill
@@ -234,7 +295,8 @@ fn extract_series_color(ser_content: &str) -> Option<[u8; 4]> {
         let val_end = ser_content[val_start..].find('"')? + val_start;
         let hex_color = &ser_content[val_start..val_end];
 
-        if hex_color.len() == 6 {
+        // Byte slicing below needs ASCII: "aé123" is six bytes too.
+        if hex_color.len() == 6 && hex_color.is_ascii() {
             let r = u8::from_str_radix(&hex_color[0..2], 16).ok()?;
             let g = u8::from_str_radix(&hex_color[2..4], 16).ok()?;
             let b = u8::from_str_radix(&hex_color[4..6], 16).ok()?;

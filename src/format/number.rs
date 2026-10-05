@@ -435,7 +435,9 @@ fn format_datetime(serial: f64, body: &str) -> String {
     let whole_secs = secs_total.floor() as u64;
     let (h, m, s) = (whole_secs / 3600, (whole_secs / 60) % 60, whole_secs % 60);
     let has_ampm = toks.iter().any(|t| matches!(t, Tok::AmPm { .. }));
-    let weekday = ((day_serial as i64 - 1).rem_euclid(7)) as usize;
+    // Serials far outside Excel's dates come from files too; `as` saturates
+    // and the arithmetic must not overflow.
+    let weekday = (day_serial as i64).wrapping_sub(1).rem_euclid(7) as usize;
     const DAYS: [&str; 7] = [
         "Sunday",
         "Monday",
@@ -477,7 +479,9 @@ fn format_datetime(serial: f64, body: &str) -> String {
             Tok::Day(3) => out.push_str(&DAYS[weekday][..3]),
             Tok::Day(_) => out.push_str(DAYS[weekday]),
             Tok::Elapsed { unit, len } => {
-                let total = days as u64 * 86_400 + whole_secs;
+                let total = (days as u64)
+                    .saturating_mul(86_400)
+                    .saturating_add(whole_secs);
                 let value = match unit {
                     'h' => total / 3600,
                     'm' => total / 60,

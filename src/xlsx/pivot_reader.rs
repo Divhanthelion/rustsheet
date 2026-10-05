@@ -4,6 +4,7 @@
 //! hidden, where it sits); the cache definition it links to has the source
 //! range and each field's items.
 
+use super::limits;
 use super::styles::{attr, part_rels};
 use crate::cell::{CellCoord, CellRange};
 use crate::pivot::{Aggregate, PivotTable, PivotValue};
@@ -91,8 +92,7 @@ fn parse_cache(xml: &str) -> Cache {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.local_name().as_ref() {
                 b"worksheetSource" => {
                     cache.sheet = attr(&e, b"sheet");
-                    cache.source =
-                        attr(&e, b"ref").and_then(|r| CellRange::from_a1(&r.replace('$', "")));
+                    cache.source = attr(&e, b"ref").and_then(|r| limits::range(&r));
                 }
                 b"cacheField" => cache.items.push(Vec::new()),
                 kind @ (b"s" | b"n" | b"b" | b"e" | b"d" | b"m") if in_shared => {
@@ -139,10 +139,7 @@ fn build(layout: &str, cache: &str) -> Option<PivotTable> {
                         name = attr(&e, b"name").unwrap_or(name);
                     }
                     b"location" => {
-                        location = attr(&e, b"ref").and_then(|r| {
-                            CellRange::from_a1(&r)
-                                .or_else(|| CellCoord::from_a1(&r).map(CellRange::single))
-                        });
+                        location = attr(&e, b"ref").and_then(|r| limits::range(&r));
                         page_rows = attr(&e, b"rowPageCount").and_then(|v| v.parse().ok());
                     }
                     s @ (b"pivotFields" | b"rowFields" | b"colFields" | b"pageFields"
@@ -234,7 +231,7 @@ fn build(layout: &str, cache: &str) -> Option<PivotTable> {
     let above = if filters.is_empty() {
         0
     } else {
-        page_rows.unwrap_or(filters.len() as u32) + 1
+        page_rows.unwrap_or(filters.len() as u32).saturating_add(1)
     };
     let anchor = CellCoord::new(location.start.row.saturating_sub(above), location.start.col);
     Some(PivotTable {

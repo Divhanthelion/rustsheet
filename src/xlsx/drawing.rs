@@ -123,15 +123,15 @@ pub(super) fn parse_drawing(xml: &str) -> Vec<DrawnPicture> {
 
 /// A picture from its drawing entry and image file; `None` if the file
 /// isn't an image RustSheet can show.
-pub(super) fn to_picture(d: DrawnPicture, bytes: Vec<u8>) -> Option<Picture> {
+pub(super) fn to_picture(d: DrawnPicture, bytes: Arc<[u8]>) -> Option<Picture> {
     let kind = PictureKind::detect(&bytes)?;
     let (w, h) = match d.ext {
         Some((cx, cy)) if cx > 0 && cy > 0 => {
             (cx as f64 / EMU_PER_PIXEL, cy as f64 / EMU_PER_PIXEL)
         }
         _ => {
-            let image = rust_xlsxwriter::Image::new_from_buffer(&bytes).ok()?;
-            (image.width(), image.height())
+            let (w, h) = image_size(&bytes)?;
+            (f64::from(w), f64::from(h))
         }
     };
     let px = |emu: i64| (emu.max(0) as f64 / EMU_PER_PIXEL) as f32;
@@ -142,10 +142,61 @@ pub(super) fn to_picture(d: DrawnPicture, bytes: Vec<u8>) -> Option<Picture> {
             px(d.from.row_off) * ROW_POINTS_PER_PIXEL,
         ),
         size: (w as f32 * POINTS_PER_PIXEL, h as f32 * POINTS_PER_PIXEL),
-        data: Arc::from(bytes),
+        data: bytes,
         kind,
         description: d.description,
     })
+}
+
+/// An image's size in pixels from its header, walked the way
+/// `rust_xlsxwriter::Image::new_from_buffer` walks it but with every read
+/// checked. `None` where that would fail or index past the end, so a
+/// truncated image from a file can't panic it when the workbook is saved.
+pub(super) fn image_size(data: &[u8]) -> Option<(u32, u32)> {
+    let be16 = |at: usize| Some(u16::from_be_bytes(data.get(at..at + 2)?.try_into().ok()?));
+    let be32 = |at: usize| Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?));
+    let le16 = |at: usize| Some(u16::from_le_bytes(data.get(at..at + 2)?.try_into().ok()?));
+    let le32 = |at: usize| Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?));
+    let (mut width, mut height) = (0, 0);
+    if data.get(1..4)? == b"PNG" {
+        let mut at = 8usize;
+        while at < data.len() {
+            let (length, marker) = (be32(at)?, data.get(at + 4..at + 8)?);
+            if marker == b"IHDR" {
+                (width, height) = (be32(at + 8)?, be32(at + 12)?);
+            }
+            if marker == b"pHYs" {
+                data.get(at + 16)?;
+                be32(at + 12)?;
+            }
+            if marker == b"IEND" {
+                break;
+            }
+            at = at.checked_add(length as usize)?.checked_add(12)?;
+        }
+    } else if be16(0)? == 0xFFD8 {
+        let mut at = 2usize;
+        while at < data.len() {
+            let (marker, length) = (be16(at)?, be16(at + 2)?);
+            if marker & 0xFFF0 == 0xFFC0 && !matches!(marker, 0xFFC4 | 0xFFC8 | 0xFFCC) {
+                (height, width) = (u32::from(be16(at + 5)?), u32::from(be16(at + 7)?));
+            }
+            if marker == 0xFFE0 {
+                be16(at + 14)?;
+            }
+            if marker == 0xFFDA {
+                break;
+            }
+            at = at.checked_add(length as usize)?.checked_add(2)?;
+        }
+    } else if data.get(0..2)? == b"BM" {
+        (width, height) = (le32(18)?, le32(22)?);
+    } else if data.get(0..4)? == b"GIF8" {
+        (width, height) = (u32::from(le16(6)?), u32::from(le16(8)?));
+    } else {
+        return None;
+    }
+    (width > 0 && height > 0).then_some((width, height))
 }
 
 #[cfg(test)]
@@ -186,7 +237,7 @@ mod tests {
         assert_eq!(p.embed, "rId1");
         assert_eq!(p.description, "Company logo");
 
-        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let png: Arc<[u8]> = Arc::from(&b"\x89PNG\r\n\x1a\n"[..]);
         let picture = to_picture(p.clone(), png).unwrap();
         assert_eq!(picture.anchor, CellCoord::new(4, 2));
         assert_eq!(picture.offset, (12.5, 2.2));

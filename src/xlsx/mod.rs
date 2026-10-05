@@ -3,6 +3,10 @@ mod chart_reader;
 #[cfg(feature = "xlsx")]
 mod drawing;
 #[cfg(feature = "xlsx")]
+mod limits;
+#[cfg(test)]
+mod malformed_tests;
+#[cfg(feature = "xlsx")]
 mod pivot_reader;
 #[cfg(feature = "xlsx")]
 mod reader;
@@ -14,7 +18,7 @@ mod writer;
 #[cfg(feature = "xlsx")]
 pub use chart_reader::{ChartReadError, ChartReader};
 #[cfg(feature = "xlsx")]
-pub use reader::XlsxReader;
+pub use reader::{XlsxReadError, XlsxReader};
 #[cfg(feature = "xlsx")]
 pub use styles::read_formatting;
 
