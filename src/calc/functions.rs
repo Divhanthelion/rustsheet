@@ -3847,8 +3847,17 @@ enum Rounding {
 /// 15 significant digits Excel keeps: ROUND(2.675, 2) is 2.68 although
 /// 2.675 is stored a hair below it.
 fn round_to(n: f64, digits: i32, mode: Rounding) -> f64 {
-    // 10^308 is the largest power of ten an f64 holds.
-    let digits = digits.clamp(-308, 308);
+    if !n.is_finite() {
+        return n;
+    }
+    // Past f64's decimal range nothing changes, and 10^300+ powers differ
+    // by an ulp between platforms: answer without scaling.
+    if digits > 308 {
+        return n + 0.0;
+    }
+    if digits < -308 {
+        return 0.0;
+    }
     let m = 10f64.powi(digits.abs());
     let scaled = if digits >= 0 { n * m } else { n / m };
     // Past f64's precision there is nothing to round.
