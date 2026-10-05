@@ -18,7 +18,7 @@
 
 ## Features
 
-- **100+ Excel functions** across math, statistics, text, logic, lookup and dates: `SUM`, `AVERAGE`, `IF`, `VLOOKUP`, `INDEX`/`MATCH`, `SUMIF`/`COUNTIF` with wildcards, `TEXT`, `ROUND`, and more. Press **F1** for the full list with examples.
+- **220+ Excel functions** across math, statistics, finance, text, logic, lookup and reference, dates and times, and information: `SUM`, `IF`, `VLOOKUP`, `INDEX`/`MATCH`, `SUMIF`/`COUNTIF` with wildcards, `MAXIFS`, `PMT`, `NPV`/`IRR`, `XIRR`, `NETWORKDAYS`, `DATEDIF`, `TEXTJOIN`, `TEXTBEFORE`, `INDIRECT`, `OFFSET`, `PERCENTILE`, `FORECAST`, and more. Press **F1** for the full list with examples.
 - **Live recalculation** with dependency tracking and cycle detection (`#CIRC!`).
 - **Multiple sheets** with cross-sheet references (`Sheet2!A1`, `SUM(Sheet2!A1:A10)`). Double-click a tab to rename it; the formulas that use it follow.
 - **Formatting**: bold, italic, underline, strikethrough, font size and color, fills, borders, alignment, and Excel number formats (currency, percent, dates, times, fractions, custom codes like `#,##0.00_);[Red](#,##0.00)`). Resize columns and rows by dragging, or double-click a column border to fit it.
@@ -47,6 +47,11 @@
 
 - Aggregates (`AVERAGE`, `COUNT`, `PRODUCT`, `MIN`, `MAX`, `SUMIF`, `COUNTIF`) skip blanks and text, as Excel does.
 - `MOD`, `CEILING` and `FLOOR` follow Excel's sign rules.
+- `INDIRECT` and `OFFSET` work wherever a range does (`SUM(OFFSET(A1,0,0,5))`) and recalculate after every edit, as in Excel. `INDIRECT` reads A1-style references only.
+- Dynamic-array functions that spill (`FILTER`, `SORT`, `UNIQUE`, `SEQUENCE`) are not supported.
+- Array constants such as `{1,2;3,4}` work wherever a function reads a range (`SUM({1,2,3})`, `VLOOKUP(2,{1,"a";2,"b"},2)`); arithmetic on a whole array (`{1,2}*2`) is not supported.
+- Arguments can be left empty, as in `PMT(5%/12,360,,100000)` or `IF(A1>0,,"none")`.
+- Dates follow Excel's 1900 date system, including its February 29th, 1900 (serial 60).
 - Numbers display in Excel's General format: as many decimals as fit the column, then scientific notation.
 - `TEXT` uses the same formatter as cells, so it accepts the same format codes.
 

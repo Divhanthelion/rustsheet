@@ -1,10 +1,18 @@
-use crate::cell::{CellCoord, CellError, CellRange};
-use crate::formula::ast::{BinaryOp, CellRef, Expr, RangeRef, UnaryOp};
+use crate::cell::{CellCoord, CellError, CellRange, MAX_COL, MAX_ROW};
+use crate::formula::ast::{BinaryOp, CellRef, Expr, RangeKind, RangeRef, UnaryOp};
 use crate::formula::grammar::{FormulaGrammar, Rule};
 use pest::Parser;
 use pest::iterators::{Pair, Pairs};
 use pest::pratt_parser::{Assoc, Op, PrattParser};
 use thiserror::Error;
+
+/// Longest formula Excel accepts, in characters.
+pub const MAX_FORMULA_LEN: usize = 8192;
+/// Deepest nesting of parentheses and function calls Excel accepts.
+pub const MAX_NESTING: usize = 64;
+/// Deepest expression tree the recursive passes over [`Expr`] (evaluation,
+/// display, cloning) can take on a default-sized stack.
+const MAX_TREE_DEPTH: usize = 512;
 
 #[derive(Error, Debug)]
 pub enum ParseError {
@@ -16,6 +24,14 @@ pub enum ParseError {
     InvalidNumber(String),
     #[error("Unexpected rule: {0:?}")]
     UnexpectedRule(Rule),
+    #[error("Formula is longer than {} characters", MAX_FORMULA_LEN)]
+    TooLong,
+    #[error("Formula nests more than {} levels", MAX_NESTING)]
+    TooDeep,
+    #[error("Formula has too many operators")]
+    TooComplex,
+    #[error("Array rows must all be the same length")]
+    RaggedArray,
 }
 
 /// Formula parser using pest + Pratt parser for operator precedence
@@ -42,22 +58,27 @@ impl FormulaParser {
             .op(Op::infix(Rule::mul, Assoc::Left) | Op::infix(Rule::div, Assoc::Left))
             // Exponentiation (right associative)
             .op(Op::infix(Rule::pow, Assoc::Right))
-            // Unary operators (highest precedence)
-            .op(Op::prefix(Rule::neg) | Op::prefix(Rule::pos));
+            // Signs: -2^2 is (-2)^2, as in Excel
+            .op(Op::prefix(Rule::neg) | Op::prefix(Rule::pos))
+            // Percent binds tightest: 2^3% is 2^(3%), -2% is -(2%)
+            .op(Op::postfix(Rule::percent));
 
         Self { pratt }
     }
 
     /// Parse a formula string (must start with '=')
     pub fn parse(&self, input: &str) -> Result<Expr, ParseError> {
+        check_size(input)?;
         let pairs = FormulaGrammar::parse(Rule::formula, input)?;
         self.parse_formula(pairs)
     }
 
     /// Parse just an expression (without leading '=')
     pub fn parse_expr(&self, input: &str) -> Result<Expr, ParseError> {
+        check_size(input)?;
         let pairs = FormulaGrammar::parse(Rule::expr, input)?;
         let expr_pair = pairs.into_iter().next().unwrap();
+        check_tree_depth(&expr_pair)?;
         self.parse_expression(expr_pair.into_inner())
     }
 
@@ -66,6 +87,7 @@ impl FormulaParser {
         assert_eq!(formula_pair.as_rule(), Rule::formula);
 
         let inner = formula_pair.into_inner().next().unwrap();
+        check_tree_depth(&inner)?;
         self.parse_expression(inner.into_inner())
     }
 
@@ -77,6 +99,13 @@ impl FormulaParser {
                 Ok(match op.as_rule() {
                     Rule::neg => Expr::unary(UnaryOp::Neg, rhs),
                     Rule::pos => Expr::unary(UnaryOp::Pos, rhs),
+                    _ => unreachable!(),
+                })
+            })
+            .map_postfix(|lhs, op| {
+                let lhs = lhs?;
+                Ok(match op.as_rule() {
+                    Rule::percent => Expr::unary(UnaryOp::Percent, lhs),
                     _ => unreachable!(),
                 })
             })
@@ -111,10 +140,27 @@ impl FormulaParser {
             Rule::error_literal => self.parse_error(pair),
             Rule::cell_ref => self.parse_cell_ref(pair),
             Rule::range_ref => self.parse_range_ref(pair),
+            Rule::column_range | Rule::row_range => self.parse_line_range(pair),
             Rule::function_call => self.parse_function(pair),
+            Rule::array => self.parse_array(pair),
             Rule::expr => self.parse_expression(pair.into_inner()),
             _ => Err(ParseError::UnexpectedRule(pair.as_rule())),
         }
+    }
+
+    fn parse_array(&self, pair: Pair<Rule>) -> Result<Expr, ParseError> {
+        let rows = pair
+            .into_inner()
+            .map(|row| {
+                row.into_inner()
+                    .map(|item| self.parse_primary(item))
+                    .collect()
+            })
+            .collect::<Result<Vec<Vec<Expr>>, _>>()?;
+        if rows.iter().any(|row| row.len() != rows[0].len()) {
+            return Err(ParseError::RaggedArray);
+        }
+        Ok(Expr::Array(rows))
     }
 
     fn parse_number(&self, pair: Pair<Rule>) -> Result<Expr, ParseError> {
@@ -162,18 +208,7 @@ impl FormulaParser {
 
         for inner in pair.into_inner() {
             match inner.as_rule() {
-                Rule::sheet_prefix => {
-                    let sheet_pair = inner.into_inner().next().unwrap();
-                    let name = match sheet_pair.as_rule() {
-                        Rule::quoted_sheet_name => {
-                            let s = sheet_pair.as_str();
-                            s[1..s.len() - 1].replace("''", "'")
-                        }
-                        Rule::sheet_name => sheet_pair.as_str().to_string(),
-                        _ => unreachable!(),
-                    };
-                    sheet = Some(name);
-                }
+                Rule::sheet_prefix => sheet = Some(parse_sheet_prefix(inner)),
                 Rule::cell_address => {
                     let addr = inner.as_str();
                     let (parsed_coord, row_abs, col_abs) = parse_cell_address(addr)?;
@@ -225,6 +260,51 @@ impl FormulaParser {
             sheet: start_ref.sheet,
             start_absolute: (top_row_abs, left_col_abs),
             end_absolute: (bottom_row_abs, right_col_abs),
+            kind: RangeKind::Cells,
+        }))
+    }
+
+    /// Whole columns (`A:C`) or whole rows (`1:3`).
+    fn parse_line_range(&self, pair: Pair<Rule>) -> Result<Expr, ParseError> {
+        let kind = match pair.as_rule() {
+            Rule::column_range => RangeKind::Columns,
+            _ => RangeKind::Rows,
+        };
+        let mut sheet = None;
+        let mut ends = Vec::with_capacity(2);
+        for inner in pair.into_inner() {
+            match inner.as_rule() {
+                Rule::sheet_prefix => sheet = Some(parse_sheet_prefix(inner)),
+                Rule::column_address | Rule::row_address => {
+                    ends.push(parse_line_address(inner.as_str(), kind)?)
+                }
+                _ => {}
+            }
+        }
+        let [a, b] = ends[..] else {
+            return Err(ParseError::InvalidCellRef("invalid range".into()));
+        };
+        // Smaller index first, each `$` staying with its index.
+        let ((first, first_abs), (last, last_abs)) = if a.0 <= b.0 { (a, b) } else { (b, a) };
+
+        let (range, start_absolute, end_absolute) = match kind {
+            RangeKind::Columns => (
+                CellRange::new(CellCoord::new(0, first), CellCoord::new(MAX_ROW, last)),
+                (false, first_abs),
+                (false, last_abs),
+            ),
+            _ => (
+                CellRange::new(CellCoord::new(first, 0), CellCoord::new(last, MAX_COL)),
+                (first_abs, false),
+                (last_abs, false),
+            ),
+        };
+        Ok(Expr::RangeRef(RangeRef {
+            sheet,
+            range,
+            start_absolute,
+            end_absolute,
+            kind,
         }))
     }
 
@@ -235,8 +315,10 @@ impl FormulaParser {
         let mut args = Vec::new();
         if let Some(arg_list) = inner.next() {
             for arg_pair in arg_list.into_inner() {
-                if arg_pair.as_rule() == Rule::expr {
-                    args.push(self.parse_expression(arg_pair.into_inner())?);
+                match arg_pair.as_rule() {
+                    Rule::expr => args.push(self.parse_expression(arg_pair.into_inner())?),
+                    Rule::missing_arg => args.push(Expr::Missing),
+                    _ => {}
                 }
             }
         }
@@ -249,6 +331,109 @@ impl Default for FormulaParser {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Reject formulas over Excel's length or nesting limits before pest sees
+/// them: pest recurses once per open parenthesis.
+fn check_size(input: &str) -> Result<(), ParseError> {
+    if input.chars().count() > MAX_FORMULA_LEN {
+        return Err(ParseError::TooLong);
+    }
+    let mut depth = 0usize;
+    let mut quote = None;
+    for c in input.chars() {
+        match (quote, c) {
+            // Doubled quotes inside strings and sheet names toggle twice.
+            (Some(q), _) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '(') => {
+                depth += 1;
+                if depth > MAX_NESTING {
+                    return Err(ParseError::TooDeep);
+                }
+            }
+            (None, ')') => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Reject expressions whose tree would be too deep to build or walk.
+fn check_tree_depth(expr: &Pair<Rule>) -> Result<(), ParseError> {
+    if tree_depth(expr) > MAX_TREE_DEPTH {
+        return Err(ParseError::TooComplex);
+    }
+    Ok(())
+}
+
+/// Upper bound on the height of the tree an `expr` pair parses to: each
+/// operator adds at most one level above its deepest operand. Recurses only
+/// through parentheses and calls, which `check_size` bounds.
+fn tree_depth(expr: &Pair<Rule>) -> usize {
+    let mut operators = 0;
+    let mut deepest = 0;
+    for inner in expr.clone().into_inner() {
+        match inner.as_rule() {
+            Rule::expr => deepest = deepest.max(tree_depth(&inner)),
+            Rule::function_call => {
+                for args in inner.into_inner().filter(|p| p.as_rule() == Rule::arg_list) {
+                    for arg in args.into_inner().filter(|p| p.as_rule() == Rule::expr) {
+                        deepest = deepest.max(1 + tree_depth(&arg));
+                    }
+                }
+            }
+            Rule::neg
+            | Rule::pos
+            | Rule::percent
+            | Rule::add
+            | Rule::sub
+            | Rule::mul
+            | Rule::div
+            | Rule::pow
+            | Rule::concat
+            | Rule::eq
+            | Rule::neq
+            | Rule::lt
+            | Rule::lte
+            | Rule::gt
+            | Rule::gte => operators += 1,
+            _ => {}
+        }
+    }
+    operators + 1 + deepest
+}
+
+/// Sheet name from a `sheet_prefix` pair, unquoted.
+fn parse_sheet_prefix(pair: Pair<Rule>) -> String {
+    let sheet_pair = pair.into_inner().next().unwrap();
+    match sheet_pair.as_rule() {
+        Rule::quoted_sheet_name => {
+            let s = sheet_pair.as_str();
+            s[1..s.len() - 1].replace("''", "'")
+        }
+        _ => sheet_pair.as_str().to_string(),
+    }
+}
+
+/// Parse a column (`$C`) or row (`$3`) of a whole-line range into its index
+/// and whether it is absolute.
+fn parse_line_address(s: &str, kind: RangeKind) -> Result<(u32, bool), ParseError> {
+    let absolute = s.starts_with('$');
+    let bare = s.trim_start_matches('$');
+    let index = match kind {
+        RangeKind::Columns => CellCoord::from_a1(&format!("{bare}1"))
+            .map(|c| c.col)
+            .filter(|&c| c <= MAX_COL),
+        _ => bare
+            .parse::<u32>()
+            .ok()
+            .filter(|r| (1..=MAX_ROW + 1).contains(r))
+            .map(|r| r - 1),
+    };
+    let index = index.ok_or_else(|| ParseError::InvalidCellRef(s.to_string()))?;
+    Ok((index, absolute))
 }
 
 /// Parse cell address like "$A$1" into coordinate and absolute flags
@@ -382,6 +567,146 @@ mod tests {
                 op: BinaryOp::Gt, ..
             } => {}
             _ => panic!("Expected comparison"),
+        }
+    }
+
+    #[test]
+    fn percent_binds_tighter_than_power_and_signs() {
+        let pct = |e: Expr| Expr::unary(UnaryOp::Percent, e);
+        assert_eq!(parser().parse("=10%").unwrap(), pct(Expr::Number(10.0)));
+        assert_eq!(
+            parser().parse("=-2%").unwrap(),
+            Expr::unary(UnaryOp::Neg, pct(Expr::Number(2.0)))
+        );
+        assert_eq!(
+            parser().parse("=2^3%").unwrap(),
+            Expr::binary(BinaryOp::Pow, Expr::Number(2.0), pct(Expr::Number(3.0)))
+        );
+        assert_eq!(parser().parse("=.5").unwrap(), Expr::Number(0.5));
+    }
+
+    #[test]
+    fn whole_rows_are_not_numbers() {
+        let Expr::RangeRef(r) = parser().parse("=3:$5").unwrap() else {
+            panic!("expected a range");
+        };
+        assert_eq!(r.kind, RangeKind::Rows);
+        assert_eq!(
+            r.range,
+            CellRange::new(CellCoord::new(2, 0), CellCoord::new(4, MAX_COL))
+        );
+        assert_eq!(
+            (r.start_absolute, r.end_absolute),
+            ((false, false), (true, false))
+        );
+        assert!(parser().parse("=0:1").is_err());
+        assert!(parser().parse("=XFE:XFE").is_err());
+    }
+
+    #[test]
+    fn oversized_formulas_are_rejected() {
+        let long = format!("=1{}", "+1".repeat(MAX_FORMULA_LEN / 2));
+        assert!(matches!(parser().parse(&long), Err(ParseError::TooLong)));
+
+        // Parentheses inside strings and sheet names don't count.
+        let quoted = format!("=\"{}\"&'(('!A1", "(".repeat(100));
+        assert!(parser().parse(&quoted).is_ok());
+    }
+
+    #[test]
+    fn deep_nesting_is_rejected_without_crashing() {
+        let nested = |n: usize| format!("={}1{}", "(".repeat(n), ")".repeat(n));
+        assert!(parser().parse(&nested(MAX_NESTING)).is_ok());
+        assert!(matches!(
+            parser().parse(&nested(MAX_NESTING + 1)),
+            Err(ParseError::TooDeep)
+        ));
+        assert!(matches!(
+            parser().parse(&nested(4000)),
+            Err(ParseError::TooDeep)
+        ));
+        assert!(parser().parse(&nested(100_000)).is_err());
+
+        let calls = format!(
+            "={}1{}",
+            "ABS(".repeat(MAX_NESTING + 1),
+            ")".repeat(MAX_NESTING + 1)
+        );
+        assert!(matches!(parser().parse(&calls), Err(ParseError::TooDeep)));
+    }
+
+    #[test]
+    fn long_operator_chains_are_rejected_without_crashing() {
+        for bomb in [
+            format!("={}1", "-".repeat(8000)),
+            format!("=2{}", "^2".repeat(4000)),
+            format!("=1{}", "+1".repeat(4000)),
+        ] {
+            assert!(matches!(parser().parse(&bomb), Err(ParseError::TooComplex)));
+        }
+        // Long sums of separate cells still parse.
+        let terms: Vec<String> = (1..=300).map(|r| format!("A{r}")).collect();
+        assert!(parser().parse(&format!("={}", terms.join("+"))).is_ok());
+    }
+
+    #[test]
+    fn empty_argument_slots_parse_as_missing() {
+        let args = |formula: &str| match parser().parse(formula).unwrap() {
+            Expr::Function(f) => f.args,
+            other => panic!("expected a call, got {other:?}"),
+        };
+        let n = Expr::Number;
+        assert_eq!(
+            args("=PMT(1,2,,4)"),
+            vec![n(1.0), n(2.0), Expr::Missing, n(4.0)]
+        );
+        assert_eq!(args("=IF(1,,)"), vec![n(1.0), Expr::Missing, Expr::Missing]);
+        assert_eq!(args("=F(,)"), vec![Expr::Missing, Expr::Missing]);
+        assert_eq!(args("=F( , 1 )"), vec![Expr::Missing, n(1.0)]);
+        // A lone empty slot is no argument.
+        assert!(args("=PI()").is_empty());
+        assert!(args("=PI( )").is_empty());
+        assert!(parser().parse("=F(1,,").is_err());
+        assert!(parser().parse("=(,)").is_err());
+
+        // Single arguments are parsed once per level, not once per path.
+        let nested = format!(
+            "={}1{}",
+            "ABS(".repeat(MAX_NESTING),
+            ")".repeat(MAX_NESTING)
+        );
+        assert!(parser().parse(&nested).is_ok());
+    }
+
+    #[test]
+    fn quoted_sheet_names_may_start_with_digits() {
+        let Expr::CellRef(r) = parser().parse("='2024'!B2").unwrap() else {
+            panic!("expected a cell");
+        };
+        assert_eq!(r.sheet.as_deref(), Some("2024"));
+    }
+
+    #[test]
+    fn array_constants_hold_rows_of_literals() {
+        let n = Expr::Number;
+        assert_eq!(
+            parser().parse("={1,2;3,4}").unwrap(),
+            Expr::Array(vec![vec![n(1.0), n(2.0)], vec![n(3.0), n(4.0)]])
+        );
+        assert_eq!(
+            parser().parse("={ -1.5 , \"a\" ; true , #N/A }").unwrap(),
+            Expr::Array(vec![
+                vec![n(-1.5), Expr::Text("a".into())],
+                vec![Expr::Bool(true), Expr::Error(CellError::NA)],
+            ])
+        );
+        assert!(matches!(
+            parser().parse("={1,2;3}"),
+            Err(ParseError::RaggedArray)
+        ));
+        // Literals only, as in Excel.
+        for bad in ["={}", "={A1}", "={1+1}", "={(1)}", "={1,}", "={SUM(1)}"] {
+            assert!(parser().parse(bad).is_err(), "{bad}");
         }
     }
 }

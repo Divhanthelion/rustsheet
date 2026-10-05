@@ -253,7 +253,7 @@ impl CalcEngine {
                 CfRule::Expression { formula, .. } => {
                     match self
                         .relative_formula(cf.origin(), formula, coord)
-                        .map(|e| self.evaluate_expr(sheet, &e))
+                        .map(|e| self.evaluate_expr_at(sheet, coord, &e))
                     {
                         Some(CellResult::Bool(b)) => b,
                         Some(CellResult::Value(n)) => n != 0.0,

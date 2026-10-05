@@ -173,7 +173,7 @@ fn col_from_letters(s: &str) -> Option<u32> {
 }
 
 /// Convert 0-based column index to letters
-fn col_to_letters(mut col: u32) -> String {
+pub fn col_to_letters(mut col: u32) -> String {
     let mut result = String::new();
     col += 1; // Convert to 1-based for calculation
     while col > 0 {

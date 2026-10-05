@@ -404,6 +404,34 @@ mod tests {
     }
 
     #[test]
+    fn whole_columns_and_rows_follow_line_edits() {
+        let mut e = CalcEngine::new();
+        num(&mut e, 0, "B1", 5.0);
+        num(&mut e, 0, "A3", 1.0);
+        e.set_formula(0, at("D1"), "=SUM(B:B)").unwrap();
+        e.set_formula(0, at("D2"), "=SUM(3:4)").unwrap();
+
+        // Insert a column before B: rows don't change.
+        e.apply_line_edit(0, &LineEdit::insert(Axis::Column, 1, 1));
+        assert_eq!(e.get_formula(0, at("E1")).as_deref(), Some("=SUM(C:C)"));
+        assert_eq!(e.get_formula(0, at("E2")).as_deref(), Some("=SUM(3:4)"));
+        assert_eq!(e.get_value(0, at("E1")), CellResult::Value(5.0));
+
+        // Delete row 4: the row range shrinks, the column range stays whole.
+        e.apply_line_edit(0, &LineEdit::delete(Axis::Row, 3, 1));
+        assert_eq!(e.get_formula(0, at("E1")).as_deref(), Some("=SUM(C:C)"));
+        assert_eq!(e.get_formula(0, at("E2")).as_deref(), Some("=SUM(3:3)"));
+        assert_eq!(e.get_value(0, at("E2")), CellResult::Value(1.0));
+
+        // Delete column C.
+        e.apply_line_edit(0, &LineEdit::delete(Axis::Column, 2, 1));
+        assert_eq!(
+            e.get_value(0, at("D1")),
+            CellResult::Error(crate::cell::CellError::Ref)
+        );
+    }
+
+    #[test]
     fn sorting_moves_rows_with_their_formulas_and_formats() {
         let mut e = CalcEngine::new();
         text(&mut e, 0, "A1", "Name");

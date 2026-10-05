@@ -33,7 +33,7 @@ impl CalcEngine {
         let Some(expr) = self.relative_formula(origin, t, coord) else {
             return CellResult::Error(crate::cell::CellError::Value);
         };
-        self.evaluate_expr(sheet, &expr)
+        self.evaluate_expr_at(sheet, coord, &expr)
     }
 
     /// Parse `formula`, written for `origin`, and move its relative
@@ -75,6 +75,10 @@ impl CalcEngine {
             return Vec::new();
         };
         let Ok(src) = self.resolve_sheet(qualifier.as_deref(), sheet) else {
+            return Vec::new();
+        };
+        // Blanks are skipped, so stop where the sheet's input does.
+        let Some(range) = self.used_part(src, &range) else {
             return Vec::new();
         };
         let formatting = self.formatting(src);
@@ -146,7 +150,7 @@ impl CalcEngine {
             ValidationKind::Custom => {
                 match self
                     .relative_formula(dv.origin(), &dv.formula1, coord)
-                    .map(|e| self.evaluate_expr(sheet, &e))
+                    .map(|e| self.evaluate_expr_at(sheet, coord, &e))
                 {
                     Some(CellResult::Bool(b)) => b,
                     Some(CellResult::Value(n)) => n != 0.0,
@@ -252,6 +256,19 @@ mod tests {
         );
         e.set_value(0, at("C4"), CellValueInput::Text("x".into()));
         assert!(!e.passes_validation(0, at("C4"), &custom));
+
+        // ROW() is the row of the cell being checked.
+        let even_rows = rule(
+            ValidationKind::Custom,
+            CompareOp::Between,
+            "MOD(ROW(),2)=0",
+            None,
+            "D1:D9",
+        );
+        e.set_value(0, at("D2"), CellValueInput::Number(1.0));
+        e.set_value(0, at("D3"), CellValueInput::Number(1.0));
+        assert!(e.passes_validation(0, at("D2"), &even_rows));
+        assert!(!e.passes_validation(0, at("D3"), &even_rows));
     }
 
     #[test]
