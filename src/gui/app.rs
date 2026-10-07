@@ -2017,6 +2017,18 @@ impl SpreadsheetApp {
         }
     }
 
+    /// Give the engine the chosen time zone for NOW() and TODAY(). Runs
+    /// every frame: Windows' offset is read fresh, so a daylight saving
+    /// change mid-session shows, and a workbook just opened, with a new
+    /// engine at UTC, catches up.
+    fn sync_clock(&mut self) {
+        let offset = self.settings.time_zone.offset_minutes();
+        if offset != self.engine.clock_offset() {
+            self.engine.set_clock_offset(offset);
+            self.refresh_all_charts();
+        }
+    }
+
     /// Refresh all chart data (called after cell edits)
     fn refresh_all_charts(&mut self) {
         if self.batching {
@@ -2112,6 +2124,7 @@ impl SpreadsheetApp {
             self.theme = if dark { Theme::dark() } else { Theme::light() };
             self.dark_mode = Some(dark);
         }
+        self.sync_clock();
         self.tick_recovery(ctx);
         self.fonts.begin_frame(ctx);
 

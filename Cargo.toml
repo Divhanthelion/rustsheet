@@ -75,9 +75,9 @@ wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 
-# Printing (GDI and the standard Print dialog)
+# Printing (GDI and the standard Print dialog), and the PC's time zone for NOW()
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Controls_Dialogs", "Win32_Storage_Xps", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.59", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Controls_Dialogs", "Win32_Storage_Xps", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Time"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

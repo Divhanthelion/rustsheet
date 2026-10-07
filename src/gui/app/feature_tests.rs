@@ -848,3 +848,49 @@ fn pasted_images_become_pictures() {
     assert_eq!(p.kind, crate::format::picture::PictureKind::Png);
     assert_eq!((p.anchor, p.size), (at("C2"), (5.0, 2.5)));
 }
+
+#[test]
+fn time_zone_setting_moves_now_and_today() {
+    use crate::calc::functions::date_to_serial;
+    use crate::gui::settings::TimeZoneChoice;
+    /// 2024-07-01 22:00 UTC.
+    fn evening() -> f64 {
+        let days = date_to_serial(2024, 7, 1) - date_to_serial(1970, 1, 1);
+        days * 86_400.0 + 22.0 * 3_600.0
+    }
+    let (july_1, july_2) = (date_to_serial(2024, 7, 1), date_to_serial(2024, 7, 2));
+    let now = |app: &SpreadsheetApp| match val(app, "B1") {
+        CellResult::Value(n) => n,
+        other => panic!("NOW() is {other:?}"),
+    };
+    let mut app = app();
+    app.engine.set_clock(evening);
+    put(&mut app, "A1", "=TODAY()");
+    put(&mut app, "B1", "=NOW()");
+    let ctx = egui::Context::default();
+
+    app.run_command(&ctx, Command::TimeZone(TimeZoneChoice::Utc));
+    assert_eq!(app.settings.time_zone, TimeZoneChoice::Utc);
+    assert_eq!(val(&app, "A1"), CellResult::Value(july_1));
+    assert!((now(&app) - (july_1 + 22.0 / 24.0)).abs() < 1e-9);
+
+    // UTC+02:30 is half past midnight on the 2nd.
+    app.run_command(&ctx, Command::TimeZone(TimeZoneChoice::Fixed(150)));
+    assert_eq!(app.engine.clock_offset(), 150);
+    assert_eq!(val(&app, "A1"), CellResult::Value(july_2));
+    assert!((now(&app) - (july_2 + 0.5 / 24.0)).abs() < 1e-9);
+
+    app.run_command(&ctx, Command::TimeZone(TimeZoneChoice::Windows));
+    assert_eq!(
+        app.engine.clock_offset(),
+        TimeZoneChoice::Windows.offset_minutes()
+    );
+
+    // A workbook opened or started afresh gets a new engine, at UTC until
+    // the next frame catches it up.
+    app.settings.time_zone = TimeZoneChoice::Fixed(-300);
+    app.new_workbook();
+    assert_eq!(app.engine.clock_offset(), 0);
+    app.sync_clock();
+    assert_eq!(app.engine.clock_offset(), -300);
+}

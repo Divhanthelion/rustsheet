@@ -5,7 +5,7 @@
 use super::*;
 use crate::cell::{Axis, MAX_COL, MAX_ROW};
 use crate::gui::grid::ContextAction;
-use crate::gui::settings::ThemeChoice;
+use crate::gui::settings::{ThemeChoice, TimeZoneChoice, offset_label};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Command {
@@ -52,6 +52,7 @@ pub(super) enum Command {
     OpenList,
     Format(FormatAction),
     Theme(ThemeChoice),
+    TimeZone(TimeZoneChoice),
     Help,
     About,
 }
@@ -332,6 +333,8 @@ impl SpreadsheetApp {
                         ui.close_menu();
                     }
                 }
+                ui.separator();
+                ui.menu_button("Time Zone", |ui| self.time_zone_menu(ui, &mut out));
             });
 
             ui.menu_button("Help", |ui| {
@@ -357,6 +360,40 @@ impl SpreadsheetApp {
             });
         });
         out
+    }
+
+    /// View > Time Zone, for NOW() and TODAY(): Windows' own, UTC, or a
+    /// fixed offset.
+    fn time_zone_menu(&self, ui: &mut egui::Ui, out: &mut Option<Command>) {
+        let current = self.settings.time_zone;
+        let mut radio = |ui: &mut egui::Ui, choice: TimeZoneChoice, label: String| {
+            if ui.radio(current == choice, label).clicked() {
+                *out = Some(Command::TimeZone(choice));
+                ui.close_menu();
+            }
+        };
+        let windows = offset_label(TimeZoneChoice::Windows.offset_minutes());
+        radio(
+            ui,
+            TimeZoneChoice::Windows,
+            format!("Windows Time Zone ({windows})"),
+        );
+        radio(ui, TimeZoneChoice::Utc, "UTC".into());
+        ui.separator();
+        let fixed = match current {
+            TimeZoneChoice::Fixed(m) => format!("Fixed Offset ({})", offset_label(m)),
+            _ => "Fixed Offset".into(),
+        };
+        ui.menu_button(fixed, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(400.0)
+                .show(ui, |ui| {
+                    // UTC+00:00 is the UTC choice above.
+                    for m in TimeZoneChoice::fixed_offsets().filter(|&m| m != 0) {
+                        radio(ui, TimeZoneChoice::Fixed(m), offset_label(m));
+                    }
+                });
+        });
     }
 
     /// Keyboard shortcuts. `typing` is true while a text field (formula
@@ -520,6 +557,11 @@ impl SpreadsheetApp {
             Command::Theme(choice) => {
                 self.settings.theme = choice;
                 self.settings.save();
+            }
+            Command::TimeZone(choice) => {
+                self.settings.time_zone = choice;
+                self.settings.save();
+                self.sync_clock();
             }
             Command::Help => self.help_panel.toggle(),
             Command::About => {
