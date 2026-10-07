@@ -1,3 +1,4 @@
+mod array;
 mod conditional;
 mod engine;
 pub(crate) mod functions;

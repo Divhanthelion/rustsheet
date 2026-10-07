@@ -24,6 +24,9 @@ pub enum XlsxReadError {
     /// Damaged, or asking for more than the reader allows.
     #[error("Damaged workbook: {0}")]
     Damaged(String),
+    /// Declares more unpacked data than the reader will inflate.
+    #[error("The workbook is too large to open: {0}")]
+    TooLarge(String),
 }
 
 /// calamine expands each shared formula into an entry per cell of its
@@ -50,6 +53,15 @@ impl XlsxReader {
         let read = std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut magic));
         if read.is_ok() && magic == OLE_SIGNATURE {
             return Err(XlsxReadError::Unsupported);
+        }
+        // calamine's own reads of a part aren't capped: check what the
+        // package declares before it looks.
+        if let Ok(file) = std::fs::File::open(path) {
+            contain("The workbook", || {
+                limits::check_declared_sizes(BufReader::new(file))
+            })
+            .map_err(XlsxReadError::Damaged)?
+            .map_err(XlsxReadError::TooLarge)?;
         }
         let workbook: Xlsx<_> =
             contain("The workbook", || open_workbook(path)).map_err(XlsxReadError::Damaged)??;
@@ -93,8 +105,15 @@ impl XlsxReader {
         }
         self.check_shared_formulas(name)?;
         // As before, a sheet whose formulas can't be read keeps its values.
+        // A formula the parser refuses keeps its cell's cached value, or
+        // with none its text, so the cell isn't lost.
         let _ = self.each_formula(name, |coord, formula| {
-            let _ = engine.set_formula(sheet_index, coord, &normalize_formula(formula));
+            let formula = normalize_formula(formula);
+            if engine.set_formula(sheet_index, coord, &formula).is_err()
+                && engine.get_input(sheet_index, coord).is_none()
+            {
+                engine.set_value(sheet_index, coord, CellValueInput::Text(formula));
+            }
         });
         Ok(())
     }

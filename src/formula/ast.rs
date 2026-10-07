@@ -39,6 +39,18 @@ impl BinaryOp {
             BinaryOp::Gte => ">=",
         }
     }
+
+    /// The precedence level whose operators the parser joins into one
+    /// [`Expr::Chain`]: `+` and `-`, `*` and `/`, or `&`. `None` for `^`,
+    /// which groups to the right, and comparisons.
+    pub fn chain_level(&self) -> Option<u8> {
+        match self {
+            BinaryOp::Concat => Some(0),
+            BinaryOp::Add | BinaryOp::Sub => Some(1),
+            BinaryOp::Mul | BinaryOp::Div => Some(2),
+            _ => None,
+        }
+    }
 }
 
 /// Unary operators
@@ -159,6 +171,14 @@ pub enum Expr {
     },
     /// Unary operation
     Unary { op: UnaryOp, operand: Box<Expr> },
+    /// Three or more operands joined left to right by operators of one
+    /// [`BinaryOp::chain_level`], as the parser reads `A1+A2-A3`: one node
+    /// however long the sum, so nothing walks it by deep recursion. Means
+    /// the same as the left-deep `Binary` nodes it replaces.
+    Chain {
+        first: Box<Expr>,
+        rest: Vec<(BinaryOp, Expr)>,
+    },
     /// Function call
     Function(FunctionCall),
     /// An argument slot left empty, as in `PMT(r,n,pv,,1)`. Only ever a
@@ -194,12 +214,30 @@ impl Expr {
         })
     }
 
+    /// The operands of a [`Expr::Chain`], first to last.
+    pub fn chain_operands<'a>(
+        first: &'a Expr,
+        rest: &'a [(BinaryOp, Expr)],
+    ) -> impl Iterator<Item = &'a Expr> {
+        std::iter::once(first).chain(rest.iter().map(|(_, e)| e))
+    }
+
+    fn chain_operands_mut<'a>(
+        first: &'a mut Expr,
+        rest: &'a mut [(BinaryOp, Expr)],
+    ) -> impl Iterator<Item = &'a mut Expr> {
+        std::iter::once(first).chain(rest.iter_mut().map(|(_, e)| e))
+    }
+
     /// Check if this expression references other cells
     pub fn has_dependencies(&self) -> bool {
         match self {
             Expr::CellRef(_) | Expr::RangeRef(_) => true,
             Expr::Binary { left, right, .. } => left.has_dependencies() || right.has_dependencies(),
             Expr::Unary { operand, .. } => operand.has_dependencies(),
+            Expr::Chain { first, rest } => {
+                Expr::chain_operands(first, rest).any(Expr::has_dependencies)
+            }
             Expr::Function(f) => f.args.iter().any(|a| a.has_dependencies()),
             _ => false,
         }
@@ -218,6 +256,12 @@ impl Expr {
             }
             Expr::Unary { operand, .. } => {
                 operand.visit_references_mut(f);
+                true
+            }
+            Expr::Chain { first, rest } => {
+                for operand in Expr::chain_operands_mut(first, rest) {
+                    operand.visit_references_mut(f);
+                }
                 true
             }
             Expr::Function(func) => {
@@ -268,6 +312,11 @@ impl Expr {
                 right.offset_references(rows, cols);
             }
             Expr::Unary { operand, .. } => operand.offset_references(rows, cols),
+            Expr::Chain { first, rest } => {
+                for operand in Expr::chain_operands_mut(first, rest) {
+                    operand.offset_references(rows, cols);
+                }
+            }
             Expr::Function(f) => {
                 for arg in &mut f.args {
                     arg.offset_references(rows, cols);
@@ -306,12 +355,22 @@ impl Expr {
                 right.rename_sheet(old, new);
             }
             Expr::Unary { operand, .. } => operand.rename_sheet(old, new),
+            Expr::Chain { first, rest } => {
+                for operand in Expr::chain_operands_mut(first, rest) {
+                    operand.rename_sheet(old, new);
+                }
+            }
             Expr::Function(f) => {
                 for arg in &mut f.args {
                     arg.rename_sheet(old, new);
                 }
             }
-            _ => {}
+            Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Bool(_)
+            | Expr::Error(_)
+            | Expr::Missing
+            | Expr::Array(_) => {}
         }
     }
 
@@ -337,12 +396,22 @@ impl Expr {
                 right.collect_dependencies(deps);
             }
             Expr::Unary { operand, .. } => operand.collect_dependencies(deps),
+            Expr::Chain { first, rest } => {
+                for operand in Expr::chain_operands(first, rest) {
+                    operand.collect_dependencies(deps);
+                }
+            }
             Expr::Function(f) => {
                 for arg in &f.args {
                     arg.collect_dependencies(deps);
                 }
             }
-            _ => {}
+            Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Bool(_)
+            | Expr::Error(_)
+            | Expr::Missing
+            | Expr::Array(_) => {}
         }
     }
 
@@ -360,6 +429,11 @@ impl Expr {
                 right.collect_references(cells, ranges);
             }
             Expr::Unary { operand, .. } => operand.collect_references(cells, ranges),
+            Expr::Chain { first, rest } => {
+                for operand in Expr::chain_operands(first, rest) {
+                    operand.collect_references(cells, ranges);
+                }
+            }
             Expr::Function(f) => {
                 for arg in &f.args {
                     arg.collect_references(cells, ranges);
@@ -382,7 +456,17 @@ impl Expr {
             }
             Expr::Binary { left, right, .. } => left.calls_any(names) || right.calls_any(names),
             Expr::Unary { operand, .. } => operand.calls_any(names),
-            _ => false,
+            Expr::Chain { first, rest } => {
+                Expr::chain_operands(first, rest).any(|e| e.calls_any(names))
+            }
+            Expr::Number(_)
+            | Expr::Text(_)
+            | Expr::Bool(_)
+            | Expr::Error(_)
+            | Expr::CellRef(_)
+            | Expr::RangeRef(_)
+            | Expr::Missing
+            | Expr::Array(_) => false,
         }
     }
 }
@@ -468,6 +552,14 @@ impl fmt::Display for Expr {
             Expr::Binary { op, left, right } => {
                 write!(f, "({}{}{})", left, op.as_str(), right)
             }
+            // Unparenthesized inside, so it reads back as one chain.
+            Expr::Chain { first, rest } => {
+                write!(f, "({first}")?;
+                for (op, operand) in rest {
+                    write!(f, "{}{operand}", op.as_str())?;
+                }
+                write!(f, ")")
+            }
             Expr::Unary { op, operand } => match op {
                 UnaryOp::Neg => write!(f, "-{operand}"),
                 UnaryOp::Pos => write!(f, "+{operand}"),
@@ -546,7 +638,7 @@ mod tests {
     #[test]
     fn copied_formulas_move_relative_parts_only() {
         assert_eq!(moved("=A1+B2", 1, 2), "=(C2+D3)");
-        assert_eq!(moved("=$A$1+A$1+$A1", 3, 3), "=(($A$1+D$1)+$A4)");
+        assert_eq!(moved("=$A$1+A$1+$A1", 3, 3), "=($A$1+D$1+$A4)");
         assert_eq!(moved("=SUM(B2:B7)", 0, 1), "=SUM(C2:C7)");
         assert_eq!(moved("=SUM($B$2:$B$7)", 5, 5), "=SUM($B$2:$B$7)");
         assert_eq!(moved("=Sheet2!A1", 1, 0), "=Sheet2!A2");

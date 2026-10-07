@@ -1,7 +1,8 @@
+use crate::calc::array::{Array, MAX_ARRAY_ITEMS, Operand};
 use crate::calc::functions::BuiltinFunctions;
-use crate::cell::{CellCoord, CellError, CellRange};
+use crate::cell::{CellCoord, CellError, CellRange, MAX_COL, MAX_ROW};
 use crate::format::{CellFormat, SheetFormatting};
-use crate::formula::{BinaryOp, Expr, FormulaParser, UnaryOp};
+use crate::formula::{BinaryOp, Expr, FormulaParser, RangeKind, UnaryOp};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -146,6 +147,17 @@ pub struct CalcEngine {
     revision: Cell<u64>,
     /// Conditional formatting statistics by (sheet, rule index)
     cf_cache: super::conditional::StatsCache,
+    /// Minutes NOW() and TODAY() add to UTC
+    clock_offset: i32,
+    /// Seconds since 1970-01-01 UTC; tests pin it
+    clock: fn() -> f64,
+}
+
+fn system_clock() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
 }
 
 impl CalcEngine {
@@ -168,6 +180,8 @@ impl CalcEngine {
             formatting: HashMap::new(),
             revision: Cell::new(0),
             cf_cache: Default::default(),
+            clock_offset: 0,
+            clock: system_clock,
         }
     }
 
@@ -183,6 +197,34 @@ impl CalcEngine {
 
     pub(super) fn cf_cache(&self) -> &super::conditional::StatsCache {
         &self.cf_cache
+    }
+
+    /// Minutes NOW() and TODAY() add to UTC; 0 unless set.
+    pub fn clock_offset(&self) -> i32 {
+        self.clock_offset
+    }
+
+    /// Set the minutes NOW() and TODAY() add to UTC. A change recalculates
+    /// the volatile cells, as an edit does; setting the same offset again
+    /// costs nothing.
+    pub fn set_clock_offset(&mut self, minutes: i32) {
+        if minutes != self.clock_offset {
+            self.clock_offset = minutes;
+            self.touch();
+            self.drop_cached(None);
+        }
+    }
+
+    /// Seconds since 1970-01-01 UTC, now.
+    pub(super) fn utc_seconds(&self) -> f64 {
+        (self.clock)()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_clock(&mut self, clock: fn() -> f64) {
+        self.clock = clock;
+        self.touch();
+        self.drop_cached(None);
     }
 
     /// Set a cell's value (not a formula)
@@ -514,80 +556,153 @@ impl CalcEngine {
                 Err(e) => CellResult::Error(e),
             },
 
-            Expr::RangeRef(_) => {
-                // Ranges can't be evaluated to a single value outside functions
-                CellResult::Error(CellError::Value)
-            }
+            Expr::RangeRef(r) => match self.resolve_sheet(r.sheet.as_deref(), sheet) {
+                // One cell is its value; a larger range has no single value
+                // and needs a function that reads it whole.
+                Ok(s) if r.range.cell_count() == 1 => self.get_value(s, r.range.start),
+                Ok(_) => CellResult::Error(CellError::Value),
+                Err(e) => CellResult::Error(e),
+            },
 
-            Expr::Unary { op, operand } => {
-                let val = self.evaluate_expr(sheet, operand);
-                let number = |f: fn(f64) -> f64| match &val {
-                    CellResult::Error(e) => CellResult::Error(*e),
-                    v => v
-                        .as_number()
-                        .map_or(CellResult::Error(CellError::Value), |n| {
-                            CellResult::Value(f(n))
-                        }),
-                };
-                match op {
-                    UnaryOp::Neg => number(|n| -n),
-                    UnaryOp::Percent => number(|n| n / 100.0),
-                    UnaryOp::Pos => val,
-                }
-            }
-
-            Expr::Binary { op, left, right } => {
-                let lval = self.evaluate_expr(sheet, left);
-                let rval = self.evaluate_expr(sheet, right);
-
-                // Propagate errors
-                if let CellResult::Error(e) = &lval {
-                    return CellResult::Error(*e);
-                }
-                if let CellResult::Error(e) = &rval {
-                    return CellResult::Error(*e);
-                }
-
-                self.evaluate_binary_op(*op, lval, rval)
+            Expr::Unary { .. } | Expr::Binary { .. } | Expr::Chain { .. } => {
+                self.evaluate_operand(sheet, expr).into_single()
             }
 
             Expr::Function(func) => self.evaluate_function(func, sheet),
         }
     }
 
-    fn evaluate_binary_op(&self, op: BinaryOp, left: CellResult, right: CellResult) -> CellResult {
-        match op {
-            BinaryOp::Add => match (left.as_number(), right.as_number()) {
-                (Some(l), Some(r)) => CellResult::Value(l + r),
-                _ => CellResult::Error(CellError::Value),
+    /// Evaluate `expr` with its operators working item by item over
+    /// ranges and array constants. Whole columns and rows are read only as
+    /// far down or across as their sheets are used (see [`Lines`]).
+    pub(crate) fn evaluate_operand(&self, sheet: u32, expr: &Expr) -> Operand {
+        let mut lines = Lines::default();
+        self.lines_in(sheet, expr, &mut lines);
+        self.operand(sheet, expr, lines)
+    }
+
+    /// `expr` as an array, for functions that read an argument whole; one
+    /// value is a 1 x 1 array.
+    pub(crate) fn evaluate_array(&self, sheet: u32, expr: &Expr) -> Result<Array, CellError> {
+        match self.evaluate_operand(sheet, expr) {
+            Operand::Array(array) => Ok(array),
+            Operand::Single(CellResult::Error(e)) => Err(e),
+            Operand::Single(v) => Ok(Array::new(1, 1, vec![v])),
+        }
+    }
+
+    fn operand(&self, sheet: u32, expr: &Expr, lines: Lines) -> Operand {
+        match expr {
+            Expr::RangeRef(r) => match self.resolve_sheet(r.sheet.as_deref(), sheet) {
+                Ok(s) => {
+                    let range = match r.kind {
+                        RangeKind::Cells => r.range,
+                        RangeKind::Columns => leading(&r.range, (lines.rows, r.range.width())),
+                        RangeKind::Rows => leading(&r.range, (r.range.height(), lines.cols)),
+                    };
+                    self.range_operand(s, &range)
+                }
+                Err(e) => Operand::Single(CellResult::Error(e)),
             },
-            BinaryOp::Sub => match (left.as_number(), right.as_number()) {
-                (Some(l), Some(r)) => CellResult::Value(l - r),
-                _ => CellResult::Error(CellError::Value),
-            },
-            BinaryOp::Mul => match (left.as_number(), right.as_number()) {
-                (Some(l), Some(r)) => CellResult::Value(l * r),
-                _ => CellResult::Error(CellError::Value),
-            },
-            BinaryOp::Div => match (left.as_number(), right.as_number()) {
-                (Some(_), Some(0.0)) => CellResult::Error(CellError::DivZero),
-                (Some(l), Some(r)) => CellResult::Value(l / r),
-                _ => CellResult::Error(CellError::Value),
-            },
-            BinaryOp::Pow => match (left.as_number(), right.as_number()) {
-                (Some(l), Some(r)) => CellResult::Value(l.powf(r)),
-                _ => CellResult::Error(CellError::Value),
-            },
-            BinaryOp::Concat => match (left.to_text(), right.to_text()) {
-                (Some(l), Some(r)) => CellResult::Text(l + &r),
-                _ => CellResult::Error(CellError::Value),
-            },
-            BinaryOp::Eq => CellResult::Bool(compare_values(&left, &right).is_eq()),
-            BinaryOp::Neq => CellResult::Bool(compare_values(&left, &right).is_ne()),
-            BinaryOp::Lt => CellResult::Bool(compare_values(&left, &right).is_lt()),
-            BinaryOp::Lte => CellResult::Bool(compare_values(&left, &right).is_le()),
-            BinaryOp::Gt => CellResult::Bool(compare_values(&left, &right).is_gt()),
-            BinaryOp::Gte => CellResult::Bool(compare_values(&left, &right).is_ge()),
+            Expr::Array(rows) => Operand::Array(Array::from_literals(rows)),
+            Expr::Function(f) if f.name == "INDIRECT" || f.name == "OFFSET" => {
+                match self.functions.reference(expr, sheet, self) {
+                    Some(Ok((s, range))) => {
+                        // Known only now: trim whole lines with their own
+                        // sheet's extent too.
+                        let mut lines = lines;
+                        let columns = range.start.row == 0 && range.end.row == MAX_ROW;
+                        let rows = range.start.col == 0 && range.end.col == MAX_COL;
+                        self.widen_lines(s, columns, rows, &mut lines);
+                        let (height, width) = (range.height(), range.width());
+                        let range = leading(
+                            &range,
+                            (
+                                if columns { lines.rows } else { height },
+                                if rows { lines.cols } else { width },
+                            ),
+                        );
+                        self.range_operand(s, &range)
+                    }
+                    Some(Err(e)) => Operand::Single(CellResult::Error(e)),
+                    None => Operand::Single(self.evaluate_expr(sheet, expr)),
+                }
+            }
+            Expr::Unary { op, operand } => {
+                let op = *op;
+                self.operand(sheet, operand, lines).map(|v| unary_op(op, v))
+            }
+            Expr::Binary { op, left, right } => {
+                let op = *op;
+                let left = self.operand(sheet, left, lines);
+                let right = self.operand(sheet, right, lines);
+                left.combine(right, |l, r| binary_op(op, l, r))
+            }
+            // Left to right, as the Binary nodes it stands for would go.
+            Expr::Chain { first, rest } => {
+                let mut acc = self.operand(sheet, first, lines);
+                for (op, operand) in rest {
+                    let op = *op;
+                    let right = self.operand(sheet, operand, lines);
+                    acc = acc.combine(right, |l, r| binary_op(op, l, r));
+                }
+                acc
+            }
+            other => Operand::Single(self.evaluate_expr(sheet, other)),
+        }
+    }
+
+    /// The cells of `range` on `sheet` as an array, reading only its used
+    /// part: the rest is blank. #VALUE! past [`MAX_ARRAY_ITEMS`].
+    fn range_operand(&self, sheet: u32, range: &CellRange) -> Operand {
+        if range.cell_count() > MAX_ARRAY_ITEMS {
+            return Operand::Single(CellResult::Error(CellError::Value));
+        }
+        let cols = range.width() as usize;
+        let mut items = vec![CellResult::Empty; range.cell_count() as usize];
+        for coord in self.used_part(sheet, range).iter().flat_map(|p| p.iter()) {
+            let row = (coord.row - range.start.row) as usize;
+            let col = (coord.col - range.start.col) as usize;
+            items[row * cols + col] = self.get_value(sheet, coord);
+        }
+        Operand::Array(Array::new(range.height(), range.width(), items))
+    }
+
+    /// Widen `lines` to the whole columns and rows `expr`'s operators read.
+    /// Function arguments are their own expressions and aren't looked into.
+    fn lines_in(&self, sheet: u32, expr: &Expr, lines: &mut Lines) {
+        match expr {
+            Expr::RangeRef(r) if r.kind != RangeKind::Cells => {
+                if let Ok(s) = self.resolve_sheet(r.sheet.as_deref(), sheet) {
+                    let columns = r.kind == RangeKind::Columns;
+                    self.widen_lines(s, columns, !columns, lines);
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                self.lines_in(sheet, left, lines);
+                self.lines_in(sheet, right, lines);
+            }
+            Expr::Unary { operand, .. } => self.lines_in(sheet, operand, lines),
+            Expr::Chain { first, rest } => {
+                for operand in Expr::chain_operands(first, rest) {
+                    self.lines_in(sheet, operand, lines);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Reach `lines` to the last row (for whole `columns`) and the last
+    /// column (for whole `rows`) with input on `sheet`.
+    fn widen_lines(&self, sheet: u32, columns: bool, rows: bool, lines: &mut Lines) {
+        let Some(max) = self.sheet_max_coord(sheet) else {
+            return;
+        };
+        if columns {
+            lines.rows = lines.rows.max(max.row + 1);
+        }
+        if rows {
+            lines.cols = lines.cols.max(max.col + 1);
         }
     }
 
@@ -604,16 +719,21 @@ impl CalcEngine {
     /// Invalidate a cell and all its dependents, and every volatile cell
     /// with its dependents, since any edit recalculates those.
     fn invalidate(&mut self, sheet: u32, coord: CellCoord) {
-        // Use a worklist algorithm to avoid stack overflow on cyclic dependencies
         self.touch();
-        let root = (sheet, coord);
+        self.drop_cached(Some((sheet, coord)));
+    }
+
+    /// Drop the cached values of `root`, of every volatile cell, and of
+    /// everything downstream of them.
+    fn drop_cached(&mut self, root: Option<Key>) {
+        // Use a worklist algorithm to avoid stack overflow on cyclic dependencies
         let cache = self.cache.get_mut();
         // Nothing computed yet, as while loading: nothing to drop, and no
         // scan of the range readers.
         if cache.is_empty() {
             return;
         }
-        let mut to_invalidate = vec![root];
+        let mut to_invalidate: Vec<Key> = root.into_iter().collect();
         to_invalidate.extend(self.volatile.iter().filter(|k| cache.contains_key(k)));
         let mut invalidated = HashSet::new();
 
@@ -623,7 +743,7 @@ impl CalcEngine {
                 continue;
             }
             // Nothing downstream of an uncached cell is cached.
-            if cache.remove(&key).is_none() && key != root {
+            if cache.remove(&key).is_none() && Some(key) != root {
                 continue;
             }
 
@@ -824,6 +944,72 @@ impl CalcEngine {
 impl Default for CalcEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// How far operators read whole columns and rows: down to the last row
+/// (across to the last column) that any of their sheets uses, which keeps
+/// `A:A*B:B` to the used rows with both sides one shape. Past that every
+/// item is blank and is left out, so unlike Excel `SUMPRODUCT(--(A:A=""))`
+/// counts only the blanks among the used rows.
+#[derive(Clone, Copy, Default)]
+struct Lines {
+    /// Rows a whole column keeps
+    rows: u32,
+    /// Columns a whole row keeps
+    cols: u32,
+}
+
+/// `op` on one value: errors pass through, and `-` and `%` convert as
+/// arithmetic does.
+fn unary_op(op: UnaryOp, value: CellResult) -> CellResult {
+    let number = |f: fn(f64) -> f64| match &value {
+        CellResult::Error(e) => CellResult::Error(*e),
+        v => v
+            .as_number()
+            .map_or(CellResult::Error(CellError::Value), |n| {
+                CellResult::Value(f(n))
+            }),
+    };
+    match op {
+        UnaryOp::Neg => number(|n| -n),
+        UnaryOp::Percent => number(|n| n / 100.0),
+        UnaryOp::Pos => value,
+    }
+}
+
+/// `left op right` on single values; an error on either side is the
+/// answer, the left one first.
+fn binary_op(op: BinaryOp, left: CellResult, right: CellResult) -> CellResult {
+    if let CellResult::Error(e) = left {
+        return CellResult::Error(e);
+    }
+    if let CellResult::Error(e) = right {
+        return CellResult::Error(e);
+    }
+    let arithmetic = |f: fn(f64, f64) -> CellResult| match (left.as_number(), right.as_number()) {
+        (Some(l), Some(r)) => f(l, r),
+        _ => CellResult::Error(CellError::Value),
+    };
+    match op {
+        BinaryOp::Add => arithmetic(|l, r| CellResult::Value(l + r)),
+        BinaryOp::Sub => arithmetic(|l, r| CellResult::Value(l - r)),
+        BinaryOp::Mul => arithmetic(|l, r| CellResult::Value(l * r)),
+        BinaryOp::Div if right.as_number() == Some(0.0) && left.as_number().is_some() => {
+            CellResult::Error(CellError::DivZero)
+        }
+        BinaryOp::Div => arithmetic(|l, r| CellResult::Value(l / r)),
+        BinaryOp::Pow => arithmetic(|l, r| CellResult::Value(l.powf(r))),
+        BinaryOp::Concat => match (left.to_text(), right.to_text()) {
+            (Some(l), Some(r)) => CellResult::Text(l + &r),
+            _ => CellResult::Error(CellError::Value),
+        },
+        BinaryOp::Eq => CellResult::Bool(compare_values(&left, &right).is_eq()),
+        BinaryOp::Neq => CellResult::Bool(compare_values(&left, &right).is_ne()),
+        BinaryOp::Lt => CellResult::Bool(compare_values(&left, &right).is_lt()),
+        BinaryOp::Lte => CellResult::Bool(compare_values(&left, &right).is_le()),
+        BinaryOp::Gt => CellResult::Bool(compare_values(&left, &right).is_gt()),
+        BinaryOp::Gte => CellResult::Bool(compare_values(&left, &right).is_ge()),
     }
 }
 
@@ -1457,6 +1643,70 @@ mod tests {
     }
 
     #[test]
+    fn long_chains_evaluate_and_follow_their_cells() {
+        let mut engine = CalcEngine::new();
+        for row in 0..1500 {
+            engine.set_value(0, CellCoord::new(row, 0), CellValueInput::Number(1.0));
+        }
+        let terms: Vec<String> = (1..=1500).map(|r| format!("A{r}")).collect();
+        formula(&mut engine, "B1", &format!("={}", terms.join("+")));
+        assert_eq!(value(&engine, "B1"), CellResult::Value(1500.0));
+        num(&mut engine, "A1500", 2.0);
+        assert_eq!(value(&engine, "B1"), CellResult::Value(1501.0));
+        assert_eq!(
+            eval(&mut engine, &format!("=1{}", "+1".repeat(4000))),
+            CellResult::Value(4001.0)
+        );
+        assert_eq!(
+            eval(&mut engine, "=10-2-3*2/4+1"),
+            CellResult::Value(10.0 - 2.0 - 1.5 + 1.0)
+        );
+        assert_eq!(
+            eval(&mut engine, "=\"a\"&1&TRUE"),
+            CellResult::Text("a1TRUE".into())
+        );
+        assert_eq!(
+            eval(&mut engine, "=1+\"x\"+1/0"),
+            CellResult::Error(CellError::Value)
+        );
+        // Renaming a sheet rewrites references inside a chain.
+        engine.set_sheet_names(vec!["Sheet1".into(), "Data".into()]);
+        engine.set_value(1, CellCoord::new(0, 0), CellValueInput::Number(5.0));
+        formula(&mut engine, "C1", "=Data!A1+Data!A1*2+1");
+        engine.rewrite_sheet_name("Data", "2024");
+        engine.set_sheet_names(vec!["Sheet1".into(), "2024".into()]);
+        assert_eq!(
+            engine.get_formula(0, at("C1")).as_deref(),
+            Some("=('2024'!A1+('2024'!A1*2)+1)")
+        );
+        assert_eq!(value(&engine, "C1"), CellResult::Value(16.0));
+    }
+
+    #[test]
+    fn the_deepest_accepted_formulas_evaluate_on_a_test_sized_stack() {
+        // The parser's depth guard admits these. Release builds parse and
+        // evaluate them in under 1 MiB, the Windows main thread's stack; a
+        // debug build's parse of the ^ chain takes about 1.5 MiB.
+        let deepest = [
+            format!("={}1", "-".repeat(510)),
+            format!("=2{}", "^1".repeat(510)),
+            format!("=1{}", ">2".repeat(510)),
+        ];
+        std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || {
+                let mut engine = CalcEngine::new();
+                for (f, want) in deepest.iter().zip([1.0, 2.0]) {
+                    assert_eq!(eval(&mut engine, f), CellResult::Value(want), "{f}");
+                }
+                assert_eq!(eval(&mut engine, &deepest[2]), CellResult::Bool(true));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn volatile_cells_recalculate_after_any_edit() {
         let mut engine = CalcEngine::new();
         formula(&mut engine, "A1", "=RAND()");
@@ -1482,5 +1732,57 @@ mod tests {
         // No longer volatile once replaced.
         num(&mut engine, "A1", 3.0);
         assert!(engine.volatile.is_empty());
+    }
+
+    #[test]
+    fn now_and_today_follow_the_clock_offset() {
+        use crate::calc::functions::date_to_serial;
+        /// 2024-03-09 23:30 UTC, half an hour before midnight.
+        fn late_evening() -> f64 {
+            let days = date_to_serial(2024, 3, 9) - date_to_serial(1970, 1, 1);
+            days * 86_400.0 + 23.5 * 3_600.0
+        }
+        let (march_9, march_10) = (date_to_serial(2024, 3, 9), date_to_serial(2024, 3, 10));
+        let utc_now = march_9 + 23.5 / 24.0;
+        let number = |engine: &CalcEngine, a1| match value(engine, a1) {
+            CellResult::Value(n) => n,
+            other => panic!("{a1} is {other:?}"),
+        };
+
+        let mut engine = CalcEngine::new();
+        engine.set_clock(late_evening);
+        formula(&mut engine, "A1", "=TODAY()");
+        formula(&mut engine, "B1", "=NOW()");
+        formula(&mut engine, "C1", "=B1-A1");
+        formula(&mut engine, "D1", "=1+1");
+        assert_eq!(engine.clock_offset(), 0, "UTC unless set");
+        assert_eq!(value(&engine, "A1"), CellResult::Value(march_9));
+        assert!((number(&engine, "B1") - utc_now).abs() < 1e-9);
+        let _ = value(&engine, "C1");
+        let _ = value(&engine, "D1");
+
+        // An hour east of UTC it is already tomorrow.
+        engine.set_clock_offset(60);
+        assert!(!cached(&engine, "A1") && !cached(&engine, "B1") && !cached(&engine, "C1"));
+        assert!(cached(&engine, "D1"), "only volatile cells recalculate");
+        assert_eq!(value(&engine, "A1"), CellResult::Value(march_10));
+        assert!((number(&engine, "B1") - (utc_now + 60.0 / 1440.0)).abs() < 1e-9);
+        assert!((number(&engine, "C1") - 0.5 / 24.0).abs() < 1e-9);
+
+        // The same offset again keeps what is cached.
+        engine.set_clock_offset(60);
+        assert!(cached(&engine, "A1") && cached(&engine, "C1"));
+
+        // Exactly midnight belongs to the new day; a minute short does not.
+        engine.set_clock_offset(30);
+        assert_eq!(value(&engine, "A1"), CellResult::Value(march_10));
+        assert_eq!(value(&engine, "B1"), CellResult::Value(march_10));
+        engine.set_clock_offset(29);
+        assert_eq!(value(&engine, "A1"), CellResult::Value(march_9));
+
+        // West of UTC, the same instant is earlier the same day.
+        engine.set_clock_offset(-5 * 60);
+        assert_eq!(value(&engine, "A1"), CellResult::Value(march_9));
+        assert!((number(&engine, "B1") - (utc_now - 300.0 / 1440.0)).abs() < 1e-9);
     }
 }

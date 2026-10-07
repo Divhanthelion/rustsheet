@@ -1,3 +1,4 @@
+use crate::calc::array::{Array, computes_array, literal};
 use crate::calc::engine::{CalcEngine, CellResult, leading};
 use crate::cell::{CellCoord, CellError, CellRange, MAX_COL, MAX_ROW};
 use crate::formula::{Expr, FunctionCall};
@@ -233,8 +234,8 @@ impl BuiltinFunctions {
             "MATCH" => outcome(self.eval_match(&func.args, sheet, engine)),
             "ROW" => outcome(self.eval_row_column(&func.args, sheet, engine, true)),
             "COLUMN" => outcome(self.eval_row_column(&func.args, sheet, engine, false)),
-            "ROWS" => self.eval_rows(&func.args, sheet, engine),
-            "COLUMNS" => self.eval_columns(&func.args, sheet, engine),
+            "ROWS" => outcome(self.eval_extent(&func.args, sheet, engine, true)),
+            "COLUMNS" => outcome(self.eval_extent(&func.args, sheet, engine, false)),
             "LOOKUP" => outcome(self.eval_lookup(&func.args, sheet, engine)),
             "ADDRESS" => outcome(self.eval_address(&func.args, sheet, engine)),
             "INDIRECT" => deref(self.indirect_ref(&func.args, sheet, engine), engine),
@@ -274,8 +275,8 @@ impl BuiltinFunctions {
             "YEAR" => outcome(self.eval_date_part(&func.args, sheet, engine, |(y, _, _)| y)),
             "MONTH" => outcome(self.eval_date_part(&func.args, sheet, engine, |(_, m, _)| m)),
             "DAY" => outcome(self.eval_date_part(&func.args, sheet, engine, |(_, _, d)| d)),
-            "TODAY" => self.eval_today(),
-            "NOW" => self.eval_now(),
+            "TODAY" => CellResult::Value(now_serial(engine).floor()),
+            "NOW" => CellResult::Value(now_serial(engine)),
             "TIME" => outcome(self.eval_time(&func.args, sheet, engine)),
             "HOUR" => outcome(self.eval_time_part(&func.args, sheet, engine, 3600, 24)),
             "MINUTE" => outcome(self.eval_time_part(&func.args, sheet, engine, 60, 60)),
@@ -382,9 +383,12 @@ impl BuiltinFunctions {
         finite(n - d * (n / d).floor())
     }
 
-    /// CEILING (`up`, away from zero) and FLOOR (toward it) to a multiple
-    /// of a significance with the number's sign. CEILING by 0 is 0, FLOOR
-    /// by 0 #DIV/0!.
+    /// CEILING (`up`) and FLOOR to a multiple of the significance, as Excel
+    /// 2010 on has them: CEILING takes the next multiple toward +infinity
+    /// (away from zero when both are negative), FLOOR the next toward
+    /// -infinity (toward zero when both are negative). A positive number
+    /// with a negative significance is #NUM!. CEILING by 0 is 0, FLOOR by
+    /// 0 #DIV/0!.
     fn eval_ceiling_floor(
         &self,
         args: &[Expr],
@@ -405,14 +409,16 @@ impl BuiltinFunctions {
         if n == 0.0 {
             return Ok(CellResult::Value(0.0));
         }
-        if n * significance < 0.0 {
+        if n > 0.0 && significance < 0.0 {
             return Err(CellError::Num);
         }
         // At 15 digits, so FLOOR(0.3, 0.1) is 0.3 although 0.3/0.1 is
-        // 2.9999...
+        // 2.9999... A negative significance flips the steps' sign, which
+        // turns ceil and floor around in the number's terms.
         let steps = snap(n / significance);
         let steps = if up { steps.ceil() } else { steps.floor() };
-        finite(snap(steps * significance))
+        // + 0.0: CEILING(-0.5, 1) is 0, not -0.
+        finite(snap(steps * significance) + 0.0)
     }
 
     fn eval_log(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> Outcome {
@@ -555,10 +561,11 @@ impl BuiltinFunctions {
     /// first argument, which must be a reference or an array.
     fn eval_nth(&self, args: &[Expr], sheet: u32, engine: &CalcEngine, large: bool) -> Outcome {
         arity(args, 2, 2)?;
-        if !matches!(args[0], Expr::Array(_)) && self.reference(&args[0], sheet, engine).is_none() {
-            return Err(CellError::Value);
-        }
-        let mut values = self.numbers(&args[..1], sheet, engine)?;
+        let block = self.block(&args[0], sheet, engine)?;
+        let mut values = block
+            .used_values(engine)
+            .filter_map(|v| numeric_for_aggregate(&v, true))
+            .collect::<Result<Vec<f64>, _>>()?;
         let k = self.number(&args[1], sheet, engine)?.floor();
         if k < 1.0 || k > values.len() as f64 {
             return Err(CellError::Num);
@@ -1068,18 +1075,9 @@ impl BuiltinFunctions {
             Ok(())
         };
         for arg in args {
-            match (arg, self.reference(arg, sheet, engine)) {
-                (Expr::Array(rows), _) => array_items(rows).try_for_each(&mut read)?,
-                (_, Some(r)) => {
-                    let (data_sheet, range) = r?;
-                    let Some(part) = engine.used_part(data_sheet, &range) else {
-                        continue;
-                    };
-                    for coord in part.iter() {
-                        read(engine.get_value(data_sheet, coord))?;
-                    }
-                }
-                (_, None) => match self.branch(arg, sheet, engine) {
+            match self.source(arg, sheet, engine) {
+                Some(block) => block?.used_values(engine).try_for_each(&mut read)?,
+                None => match self.branch(arg, sheet, engine) {
                     CellResult::Empty => {}
                     val => read(CellResult::Value(to_number(&val)?))?,
                 },
@@ -1475,7 +1473,7 @@ impl BuiltinFunctions {
         for pair in args[1..].chunks_exact(2) {
             match self.eval_arg(&pair[0], sheet, engine) {
                 CellResult::Error(e) => return Err(e),
-                case if self.values_equal(&value, &case) => {
+                case if values_equal(&value, &case) => {
                     return Ok(self.branch(&pair[1], sheet, engine));
                 }
                 _ => {}
@@ -1535,18 +1533,12 @@ impl BuiltinFunctions {
         };
         let mut out = String::new();
         for arg in args {
-            match (arg, self.reference(arg, sheet, engine)) {
-                (Expr::Array(rows), _) if ranges => {
-                    array_items(rows).try_for_each(|v| push(&mut out, v))?;
-                }
-                (_, Some(r)) if ranges => {
-                    let (s, range) = r?;
-                    // Blanks add nothing.
-                    for coord in engine.used_part(s, &range).iter().flat_map(|p| p.iter()) {
-                        push(&mut out, engine.get_value(s, coord))?;
-                    }
-                }
-                _ => out.push_str(&self.text_arg(arg, sheet, engine)?),
+            // Blanks add nothing.
+            match ranges.then(|| self.source(arg, sheet, engine)).flatten() {
+                Some(block) => block?
+                    .used_values(engine)
+                    .try_for_each(|v| push(&mut out, v))?,
+                None => out.push_str(&self.text_arg(arg, sheet, engine)?),
             }
             // Over-long for certain (no character is more than 4 bytes):
             // stop before a huge range builds a huge string.
@@ -1601,7 +1593,8 @@ impl BuiltinFunctions {
 
     /// FIND (`case_sensitive`) or SEARCH: where `find_text` first starts in
     /// `within_text` at or after `start_num`, counting characters from 1.
-    /// Empty `find_text` is found at once.
+    /// Empty `find_text` is found at once. SEARCH takes wildcards, as in
+    /// Excel; FIND reads every character literally.
     fn eval_find(
         &self,
         args: &[Expr],
@@ -1610,13 +1603,20 @@ impl BuiltinFunctions {
         case_sensitive: bool,
     ) -> Outcome {
         arity(args, 2, 3)?;
-        let needle: Vec<char> = self.text_arg(&args[0], sheet, engine)?.chars().collect();
+        let find_text = self.text_arg(&args[0], sheet, engine)?;
         let haystack: Vec<char> = self.text_arg(&args[1], sheet, engine)?.chars().collect();
         let start = self.opt_number(args, 2, 1.0, sheet, engine)?.trunc();
         if start < 1.0 || start > haystack.len().max(1) as f64 {
             return Err(CellError::Value);
         }
         let start = start as usize - 1;
+        if !case_sensitive && has_wildcards(&find_text) {
+            let folded: Vec<char> = haystack.iter().copied().map(fold).collect();
+            return wildcard_find(&find_text, &folded, start)
+                .map(|i| CellResult::Value((i + 1) as f64))
+                .ok_or(CellError::Value);
+        }
+        let needle: Vec<char> = find_text.chars().collect();
         let same = |a: &char, b: &char| {
             a == b || (!case_sensitive && a.to_lowercase().eq(b.to_lowercase()))
         };
@@ -1740,19 +1740,18 @@ impl BuiltinFunctions {
             CellResult::Error(e) => Err(e),
             v => Ok(v.to_text().unwrap_or_default()),
         };
-        let delimiters: Vec<String> = match (&args[0], self.reference(&args[0], sheet, engine)) {
-            (Expr::Array(rows), _) => array_items(rows).map(as_text).collect::<Result<_, _>>()?,
-            (_, Some(r)) => {
-                let (s, range) = r?;
-                if range.cell_count() > MAX_TEXT as u64 {
+        let delimiters: Vec<String> = match self.source(&args[0], sheet, engine) {
+            Some(block) => {
+                let block = block?;
+                if block.height() as u64 * block.width() as u64 > MAX_TEXT as u64 {
                     return Err(CellError::Value);
                 }
-                range
-                    .iter()
-                    .map(|coord| as_text(engine.get_value(s, coord)))
+                block
+                    .all_values(engine)
+                    .map(as_text)
                     .collect::<Result<_, _>>()?
             }
-            (_, None) => vec![self.text_arg(&args[0], sheet, engine)?],
+            None => vec![self.text_arg(&args[0], sheet, engine)?],
         };
         let ignore_empty = self.logical(&args[1], sheet, engine)?;
         // With only empty delimiters, empty pieces change nothing.
@@ -1778,26 +1777,21 @@ impl BuiltinFunctions {
             Ok(())
         };
         for arg in &args[2..] {
-            match (arg, self.reference(arg, sheet, engine)) {
-                (Expr::Array(rows), _) => {
-                    for item in array_items(rows) {
-                        push(&as_text(item)?)?;
-                    }
-                }
-                (_, Some(r)) => {
-                    let (s, range) = r?;
-                    // Skipped blanks past the used part need not be visited;
-                    // kept ones fill the output to its limit first.
-                    let cells = if skip_empty {
-                        engine.used_part(s, &range)
+            match self.source(arg, sheet, engine) {
+                // Skipped blanks past the used part need not be visited;
+                // kept ones fill the output to its limit first.
+                Some(block) => {
+                    let block = block?;
+                    let values: Box<dyn Iterator<Item = CellResult>> = if skip_empty {
+                        Box::new(block.used_values(engine))
                     } else {
-                        Some(range)
+                        Box::new(block.all_values(engine))
                     };
-                    for coord in cells.iter().flat_map(|c| c.iter()) {
-                        push(&as_text(engine.get_value(s, coord))?)?;
+                    for value in values {
+                        push(&as_text(value)?)?;
                     }
                 }
-                (_, None) => push(&self.text_arg(arg, sheet, engine)?)?,
+                None => push(&self.text_arg(arg, sheet, engine)?)?,
             }
         }
         Ok(CellResult::Text(out))
@@ -1937,16 +1931,18 @@ impl BuiltinFunctions {
             CellResult::Error(e) => Err(e),
             v => Ok(v.to_text().unwrap_or_default().chars().collect()),
         };
-        let delimiters: Vec<Vec<char>> = match (&args[1], self.reference(&args[1], sheet, engine)) {
-            (Expr::Array(rows), _) => array_items(rows).map(chars).collect::<Result<_, _>>()?,
-            (_, Some(r)) => {
-                let (s, range) = r?;
-                let part = engine.used_part(s, &range).ok_or(CellError::Value)?;
-                part.iter()
-                    .map(|coord| chars(engine.get_value(s, coord)))
+        let delimiters: Vec<Vec<char>> = match self.source(&args[1], sheet, engine) {
+            Some(block) => {
+                let block = block?;
+                if block.used(engine) == (0, 0) {
+                    return Err(CellError::Value);
+                }
+                block
+                    .used_values(engine)
+                    .map(chars)
                     .collect::<Result<_, _>>()?
             }
-            (_, None) => vec![self.text_arg(&args[1], sheet, engine)?.chars().collect()],
+            None => vec![self.text_arg(&args[1], sheet, engine)?.chars().collect()],
         };
         let instance = self.number_or(args, 2, 1.0, sheet, engine)?.trunc();
         let ignore_case = self.number_or(args, 3, 0.0, sheet, engine)? != 0.0;
@@ -2059,11 +2055,12 @@ impl BuiltinFunctions {
         // Entries past the used window are blank.
         let (rows, cols) = table.used(engine);
         let scan = if vertical { rows } else { cols };
+        let exact = Exact::new(&needle);
         let mut found = None;
         for i in 0..scan {
             let value = entry(i, 0);
             if !approximate {
-                if self.values_equal(&needle, &value) {
+                if exact.matches(&value) {
                     found = Some(i);
                     break;
                 }
@@ -2122,6 +2119,7 @@ impl BuiltinFunctions {
         // Entries past the used window are blank.
         let (rows, cols) = list.used(engine);
         let count = if across { cols } else { rows };
+        let exact = Exact::new(&needle);
         let mut found = None;
         for i in 0..count {
             let entry = if across {
@@ -2130,7 +2128,7 @@ impl BuiltinFunctions {
                 list.get(engine, i, 0)
             };
             if kind == 0.0 {
-                if self.values_equal(&needle, &entry) {
+                if exact.matches(&entry) {
                     found = Some(i);
                     break;
                 }
@@ -2170,18 +2168,12 @@ impl BuiltinFunctions {
         }
     }
 
-    fn eval_rows(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        match args {
-            [Expr::Array(rows)] => CellResult::Value(rows.len() as f64),
-            _ => self.reference_measure(args, sheet, engine, |r| r.height()),
-        }
-    }
-
-    fn eval_columns(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> CellResult {
-        match args {
-            [Expr::Array(rows)] => CellResult::Value(rows[0].len() as f64),
-            _ => self.reference_measure(args, sheet, engine, |r| r.width()),
-        }
+    /// ROWS (`rows`) or COLUMNS of a reference or an array.
+    fn eval_extent(&self, args: &[Expr], sheet: u32, engine: &CalcEngine, rows: bool) -> Outcome {
+        arity(args, 1, 1)?;
+        let block = self.block(&args[0], sheet, engine)?;
+        let n = if rows { block.height() } else { block.width() };
+        Ok(CellResult::Value(n as f64))
     }
 
     /// A number read off the one reference argument.
@@ -2902,29 +2894,6 @@ impl BuiltinFunctions {
         Ok(CellResult::Value(part(serial_to_date(serial)) as f64))
     }
 
-    fn eval_today(&self) -> CellResult {
-        // Return current date as serial number
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        // Days since Unix epoch + offset to Excel epoch (25569 days from 1900-01-01 to 1970-01-01)
-        let days = (secs / 86400) as f64 + 25569.0;
-        CellResult::Value(days)
-    }
-
-    fn eval_now(&self) -> CellResult {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs_f64();
-        // Days since Unix epoch + offset to Excel epoch
-        let days = secs / 86400.0 + 25569.0;
-        CellResult::Value(days)
-    }
-
     /// TIME(hour, minute, second) as a fraction of a day; whole days wrap
     /// away, and a negative total is #NUM!.
     fn eval_time(&self, args: &[Expr], sheet: u32, engine: &CalcEngine) -> Outcome {
@@ -3225,19 +3194,35 @@ impl BuiltinFunctions {
 
     // ========== Helpers ==========
 
-    /// The cells, or the array constant, an argument names.
+    /// The block of values an argument gives; #VALUE! for a single value.
     fn block<'a>(
         &self,
         expr: &'a Expr,
         sheet: u32,
         engine: &CalcEngine,
     ) -> Result<Block<'a>, CellError> {
+        self.source(expr, sheet, engine)
+            .unwrap_or(Err(CellError::Value))
+    }
+
+    /// An argument a function can read whole: the cells a reference names,
+    /// an array constant, or the array operators compute over ranges and
+    /// arrays (`A1:A9*2`). `None` for a single value, which callers read as
+    /// they always have.
+    fn source<'a>(
+        &self,
+        expr: &'a Expr,
+        sheet: u32,
+        engine: &CalcEngine,
+    ) -> Option<Result<Block<'a>, CellError>> {
         match expr {
-            Expr::Array(rows) => Ok(Block::Array(rows)),
+            Expr::Array(rows) => Some(Ok(Block::Array(rows))),
+            _ if computes_array(expr) => {
+                Some(engine.evaluate_array(sheet, expr).map(Block::Computed))
+            }
             _ => self
-                .bind_range(expr, sheet, engine)
-                .map(|(range, data_sheet)| Block::Cells(data_sheet, range))
-                .map_err(error_of),
+                .reference(expr, sheet, engine)
+                .map(|r| r.map(|(data_sheet, range)| Block::Cells(data_sheet, range))),
         }
     }
 
@@ -3257,7 +3242,7 @@ impl BuiltinFunctions {
     /// The sheet and cells an argument refers to: a cell or range, or
     /// INDIRECT or OFFSET, which return references. `None` for any other
     /// expression, which is a value.
-    fn reference(
+    pub(crate) fn reference(
         &self,
         expr: &Expr,
         current: u32,
@@ -3320,9 +3305,9 @@ impl BuiltinFunctions {
     }
 
     /// Numbers to aggregate, with any errors met on the way. As in Excel,
-    /// referenced cells count only when they hold numbers, while typed
-    /// logicals count too, and so does an empty slot, as 0. Blank cells add
-    /// nothing, so ranges stop at the sheet's used part.
+    /// referenced cells and array items count only when they are numbers,
+    /// while typed logicals count too, and so does an empty slot, as 0.
+    /// Blank cells add nothing, so ranges stop at the sheet's used part.
     fn collect_numeric_values(
         &self,
         args: &[Expr],
@@ -3331,32 +3316,16 @@ impl BuiltinFunctions {
     ) -> Vec<Result<f64, CellError>> {
         let mut values = Vec::new();
         for arg in args {
-            match arg {
-                Expr::Missing => {
-                    values.push(Ok(0.0));
-                    continue;
-                }
-                // An array counts its numbers only, as a reference does.
-                Expr::Array(rows) => {
-                    values
-                        .extend(array_items(rows).filter_map(|v| numeric_for_aggregate(&v, true)));
-                    continue;
-                }
-                _ => {}
+            if let Expr::Missing = arg {
+                values.push(Ok(0.0));
+                continue;
             }
-            match self.reference(arg, sheet, engine) {
-                Some(Ok((data_sheet, range))) => {
-                    let Some(part) = engine.used_part(data_sheet, &range) else {
-                        continue;
-                    };
-                    for coord in part.iter() {
-                        if let Some(v) =
-                            numeric_for_aggregate(&engine.get_value(data_sheet, coord), true)
-                        {
-                            values.push(v);
-                        }
-                    }
-                }
+            match self.source(arg, sheet, engine) {
+                Some(Ok(block)) => values.extend(
+                    block
+                        .used_values(engine)
+                        .filter_map(|v| numeric_for_aggregate(&v, true)),
+                ),
                 Some(Err(e)) => values.push(Err(e)),
                 None => {
                     let val = self.eval_arg(arg, sheet, engine);
@@ -3377,20 +3346,9 @@ impl BuiltinFunctions {
     ) -> Vec<CellResult> {
         let mut values = Vec::new();
         for arg in args {
-            if let Expr::Array(rows) = arg {
-                values.extend(array_items(rows));
-                continue;
-            }
-            match self.reference(arg, sheet, engine) {
-                Some(Ok((data_sheet, range))) => {
-                    // Only for COUNTA, which skips blanks: stop at the used part.
-                    let Some(part) = engine.used_part(data_sheet, &range) else {
-                        continue;
-                    };
-                    for coord in part.iter() {
-                        values.push(engine.get_value(data_sheet, coord));
-                    }
-                }
+            match self.source(arg, sheet, engine) {
+                // Only for COUNTA, which skips blanks: stop at the used part.
+                Some(Ok(block)) => values.extend(block.used_values(engine)),
                 Some(Err(e)) => values.push(CellResult::Error(e)),
                 // An empty slot is a value, 0, as for the numeric aggregates.
                 None => values.push(self.branch(arg, sheet, engine)),
@@ -3519,18 +3477,12 @@ impl BuiltinFunctions {
             Ok(())
         };
         for arg in args {
-            if let Expr::Array(rows) = arg {
-                array_items(rows).try_for_each(&mut read)?;
-                continue;
-            }
-            let Some(r) = self.reference(arg, sheet, engine) else {
-                let b = self.logical(arg, sheet, engine)?;
-                read(CellResult::Bool(b))?;
-                continue;
-            };
-            let (s, range) = r?;
-            for coord in engine.used_part(s, &range).iter().flat_map(|p| p.iter()) {
-                read(engine.get_value(s, coord))?;
+            match self.source(arg, sheet, engine) {
+                Some(block) => block?.used_values(engine).try_for_each(&mut read)?,
+                None => {
+                    let b = self.logical(arg, sheet, engine)?;
+                    read(CellResult::Bool(b))?;
+                }
             }
         }
         if values.is_empty() {
@@ -3550,9 +3502,10 @@ impl BuiltinFunctions {
         sheet: u32,
         engine: &CalcEngine,
     ) -> Result<Vec<(CellResult, CellResult)>, CellError> {
-        // An array constant pairs item by item, in reading order, with
-        // another array or with an equally large reference.
-        if matches!(left, Expr::Array(_)) || matches!(right, Expr::Array(_)) {
+        // An array pairs item by item, in reading order, with another array
+        // or with an equally large reference.
+        let array = |e: &Expr| matches!(e, Expr::Array(_)) || computes_array(e);
+        if array(left) || array(right) {
             let a = self.block(left, sheet, engine)?;
             let b = self.block(right, sheet, engine)?;
             let size = |b: &Block| b.height() as u64 * b.width() as u64;
@@ -3607,20 +3560,10 @@ impl BuiltinFunctions {
         let Some(expr) = expr else {
             return Ok(Vec::new());
         };
-        if let Expr::Array(rows) = expr {
-            return dates_of(array_items(rows));
+        match self.source(expr, sheet, engine) {
+            Some(block) => dates_of(block?.used_values(engine)),
+            None => dates_of([self.eval_arg(expr, sheet, engine)]),
         }
-        let values = match self.reference(expr, sheet, engine) {
-            Some(r) => {
-                let (s, range) = r?;
-                engine
-                    .used_part(s, &range)
-                    .map(|part| part.iter().map(|c| engine.get_value(s, c)).collect())
-                    .unwrap_or_default()
-            }
-            None => vec![self.eval_arg(expr, sheet, engine)],
-        };
-        dates_of(values)
     }
 
     /// A date argument as a whole serial; #NUM! outside Excel's calendar.
@@ -3630,16 +3573,6 @@ impl BuiltinFunctions {
             return Err(CellError::Num);
         }
         Ok(n.floor())
-    }
-
-    fn values_equal(&self, a: &CellResult, b: &CellResult) -> bool {
-        match (a, b) {
-            (CellResult::Value(x), CellResult::Value(y)) => (x - y).abs() < f64::EPSILON,
-            (CellResult::Text(x), CellResult::Text(y)) => x.eq_ignore_ascii_case(y),
-            (CellResult::Bool(x), CellResult::Bool(y)) => x == y,
-            (CellResult::Empty, CellResult::Empty) => true,
-            _ => false,
-        }
     }
 
     /// Convert a CellResult to an Option<String> for text functions
@@ -3666,6 +3599,8 @@ impl BuiltinFunctions {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
                     return criteria_number(cell_val)
                         .is_none_or(|n| (n - crit_num).abs() > f64::EPSILON);
+                } else if has_wildcards(rest) {
+                    return !text_matches(cell_val, rest.trim());
                 } else {
                     // String comparison
                     return !self
@@ -3685,6 +3620,8 @@ impl BuiltinFunctions {
                 if let Ok(crit_num) = rest.trim().parse::<f64>() {
                     return criteria_number(cell_val)
                         .is_some_and(|n| (n - crit_num).abs() < f64::EPSILON);
+                } else if has_wildcards(rest) {
+                    return text_matches(cell_val, rest.trim());
                 } else {
                     return self
                         .to_string_val(cell_val)
@@ -3698,12 +3635,8 @@ impl BuiltinFunctions {
                     .is_some_and(|n| (n - crit_num).abs() < f64::EPSILON);
             }
 
-            // Wildcard matching (* and ?)
-            if crit_str.contains('*') || crit_str.contains('?') {
-                if let Some(cell_str) = self.to_string_val(cell_val) {
-                    return wildcard_match(&crit_str.to_lowercase(), &cell_str.to_lowercase());
-                }
-                return false;
+            if has_wildcards(crit_str) {
+                return text_matches(cell_val, crit_str);
             }
 
             // Plain string comparison (case-insensitive)
@@ -3713,7 +3646,7 @@ impl BuiltinFunctions {
         }
 
         // Non-text criteria: direct value comparison
-        self.values_equal(cell_val, criteria)
+        values_equal(cell_val, criteria)
     }
 }
 
@@ -4192,6 +4125,16 @@ fn days_from_civil(year: i64, month: i64) -> i64 {
 /// Last serial Excel accepts as a date: 9999-12-31.
 const MAX_DATE_SERIAL: f64 = 2_958_465.0;
 
+/// Serial of 1970-01-01, where Unix time starts.
+const UNIX_EPOCH_SERIAL: f64 = 25_569.0;
+
+/// The serial for now, for NOW() and TODAY(): the engine's clock moved
+/// from UTC by its offset.
+fn now_serial(engine: &CalcEngine) -> f64 {
+    let seconds = engine.utc_seconds() + f64::from(engine.clock_offset()) * 60.0;
+    seconds / 86_400.0 + UNIX_EPOCH_SERIAL
+}
+
 fn days_in_month(year: i32, month: i32) -> i32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
@@ -4334,60 +4277,165 @@ fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
-/// Simple wildcard matching for SUMIF/COUNTIF criteria
-/// Supports * (any characters) and ? (single character)
-fn wildcard_match(pattern: &str, text: &str) -> bool {
-    let pattern_chars: Vec<_> = pattern.chars().collect();
-    let text_chars: Vec<_> = text.chars().collect();
-
-    wildcard_match_helper(&pattern_chars, &text_chars, 0, 0)
+/// A piece of a wildcard pattern.
+#[derive(Clone, Copy, PartialEq)]
+enum Wild {
+    /// One character, case folded
+    Char(char),
+    /// `?`: any one character
+    One,
+    /// `*`: any run of characters, none included
+    Any,
 }
 
-fn wildcard_match_helper(pattern: &[char], text: &[char], mut pi: usize, mut ti: usize) -> bool {
-    while pi < pattern.len() {
-        if pattern[pi] == '*' {
-            // Skip consecutive *
-            while pi < pattern.len() && pattern[pi] == '*' {
-                pi += 1;
+/// Whether text has characters a wildcard pattern treats specially.
+fn has_wildcards(s: &str) -> bool {
+    s.contains(['*', '?', '~'])
+}
+
+/// A character compared ignoring case, one for one so positions hold.
+fn fold(c: char) -> char {
+    let mut lower = c.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(l), None) => l,
+        _ => c,
+    }
+}
+
+/// `pattern` as Excel's criteria, lookups and SEARCH read it: `*` and `?`
+/// are wildcards, and `~` takes the `*`, `?` or `~` after it literally.
+/// Before anything else, a `~` is itself.
+fn wildcard_pattern(pattern: &str) -> Vec<Wild> {
+    let mut out = Vec::new();
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(match c {
+            '~' => match chars.next_if(|n| matches!(n, '*' | '?' | '~')) {
+                Some(escaped) => Wild::Char(escaped),
+                None => Wild::Char('~'),
+            },
+            '*' => Wild::Any,
+            '?' => Wild::One,
+            c => Wild::Char(fold(c)),
+        });
+    }
+    out
+}
+
+/// Whether `pattern` matches the whole of `text` (case folded). Greedy,
+/// backing up only to the last `*`, so no input makes it recurse or
+/// explode: at worst pattern length times text length steps.
+fn pattern_matches(pattern: &[Wild], text: &[char]) -> bool {
+    let (mut p, mut t) = (0, 0);
+    // After the last `*` seen: where the pattern resumes, and the text
+    // position that `*` has absorbed up to.
+    let mut star: Option<(usize, usize)> = None;
+    while t < text.len() {
+        match pattern.get(p) {
+            Some(Wild::Any) => {
+                star = Some((p + 1, t));
+                p += 1;
             }
-            if pi == pattern.len() {
-                return true; // Trailing * matches everything
-            }
-            // Try matching * with 0 to n characters
-            while ti <= text.len() {
-                if wildcard_match_helper(pattern, text, pi, ti) {
-                    return true;
+            Some(Wild::One) => (p, t) = (p + 1, t + 1),
+            Some(Wild::Char(c)) if *c == text[t] => (p, t) = (p + 1, t + 1),
+            _ => match star {
+                Some((resume, absorbed)) => {
+                    star = Some((resume, absorbed + 1));
+                    (p, t) = (resume, absorbed + 1);
                 }
-                ti += 1;
-            }
-            return false;
-        } else if ti >= text.len() {
-            return false;
-        } else if pattern[pi] == '?' || pattern[pi] == text[ti] {
-            pi += 1;
-            ti += 1;
-        } else {
-            return false;
+                None => return false,
+            },
         }
     }
-    ti == text.len()
+    pattern[p..].iter().all(|w| *w == Wild::Any)
 }
 
-/// The error inside a `CellResult` from the older helpers.
-fn error_of(result: CellResult) -> CellError {
-    match result {
-        CellResult::Error(e) => e,
-        _ => CellError::Value,
+/// Whether wildcard `pattern` matches all of `text`, ignoring case.
+fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let text: Vec<char> = text.chars().map(fold).collect();
+    pattern_matches(&wildcard_pattern(pattern), &text)
+}
+
+/// Whether a value is text that wildcard `pattern` matches whole. As in
+/// Excel, wildcards never match numbers, logicals or blanks.
+fn text_matches(value: &CellResult, pattern: &str) -> bool {
+    matches!(value, CellResult::Text(s) if wildcard_match(pattern, s))
+}
+
+/// Equality for exact lookups, criteria and SWITCH: numbers, text ignoring
+/// case, logicals, and blank with blank.
+fn values_equal(a: &CellResult, b: &CellResult) -> bool {
+    match (a, b) {
+        (CellResult::Value(x), CellResult::Value(y)) => (x - y).abs() < f64::EPSILON,
+        (CellResult::Text(x), CellResult::Text(y)) => x.eq_ignore_ascii_case(y),
+        (CellResult::Bool(x), CellResult::Bool(y)) => x == y,
+        (CellResult::Empty, CellResult::Empty) => true,
+        _ => false,
     }
 }
 
-/// A block of values a lookup reads whole: cells of a sheet, or an array
-/// constant.
-#[derive(Clone, Copy)]
+/// What an exact lookup (MATCH type 0, VLOOKUP and HLOOKUP with FALSE)
+/// takes as the value sought: as in Excel, text with wildcards is a
+/// pattern that only text entries can match.
+enum Exact<'a> {
+    Pattern(Vec<Wild>),
+    Value(&'a CellResult),
+}
+
+impl<'a> Exact<'a> {
+    fn new(needle: &'a CellResult) -> Self {
+        match needle {
+            CellResult::Text(s) if has_wildcards(s) => Exact::Pattern(wildcard_pattern(s)),
+            other => Exact::Value(other),
+        }
+    }
+
+    fn matches(&self, entry: &CellResult) -> bool {
+        match (self, entry) {
+            (Exact::Pattern(p), CellResult::Text(s)) => {
+                pattern_matches(p, &s.chars().map(fold).collect::<Vec<_>>())
+            }
+            (Exact::Pattern(_), _) => false,
+            (Exact::Value(needle), entry) => values_equal(needle, entry),
+        }
+    }
+}
+
+/// Where SEARCH finds wildcard `pattern` in `text` (case folded) at or
+/// after `start`: the first position a match begins, whatever follows it.
+fn wildcard_find(pattern: &str, text: &[char], start: usize) -> Option<usize> {
+    let pattern = wildcard_pattern(pattern);
+    // The part before the first `*` fixes where a match starts.
+    let head_len = pattern
+        .iter()
+        .position(|w| *w == Wild::Any)
+        .unwrap_or(pattern.len());
+    let (head, tail) = pattern.split_at(head_len);
+    let head_at = |i: usize| {
+        text.get(i..i + head.len()).is_some_and(|window| {
+            head.iter()
+                .zip(window)
+                .all(|(w, c)| *w == Wild::One || *w == Wild::Char(*c))
+        })
+    };
+    let i = (start..=text.len()).find(|&i| head_at(i))?;
+    if tail.is_empty() {
+        return Some(i);
+    }
+    // The rest starts with `*`, so if it fails after the first place the
+    // head fits it fails after every later one: one try settles it.
+    let mut rest = tail.to_vec();
+    rest.push(Wild::Any);
+    pattern_matches(&rest, &text[i + head_len..]).then_some(i)
+}
+
+/// A block of values a function reads whole: cells of a sheet, an array
+/// constant, or an array operators computed.
 enum Block<'a> {
     Cells(u32, CellRange),
     /// Rows of literals, all the same length
     Array(&'a [Vec<Expr>]),
+    Computed(Array),
 }
 
 impl Block<'_> {
@@ -4395,6 +4443,7 @@ impl Block<'_> {
         match self {
             Block::Cells(_, range) => range.height(),
             Block::Array(rows) => rows.len() as u32,
+            Block::Computed(array) => array.rows(),
         }
     }
 
@@ -4402,6 +4451,7 @@ impl Block<'_> {
         match self {
             Block::Cells(_, range) => range.width(),
             Block::Array(rows) => rows.first().map_or(0, |row| row.len() as u32),
+            Block::Computed(array) => array.cols(),
         }
     }
 
@@ -4413,6 +4463,7 @@ impl Block<'_> {
                 CellCoord::new(range.start.row + row, range.start.col + col),
             ),
             Block::Array(rows) => literal(&rows[row as usize][col as usize]),
+            Block::Computed(array) => array.get(row, col).clone(),
         }
     }
 
@@ -4421,26 +4472,22 @@ impl Block<'_> {
     fn used(&self, engine: &CalcEngine) -> (u32, u32) {
         match self {
             Block::Cells(sheet, range) => engine.used_window(&[(*sheet, *range)]).unwrap_or((0, 0)),
-            Block::Array(_) => (self.height(), self.width()),
+            Block::Array(_) | Block::Computed(_) => (self.height(), self.width()),
         }
     }
-}
 
-/// The value of an array constant's item, which the parser keeps to
-/// literals.
-fn literal(item: &Expr) -> CellResult {
-    match item {
-        Expr::Number(n) => CellResult::Value(*n),
-        Expr::Text(s) => CellResult::Text(s.clone()),
-        Expr::Bool(b) => CellResult::Bool(*b),
-        Expr::Error(e) => CellResult::Error(*e),
-        _ => CellResult::Error(CellError::Value),
+    /// Every value that can be other than blank, row by row: all of an
+    /// array, the used part of cells.
+    fn used_values<'b>(&'b self, engine: &'b CalcEngine) -> impl Iterator<Item = CellResult> + 'b {
+        let (rows, cols) = self.used(engine);
+        (0..rows).flat_map(move |row| (0..cols).map(move |col| self.get(engine, row, col)))
     }
-}
 
-/// Every item of an array constant, row by row.
-fn array_items(rows: &[Vec<Expr>]) -> impl Iterator<Item = CellResult> + '_ {
-    rows.iter().flatten().map(literal)
+    /// Every value, row by row.
+    fn all_values<'b>(&'b self, engine: &'b CalcEngine) -> impl Iterator<Item = CellResult> + 'b {
+        let (rows, cols) = (self.height(), self.width());
+        (0..rows).flat_map(move |row| (0..cols).map(move |col| self.get(engine, row, col)))
+    }
 }
 
 /// Holidays as whole serials, sorted and deduplicated; blanks are skipped.
@@ -4949,42 +4996,40 @@ mod tests {
     }
 
     #[test]
-    fn ceiling_floor_reject_mixed_signs() {
-        let mut engine = CalcEngine::new();
-        engine
-            .set_formula(0, CellCoord::new(0, 0), "=CEILING(2.5,1)")
-            .unwrap();
-        engine
-            .set_formula(0, CellCoord::new(1, 0), "=CEILING(-2.5,-1)")
-            .unwrap();
-        engine
-            .set_formula(0, CellCoord::new(2, 0), "=CEILING(-2.5,1)")
-            .unwrap();
-        engine
-            .set_formula(0, CellCoord::new(3, 0), "=FLOOR(-2.5,-1)")
-            .unwrap();
-        engine
-            .set_formula(0, CellCoord::new(4, 0), "=FLOOR(2.5,0)")
-            .unwrap();
-        assert_eq!(
-            engine.get_value(0, CellCoord::new(0, 0)),
-            CellResult::Value(3.0)
-        );
-        assert_eq!(
-            engine.get_value(0, CellCoord::new(1, 0)),
-            CellResult::Value(-3.0)
-        );
-        assert_eq!(
-            engine.get_value(0, CellCoord::new(2, 0)),
-            CellResult::Error(CellError::Num)
-        );
-        assert_eq!(
-            engine.get_value(0, CellCoord::new(3, 0)),
-            CellResult::Value(-2.0)
-        );
-        assert_eq!(
-            engine.get_value(0, CellCoord::new(4, 0)),
-            CellResult::Error(CellError::DivZero)
+    fn ceiling_floor_follow_excel_2010_signs() {
+        let mut e = CalcEngine::new();
+        // Microsoft's examples for CEILING and FLOOR, then the rest of the
+        // sign matrix. Excel 2007 gave #NUM! for a negative number with a
+        // positive significance; 2010 on rounds it.
+        check(
+            &mut e,
+            &[
+                ("=CEILING(2.5,1)", num(3.0)),
+                ("=CEILING(-2.5,-2)", num(-4.0)),
+                ("=CEILING(-2.5,2)", num(-2.0)),
+                ("=CEILING(1.5,0.1)", num(1.5)),
+                ("=CEILING(0.234,0.01)", num(0.24)),
+                ("=CEILING(2.5,-2)", err(CellError::Num)),
+                ("=CEILING(-2.5,-1)", num(-3.0)),
+                ("=CEILING(-0.5,1)", num(0.0)),
+                ("=CEILING(-4,2)", num(-4.0)),
+                ("=CEILING(2.5,0)", num(0.0)),
+                ("=FLOOR(3.7,2)", num(2.0)),
+                ("=FLOOR(-2.5,-2)", num(-2.0)),
+                ("=FLOOR(2.5,-2)", err(CellError::Num)),
+                ("=FLOOR(1.58,0.1)", num(1.5)),
+                ("=FLOOR(0.234,0.01)", num(0.23)),
+                ("=FLOOR(-2.5,2)", num(-4.0)),
+                ("=FLOOR(-2.5,-1)", num(-2.0)),
+                ("=FLOOR(-0.5,1)", num(-1.0)),
+                ("=FLOOR(-4,2)", num(-4.0)),
+                ("=FLOOR(2.5,0)", err(CellError::DivZero)),
+                // .MATH ignores the significance's sign, as before.
+                ("=CEILING.MATH(-2.5,-2)", num(-2.0)),
+                ("=FLOOR.MATH(-2.5,-2)", num(-4.0)),
+                ("=CEILING.MATH(2.5,-2)", num(4.0)),
+                ("=FLOOR.MATH(2.5,-2)", num(2.0)),
+            ],
         );
     }
 
@@ -6832,6 +6877,88 @@ mod tests {
     }
 
     #[test]
+    fn wildcards_in_search_and_exact_lookups() {
+        let mut e = CalcEngine::new();
+        let t = |s: &str| CellValueInput::Text(s.into());
+        fill(&mut e, "D1", &[t("apple"), t("banana"), t("cherry")]);
+        fill(
+            &mut e,
+            "J1",
+            &[t("a*c"), t("abc"), t("*"), CellValueInput::Number(5.0)],
+        );
+        check(
+            &mut e,
+            &[
+                // SEARCH: * any run, ? one character, ~ escapes; the answer
+                // is where the match starts.
+                ("=SEARCH(\"e\",\"Statements\",6)", num(7.0)),
+                ("=SEARCH(\"margin\",\"Profit Margin\")", num(8.0)),
+                ("=SEARCH(\"b*d\",\"abcde\")", num(2.0)),
+                ("=SEARCH(\"B*E\",\"abcde\")", num(2.0)),
+                ("=SEARCH(\"?c\",\"abcde\")", num(2.0)),
+                ("=SEARCH(\"c?e\",\"abcde\")", num(3.0)),
+                ("=SEARCH(\"*\",\"abc\")", num(1.0)),
+                ("=SEARCH(\"*c\",\"abcabc\",2)", num(2.0)),
+                ("=SEARCH(\"~*\",\"a*b\")", num(2.0)),
+                ("=SEARCH(\"~?\",\"what?\")", num(5.0)),
+                ("=SEARCH(\"x*\",\"abc\")", err(CellError::Value)),
+                ("=SEARCH(\"b?\",\"ab\")", err(CellError::Value)),
+                // FIND reads them literally.
+                ("=FIND(\"*\",\"a*b\")", num(2.0)),
+                ("=FIND(\"?\",\"a?b\")", num(2.0)),
+                ("=FIND(\"b*\",\"abc\")", err(CellError::Value)),
+                // MATCH type 0, VLOOKUP and HLOOKUP with FALSE: text only.
+                ("=MATCH(\"b*\",D1:D3,0)", num(2.0)),
+                ("=MATCH(\"?a*\",D1:D3,0)", num(2.0)),
+                ("=MATCH(\"*rr*\",D1:D3,0)", num(3.0)),
+                ("=MATCH(\"CH*\",D1:D3,0)", num(3.0)),
+                ("=MATCH(\"z*\",D1:D3,0)", err(CellError::NA)),
+                ("=MATCH(\"*\",{\"a\",\"*\",\"b\"},0)", num(1.0)),
+                ("=MATCH(\"~*\",{\"a\",\"*\",\"b\"},0)", num(2.0)),
+                ("=MATCH(\"a~*b\",{\"axb\",\"a*b\"},0)", num(2.0)),
+                ("=MATCH(\"1*\",{1,\"1a\"},0)", num(2.0)),
+                (
+                    "=VLOOKUP(\"ban*\",{\"apple\",1;\"banana\",2;\"cherry\",3},2,FALSE)",
+                    num(2.0),
+                ),
+                (
+                    "=VLOOKUP(\"*rr?\",{\"apple\",1;\"banana\",2;\"cherry\",3},2,FALSE)",
+                    num(3.0),
+                ),
+                ("=VLOOKUP(\"~*\",{\"x\",20;\"*\",10},2,FALSE)", num(10.0)),
+                ("=VLOOKUP(\"*\",{1,20;\"*\",10},2,FALSE)", num(10.0)),
+                ("=VLOOKUP(\"q*\",{\"apple\",1},2,FALSE)", err(CellError::NA)),
+                (
+                    "=HLOOKUP(\"b*\",{\"apple\",\"banana\";1,2},2,FALSE)",
+                    num(2.0),
+                ),
+                // Criteria: the same matcher, now with ~, and only text
+                // matches a pattern.
+                ("=COUNTIF(J1:J5,\"~*\")", num(1.0)),
+                ("=COUNTIF(J1:J5,\"a~*c\")", num(1.0)),
+                ("=COUNTIF(J1:J5,\"a*c\")", num(2.0)),
+                ("=COUNTIF(J1:J5,\"*\")", num(3.0)),
+                ("=COUNTIF(J:J,\"*\")", num(3.0)),
+                ("=COUNTIF(J1:J5,\"=a?c\")", num(2.0)),
+                ("=COUNTIF(J1:J5,\"<>a*\")", num(3.0)),
+            ],
+        );
+    }
+
+    #[test]
+    fn wildcard_patterns_take_hostile_input_quickly() {
+        // Backtracking over every * would take ages here.
+        let text = "a".repeat(30_000);
+        let pattern = format!("{}b", "*a".repeat(40));
+        assert!(!wildcard_match(&pattern, &text));
+        let folded: Vec<char> = text.chars().collect();
+        assert_eq!(wildcard_find(&format!("a{pattern}"), &folded, 0), None);
+        assert_eq!(wildcard_find("a*a*a", &folded, 0), Some(0));
+        assert!(wildcard_match("~", "~") && wildcard_match("a~b", "a~b"));
+        assert!(wildcard_match("~~", "~") && !wildcard_match("~~", "~~"));
+    }
+
+    #[test]
     fn empty_argument_slots() {
         let mut e = CalcEngine::new();
         fill(&mut e, "A1", &numbers(&[1.0, 3.0, 5.0]));
@@ -7073,5 +7200,135 @@ mod tests {
             ],
         );
         check_close(&mut e, 1e-12, &[("=AVERAGEA({1,\"a\",TRUE})", 2.0 / 3.0)]);
+    }
+
+    #[test]
+    fn operators_work_item_by_item_over_ranges_and_arrays() {
+        let mut e = CalcEngine::new();
+        let t = |s: &str| CellValueInput::Text(s.into());
+        let n = CellValueInput::Number;
+        fill(
+            &mut e,
+            "A1",
+            &[
+                n(1.0),
+                n(2.0),
+                n(3.0),
+                n(4.0),
+                n(5.0),
+                t("x"),
+                // A7 blank
+            ],
+        );
+        fill(
+            &mut e,
+            "B1",
+            &numbers(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]),
+        );
+        fill(&mut e, "C1", &[t("x"), t("y"), t("x"), t("z"), t("x")]);
+        // D2 is blank.
+        fill(&mut e, "D1", &[n(1.0)]);
+        fill(&mut e, "D3", &[t("t")]);
+        let (yes, no) = (CellResult::Bool(true), CellResult::Bool(false));
+        check(
+            &mut e,
+            &[
+                // The classic patterns
+                ("=SUMPRODUCT(A1:A5*B1:B5)", num(550.0)),
+                ("=SUMPRODUCT((C1:C5=\"x\")*B1:B5)", num(90.0)),
+                ("=SUMPRODUCT(--(A1:A5>2))", num(3.0)),
+                ("=SUMPRODUCT(-(C1:C5=\"x\"))", num(-3.0)),
+                ("=SUMPRODUCT((A1:A5>1)*(A1:A5<5))", num(3.0)),
+                ("=SUMPRODUCT(A1:A3,B1:B3*1)", num(140.0)),
+                ("=SUM({1,2,3}+1)", num(9.0)),
+                ("=SUM(A1:A3*2)", num(12.0)),
+                ("=MAX(A1:A5*-1)", num(-1.0)),
+                ("=LARGE(A1:A5*2,1)", num(10.0)),
+                ("=SUM({1,2,3}*{4,5,6})", num(32.0)),
+                ("=SUMPRODUCT({1,2}*{3,4})", num(11.0)),
+                // Logicals in an array are skipped, as in a range, until
+                // - or * turns them into 1 and 0.
+                ("=SUM(A1:A3>1)", num(0.0)),
+                ("=SUM(--(A1:A3>1))", num(2.0)),
+                ("=SUMPRODUCT(A1:A5>2)", num(0.0)),
+                ("=AND(A1:A3>0)", yes.clone()),
+                ("=AND(A1:A3>1)", no.clone()),
+                ("=OR(A1:A3>2)", yes.clone()),
+                ("=INDEX(A1:A3>1,2)", yes.clone()),
+                ("=MATCH(TRUE,A1:A5>2,0)", num(3.0)),
+                (
+                    "=INDEX(B1:B5,MATCH(1,(C1:C5=\"z\")*(A1:A5>3),0))",
+                    num(40.0),
+                ),
+                ("=VLOOKUP(3,A1:B5*1,2,FALSE)", num(30.0)),
+                ("=CONCAT(C1:C3&\"!\")", text("x!y!x!")),
+                ("=ROWS(A1:A3*2)", num(3.0)),
+                ("=COLUMNS({1,2,3}*{1;2})", num(3.0)),
+                // A row against a column gives every pairing; other shapes
+                // that differ fill with #N/A.
+                ("=SUM({1,2,3}*{10;20})", num(180.0)),
+                ("=SUM({1,2,3}+{1,2})", err(CellError::NA)),
+                ("=INDEX({1,2,3}+{1,2},1,2)", num(4.0)),
+                ("=INDEX({1,2,3}+{1,2},1,3)", err(CellError::NA)),
+                // Blanks are 0 and text is #VALUE!, item by item; an
+                // aggregate gives the first error it meets.
+                ("=INDEX(D1:D3*2,1)", num(2.0)),
+                ("=INDEX(D1:D3*2,2)", num(0.0)),
+                ("=INDEX(D1:D3*2,3)", err(CellError::Value)),
+                ("=SUM(D1:D2*2)", num(2.0)),
+                ("=COUNT(D1:D2*2)", num(2.0)),
+                ("=SUM(D1:D3*2)", err(CellError::Value)),
+                ("=SUMPRODUCT(A1:A6*B1:B6)", err(CellError::Value)),
+                ("=SUM(A1:A3/(A1:A3-2))", err(CellError::DivZero)),
+                // In a cell, one item is its value and more are #VALUE!.
+                ("=A1:A1*2", num(2.0)),
+                ("=A2:A2", num(2.0)),
+                ("={5}+1", num(6.0)),
+                ("=-{3}", num(-3.0)),
+                ("=A1:A3*2", err(CellError::Value)),
+                ("=A1:A3=B1:B3", err(CellError::Value)),
+                ("=Nope!A1:A3*2", err(CellError::Ref)),
+            ],
+        );
+        check_close(&mut e, 1e-15, &[("=SUM(A1:A2%)", 0.03)]);
+        // Ranges inside operators are dependencies like any other.
+        e.set_formula(0, CellCoord::new(0, 25), "=SUM(A1:A3*2)")
+            .unwrap();
+        e.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(11.0));
+        assert_eq!(e.get_value(0, CellCoord::new(0, 25)), num(32.0));
+    }
+
+    #[test]
+    fn whole_columns_in_operators_stop_at_the_used_rows() {
+        let mut e = CalcEngine::new();
+        e.set_sheet_names(vec!["Sheet1".into(), "Sheet2".into()]);
+        fill(&mut e, "B1", &numbers(&[10.0, 20.0, 30.0]));
+        let t = |s: &str| CellValueInput::Text(s.into());
+        fill(&mut e, "C1", &[t("x"), t("y"), t("x")]);
+        fill(&mut e, "E1", &numbers(&[1.0, 1.0, 1.0]));
+        // Sheet2 is used further down than Sheet1: both sides keep its five
+        // rows, where each sheet's own extent would differ in shape.
+        for (row, v) in [(0, 2.0), (4, 7.0)] {
+            e.set_value(1, CellCoord::new(row, 0), CellValueInput::Number(v));
+        }
+        let d1 = CellCoord::new(0, 3);
+        e.set_formula(0, d1, "=SUMPRODUCT(B:B*Sheet2!A:A)").unwrap();
+        assert_eq!(e.get_value(0, d1), num(20.0));
+        check(
+            &mut e,
+            &[
+                ("=SUMPRODUCT(B:B*E:E)", num(60.0)),
+                ("=SUMPRODUCT((C:C=\"x\")*B:B)", num(40.0)),
+                ("=SUM(B:B*2)", num(120.0)),
+                ("=SUMPRODUCT((1:1=\"x\")*1)", num(1.0)),
+                ("=SUMPRODUCT(INDIRECT(\"B:B\")*E:E)", num(60.0)),
+                // Down to the used rows only (Z1000 holds this formula),
+                // where Excel reads all 1,048,576.
+                ("=ROWS(B:B*1)", num(1000.0)),
+                // Past the cap on items: #VALUE!, before anything is built.
+                ("=SUMPRODUCT(A1:B1048576*1)", err(CellError::Value)),
+                ("=SUM(A1:A1048576*0+1)", num(1_048_576.0)),
+            ],
+        );
     }
 }

@@ -76,42 +76,50 @@ impl FormulaParser {
     /// Parse just an expression (without leading '=')
     pub fn parse_expr(&self, input: &str) -> Result<Expr, ParseError> {
         check_size(input)?;
-        let pairs = FormulaGrammar::parse(Rule::expr, input)?;
-        let expr_pair = pairs.into_iter().next().unwrap();
-        check_tree_depth(&expr_pair)?;
-        self.parse_expression(expr_pair.into_inner())
+        let pairs = FormulaGrammar::parse(Rule::bare_expr, input)?;
+        self.parse_formula(pairs)
     }
 
+    /// The expression inside a whole-input `formula` or `bare_expr` pair.
     fn parse_formula(&self, mut pairs: Pairs<Rule>) -> Result<Expr, ParseError> {
-        let formula_pair = pairs.next().unwrap();
-        assert_eq!(formula_pair.as_rule(), Rule::formula);
-
-        let inner = formula_pair.into_inner().next().unwrap();
+        let whole = pairs.next().ok_or(ParseError::UnexpectedRule(Rule::EOI))?;
+        let inner = whole
+            .into_inner()
+            .find(|p| p.as_rule() == Rule::expr)
+            .ok_or(ParseError::UnexpectedRule(Rule::EOI))?;
         check_tree_depth(&inner)?;
         self.parse_expression(inner.into_inner())
     }
 
     fn parse_expression(&self, pairs: Pairs<Rule>) -> Result<Expr, ParseError> {
+        // `open` marks an operator node built at this level, which an
+        // operator of the same level to its right extends into a chain;
+        // a parenthesized group is closed, so (A1+A2)+A3 keeps its shape.
+        struct Node {
+            expr: Expr,
+            open: bool,
+        }
+        let closed = |expr| Node { expr, open: false };
         self.pratt
-            .map_primary(|pair| self.parse_primary(pair))
+            .map_primary(|pair| self.parse_primary(pair).map(closed))
             .map_prefix(|op, rhs| {
-                let rhs = rhs?;
-                Ok(match op.as_rule() {
+                let rhs = rhs?.expr;
+                Ok(closed(match op.as_rule() {
                     Rule::neg => Expr::unary(UnaryOp::Neg, rhs),
                     Rule::pos => Expr::unary(UnaryOp::Pos, rhs),
                     _ => unreachable!(),
-                })
+                }))
             })
             .map_postfix(|lhs, op| {
-                let lhs = lhs?;
-                Ok(match op.as_rule() {
+                let lhs = lhs?.expr;
+                Ok(closed(match op.as_rule() {
                     Rule::percent => Expr::unary(UnaryOp::Percent, lhs),
                     _ => unreachable!(),
-                })
+                }))
             })
             .map_infix(|lhs, op, rhs| {
                 let lhs = lhs?;
-                let rhs = rhs?;
+                let rhs = rhs?.expr;
                 let bin_op = match op.as_rule() {
                     Rule::add => BinaryOp::Add,
                     Rule::sub => BinaryOp::Sub,
@@ -127,9 +135,25 @@ impl FormulaParser {
                     Rule::gte => BinaryOp::Gte,
                     _ => unreachable!(),
                 };
-                Ok(Expr::binary(bin_op, lhs, rhs))
+                let (level, open) = (bin_op.chain_level(), lhs.open);
+                let extends = |op: BinaryOp| open && level.is_some() && level == op.chain_level();
+                let expr = match lhs.expr {
+                    Expr::Chain { first, mut rest }
+                        if rest.first().is_some_and(|(op, _)| extends(*op)) =>
+                    {
+                        rest.push((bin_op, rhs));
+                        Expr::Chain { first, rest }
+                    }
+                    Expr::Binary { op, left, right } if extends(op) => Expr::Chain {
+                        first: left,
+                        rest: vec![(op, *right), (bin_op, rhs)],
+                    },
+                    lhs => Expr::binary(bin_op, lhs, rhs),
+                };
+                Ok(Node { expr, open: true })
             })
             .parse(pairs)
+            .map(|node| node.expr)
     }
 
     fn parse_primary(&self, pair: Pair<Rule>) -> Result<Expr, ParseError> {
@@ -368,11 +392,15 @@ fn check_tree_depth(expr: &Pair<Rule>) -> Result<(), ParseError> {
     Ok(())
 }
 
-/// Upper bound on the height of the tree an `expr` pair parses to: each
-/// operator adds at most one level above its deepest operand. Recurses only
-/// through parentheses and calls, which `check_size` bounds.
+/// Upper bound on the height of the tree an `expr` pair parses to. Signs,
+/// `%`, `^` and comparisons each add at most one level above their deepest
+/// operand. `&`, `+`/`-` and `*`/`/` add at most one level each however
+/// many there are: a run of one of them is one [`Expr::Chain`], and a path
+/// down the tree passes each of those levels once. Recurses only through
+/// parentheses and calls, which `check_size` bounds.
 fn tree_depth(expr: &Pair<Rule>) -> usize {
     let mut operators = 0;
+    let mut chain_levels = [false; 3];
     let mut deepest = 0;
     for inner in expr.clone().into_inner() {
         match inner.as_rule() {
@@ -384,15 +412,13 @@ fn tree_depth(expr: &Pair<Rule>) -> usize {
                     }
                 }
             }
+            Rule::concat => chain_levels[0] = true,
+            Rule::add | Rule::sub => chain_levels[1] = true,
+            Rule::mul | Rule::div => chain_levels[2] = true,
             Rule::neg
             | Rule::pos
             | Rule::percent
-            | Rule::add
-            | Rule::sub
-            | Rule::mul
-            | Rule::div
             | Rule::pow
-            | Rule::concat
             | Rule::eq
             | Rule::neq
             | Rule::lt
@@ -402,7 +428,7 @@ fn tree_depth(expr: &Pair<Rule>) -> usize {
             _ => {}
         }
     }
-    operators + 1 + deepest
+    operators + chain_levels.iter().filter(|&&l| l).count() + 1 + deepest
 }
 
 /// Sheet name from a `sheet_prefix` pair, unquoted.
@@ -640,13 +666,97 @@ mod tests {
         for bomb in [
             format!("={}1", "-".repeat(8000)),
             format!("=2{}", "^2".repeat(4000)),
-            format!("=1{}", "+1".repeat(4000)),
+            format!("=1{}", "=1".repeat(4000)),
         ] {
             assert!(matches!(parser().parse(&bomb), Err(ParseError::TooComplex)));
         }
-        // Long sums of separate cells still parse.
-        let terms: Vec<String> = (1..=300).map(|r| format!("A{r}")).collect();
-        assert!(parser().parse(&format!("={}", terms.join("+"))).is_ok());
+    }
+
+    #[test]
+    fn same_level_operators_chain_into_one_node() {
+        let n = Expr::Number;
+        let chain = |first: Expr, rest: Vec<(BinaryOp, Expr)>| Expr::Chain {
+            first: Box::new(first),
+            rest,
+        };
+        use BinaryOp::*;
+        assert_eq!(
+            parser().parse("=1+2-3+4").unwrap(),
+            chain(n(1.0), vec![(Add, n(2.0)), (Sub, n(3.0)), (Add, n(4.0))])
+        );
+        assert_eq!(
+            parser().parse("=1*2/3+4").unwrap(),
+            Expr::binary(
+                Add,
+                chain(n(1.0), vec![(Mul, n(2.0)), (Div, n(3.0))]),
+                n(4.0)
+            )
+        );
+        assert_eq!(
+            parser().parse("=1+2*3*4+5").unwrap(),
+            chain(
+                n(1.0),
+                vec![
+                    (Add, chain(n(2.0), vec![(Mul, n(3.0)), (Mul, n(4.0))])),
+                    (Add, n(5.0))
+                ]
+            )
+        );
+        // Two operands stay a Binary, parentheses keep their grouping,
+        // and ^ and comparisons never chain.
+        assert_eq!(
+            parser().parse("=1+2").unwrap(),
+            Expr::binary(Add, n(1.0), n(2.0))
+        );
+        let one_two = Expr::binary(Add, n(1.0), n(2.0));
+        assert_eq!(
+            parser().parse("=(1+2)+3").unwrap(),
+            Expr::binary(Add, one_two.clone(), n(3.0))
+        );
+        assert_eq!(
+            parser().parse("=(1+2)+3+4").unwrap(),
+            chain(one_two, vec![(Add, n(3.0)), (Add, n(4.0))])
+        );
+        assert_eq!(
+            parser().parse("=1=2=3").unwrap(),
+            Expr::binary(Eq, Expr::binary(Eq, n(1.0), n(2.0)), n(3.0))
+        );
+        assert_eq!(
+            parser().parse("=2^3^4").unwrap(),
+            Expr::binary(Pow, n(2.0), Expr::binary(Pow, n(3.0), n(4.0)))
+        );
+        // Chains show unparenthesized inside and read back the same.
+        for (formula, shown) in [
+            ("=A1+A2-A3", "=(A1+A2-A3)"),
+            ("=\"a\"&B1&\"c\"", "=(\"a\"&B1&\"c\")"),
+            ("=(1+2)+3+4", "=((1+2)+3+4)"),
+            ("=-A1*2/B1%", "=(-A1*2/B1%)"),
+            ("=(A1+A2+A3)%", "=(A1+A2+A3)%"),
+            ("=1+2*3*4+5", "=(1+(2*3*4)+5)"),
+        ] {
+            let expr = parser().parse(formula).unwrap();
+            assert_eq!(format!("={expr}"), shown, "{formula}");
+            assert_eq!(parser().parse(shown).unwrap(), expr, "{formula}");
+        }
+    }
+
+    #[test]
+    fn chains_run_to_the_formula_length_limit() {
+        // 1,500 cells: every term a reference, near Excel's 8,192 characters.
+        let terms: Vec<String> = (1..=1500).map(|r| format!("A{r}")).collect();
+        let sum = format!("={}", terms.join("+"));
+        assert!(sum.len() > 7800);
+        let Expr::Chain { rest, .. } = parser().parse(&sum).unwrap() else {
+            panic!("expected a chain");
+        };
+        assert_eq!(rest.len(), 1499);
+        // And 4,001 ones, the longest such formula.
+        let ones = format!("=1{}", "+1".repeat(4000));
+        let expr = parser().parse(&ones).unwrap();
+        assert_eq!(parser().parse(&format!("={expr}")).unwrap(), expr);
+        // Mixed levels still nest only once per level.
+        let mixed = format!("=1{}", "+2*3&4".repeat(1000));
+        assert!(parser().parse(&mixed).is_ok());
     }
 
     #[test]
@@ -676,6 +786,41 @@ mod tests {
             ")".repeat(MAX_NESTING)
         );
         assert!(parser().parse(&nested).is_ok());
+    }
+
+    #[test]
+    fn trailing_junk_is_an_error() {
+        for bad in [
+            "=1+,",
+            "=A1 x",
+            "=A1 B2",
+            "=SUM(1) )",
+            "=1 2",
+            "=\"a\" \"b\"",
+            "=A1;",
+        ] {
+            assert!(parser().parse(bad).is_err(), "{bad}");
+        }
+        assert!(parser().parse_expr("A1 x").is_err());
+        // Blanks and line breaks around the expression are fine.
+        let a1 = Expr::CellRef(CellRef::new(CellCoord::new(0, 0)));
+        assert_eq!(parser().parse("=A1   ").unwrap(), a1);
+        assert_eq!(parser().parse("=A1 \t\r\n").unwrap(), a1);
+        assert_eq!(parser().parse_expr(" A1 ").unwrap(), a1);
+        assert_eq!(
+            parser().parse("=SUM(1,\n 2) ").unwrap(),
+            Expr::function("SUM", vec![Expr::Number(1.0), Expr::Number(2.0)])
+        );
+        // Leading zeros and a bare trailing point stopped the number early,
+        // so =007 was 0 with "07" ignored. Excel reads them as written.
+        for (formula, n) in [("=007", 7.0), ("=00", 0.0), ("=1.", 1.0), ("=010.50", 10.5)] {
+            assert_eq!(
+                parser().parse(formula).unwrap(),
+                Expr::Number(n),
+                "{formula}"
+            );
+        }
+        assert!(parser().parse("=1.5.3").is_err());
     }
 
     #[test]

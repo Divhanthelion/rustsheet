@@ -2,10 +2,12 @@
 // Supports: numbers, strings, booleans, cell references, ranges, whole rows and
 // columns, functions, operators
 
-WHITESPACE = _{ " " | "\t" }
+// Excel keeps line breaks typed into a formula; they space it like blanks.
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-// Entry point
-formula = { "=" ~ expr }
+// Entry points. The whole input or nothing: =A1 x is an error, not A1.
+formula = { SOI ~ "=" ~ expr ~ EOI }
+bare_expr = { SOI ~ expr ~ EOI }
 
 // Expression with operator precedence (handled by PrattParser)
 expr = { prefix* ~ primary ~ postfix* ~ (infix ~ prefix* ~ primary ~ postfix*)* }
@@ -27,9 +29,9 @@ literal = _{ boolean | number | string | error_literal }
 
 boolean = { ^"TRUE" | ^"FALSE" }
 
-// 12, 1.5, .5, 1E+3
+// 12, 1.5, .5, 1E+3, and as Excel takes them 007 and 1.
 number = @{
-    "-"? ~ (("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) ~ ("." ~ ASCII_DIGIT+)? | "." ~ ASCII_DIGIT+) ~ (^"E" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+    "-"? ~ (ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT*)? | "." ~ ASCII_DIGIT+) ~ (^"E" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
 }
 
 string = @{ "\"" ~ (!"\"" ~ ANY | "\"\"")* ~ "\"" }

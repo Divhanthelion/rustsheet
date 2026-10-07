@@ -248,6 +248,80 @@ proptest! {
     }
 }
 
+/// Formulas as people type them: runs of operators without the
+/// parentheses Display adds, which the parser joins into chains.
+fn typed_formula() -> impl Strategy<Value = String> {
+    let term = prop_oneof![
+        4 => "[A-C][1-4]",
+        3 => "[0-9]{1,2}",
+        1 => Just("\"a\"".to_string()),
+        1 => Just("-A1".to_string()),
+        1 => Just("B2%".to_string()),
+        1 => Just("(A1+B2-C3)".to_string()),
+        1 => Just("(A1*2)+A2".to_string()),
+        1 => Just("SUM(A1+A2+A3,B1*B2/B3)".to_string()),
+        1 => Just("{1,2}*A1".to_string()),
+    ];
+    let op = prop::sample::select(vec!["+", "-", "*", "/", "&", "^", "=", "<>", "<"]);
+    (term.clone(), prop::collection::vec((op, term), 0..16)).prop_map(|(first, rest)| {
+        rest.iter()
+            .fold(format!("={first}"), |s, (op, term)| s + op + term)
+    })
+}
+
+/// `expr` with every chain spelled out as the left-deep Binary nodes it
+/// stands for.
+fn unchain(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Chain { first, rest } => rest.iter().fold(unchain(first), |acc, (op, e)| {
+            Expr::binary(*op, acc, unchain(e))
+        }),
+        Expr::Binary { op, left, right } => Expr::binary(*op, unchain(left), unchain(right)),
+        Expr::Unary { op, operand } => Expr::unary(*op, unchain(operand)),
+        Expr::Function(f) => Expr::Function(FunctionCall {
+            name: f.name.clone(),
+            args: f.args.iter().map(unchain).collect(),
+        }),
+        other => other.clone(),
+    }
+}
+
+proptest! {
+    #![proptest_config(config(256))]
+
+    #[test]
+    fn typed_chains_survive_display_and_parse_and_evaluate_as_nested_ones(
+        formula in typed_formula()
+    ) {
+        let parser = FormulaParser::new();
+        let parsed = parser.parse(&formula);
+        prop_assert!(parsed.is_ok(), "{formula} doesn't parse: {:?}", parsed.err());
+        let parsed = parsed.unwrap();
+        let shown = format!("={parsed}");
+        let reparsed = parser.parse(&shown);
+        prop_assert!(reparsed.is_ok(), "{shown} doesn't parse: {:?}", reparsed.err());
+        let reparsed = reparsed.unwrap();
+        prop_assert_eq!(&reparsed, &parsed, "{} shown as {}", formula, shown);
+        prop_assert_eq!(format!("={reparsed}"), shown.clone());
+
+        let mut engine = CalcEngine::new();
+        let inputs = [
+            CellValueInput::Number(3.0),
+            CellValueInput::Number(-0.5),
+            CellValueInput::Text("x".into()),
+            CellValueInput::Bool(true),
+        ];
+        for (i, input) in inputs.iter().cycle().take(9).enumerate() {
+            let coord = CellCoord::new(i as u32 % 3, i as u32 / 3);
+            engine.set_value(0, coord, input.clone());
+        }
+        let chained = engine.evaluate_expr(0, &parsed);
+        let nested = engine.evaluate_expr(0, &unchain(&parsed));
+        // Debug text, so NaN matches NaN.
+        prop_assert_eq!(format!("{chained:?}"), format!("{nested:?}"), "{}", formula);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Number formats and colors: any code a file holds, any value
 // ---------------------------------------------------------------------------

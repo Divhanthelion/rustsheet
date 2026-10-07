@@ -311,6 +311,75 @@ fn cells_off_the_sheet_are_dropped() {
     );
 }
 
+/// `bytes` with the central directory saying part `name` unpacks to
+/// `size` bytes. The data stays as it is: a header that lies, as a zip
+/// bomb's honest one would read.
+fn declare_size(mut bytes: Vec<u8>, name: &str, size: u32) -> Vec<u8> {
+    let at = (0..bytes.len() - 46)
+        .find(|&i| {
+            bytes[i..].starts_with(b"PK\x01\x02")
+                && bytes[i + 28..i + 30] == (name.len() as u16).to_le_bytes()
+                && bytes[i + 46..].starts_with(name.as_bytes())
+        })
+        .unwrap_or_else(|| panic!("no directory entry for {name}"));
+    bytes[at + 24..at + 28].copy_from_slice(&size.to_le_bytes());
+    bytes
+}
+
+fn too_large(bytes: &[u8]) -> Option<String> {
+    let file = TempFile::new(bytes);
+    match XlsxReader::open(&file.0) {
+        Err(XlsxReadError::TooLarge(why)) => Some(why),
+        Err(other) => panic!("refused for another reason: {other}"),
+        Ok(_) => None,
+    }
+}
+
+#[test]
+fn packages_declaring_huge_parts_are_refused_before_calamine_reads_them() {
+    let strings = br#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>x</t></si></sst>"#;
+    let base = package(
+        r#"<row r="1"><c r="A1" t="s"><v>0</v></c></row>"#,
+        &[
+            ("xl/sharedStrings.xml", strings),
+            ("docProps/app.xml", b"<x/>"),
+        ],
+    );
+    assert_eq!(too_large(&base), None);
+
+    // One part claiming 4 GB: calamine would inflate it whole.
+    let bomb = declare_size(base.clone(), "xl/sharedStrings.xml", 4_000_000_000);
+    let why = too_large(&bomb).expect("a 4 GB part opened");
+    assert!(why.contains("xl/sharedStrings.xml"), "{why}");
+    let opened = open(&bomb);
+    assert!(opened.open.unwrap_err().contains("too large"));
+
+    // At the per-part limit is fine; parts that add up past 2 GB are not.
+    let at_limit = declare_size(base.clone(), "docProps/app.xml", 512 << 20);
+    assert_eq!(too_large(&at_limit), None);
+    let mut many = base;
+    for name in [
+        "docProps/app.xml",
+        "xl/sharedStrings.xml",
+        "xl/workbook.xml",
+        "xl/_rels/workbook.xml.rels",
+        "xl/worksheets/sheet1.xml",
+    ] {
+        many = declare_size(many, name, 500 << 20);
+    }
+    assert!(too_large(&many).unwrap().contains("2 GB"));
+
+    // More parts than any workbook needs.
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let stored =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    for i in 0..=super::limits::MAX_ENTRIES {
+        zip.start_file(format!("{i:x}"), stored).unwrap();
+    }
+    let crowded = zip.finish().unwrap().into_inner();
+    assert!(too_large(&crowded).unwrap().contains("parts"));
+}
+
 #[test]
 fn hostile_shared_formulas_are_refused_before_calamine_expands_them() {
     // calamine would insert an entry for each of 17 billion cells.
@@ -344,6 +413,27 @@ fn ordinary_shared_formulas_still_expand() {
         Some("=B3*2")
     );
     assert_eq!(opened.engine.get_value(0, at("A3")), CellResult::Value(6.0));
+}
+
+#[test]
+fn unreadable_formulas_keep_their_cached_value_or_their_text() {
+    // Trailing junk once parsed as its first part; now the cell keeps what
+    // Excel computed, or the formula's text when there is no cached value.
+    let opened = open(&package(
+        r#"<row r="1"><c r="A1"><f>D1 junk</f><v>5</v></c><c r="B1"><f>1+,</f></c><c r="C1"><f>D1 + 2 </f><v>0</v></c><c r="D1"><v>3</v></c></row>"#,
+        &[],
+    ));
+    assert!(opened.sheet_errors.is_empty(), "{:?}", opened.sheet_errors);
+    let engine = &opened.engine;
+    assert_eq!(engine.get_value(0, at("A1")), CellResult::Value(5.0));
+    assert_eq!(engine.get_formula(0, at("A1")), None);
+    assert_eq!(
+        engine.get_value(0, at("B1")),
+        CellResult::Text("=1+,".into())
+    );
+    assert_eq!(engine.get_formula(0, at("B1")), None);
+    assert_eq!(engine.get_formula(0, at("C1")).as_deref(), Some("=D1 + 2"));
+    assert_eq!(engine.get_value(0, at("C1")), CellResult::Value(5.0));
 }
 
 #[test]

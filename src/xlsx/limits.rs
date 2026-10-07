@@ -12,6 +12,55 @@ pub(super) const MAX_PART_BYTES: u64 = 1 << 30;
 /// Longest number format code Excel accepts.
 pub(super) const MAX_FORMAT_CODE_LEN: usize = 255;
 
+/// Most bytes one part of a package may declare it unpacks to. calamine
+/// inflates sharedStrings.xml and sheet XML whole, with no cap of its own.
+pub(super) const MAX_ENTRY_BYTES: u64 = 512 << 20;
+/// Most bytes all parts together may declare.
+pub(super) const MAX_PACKAGE_BYTES: u64 = 2 << 30;
+/// Most parts a package may hold.
+pub(super) const MAX_ENTRIES: usize = 100_000;
+
+/// Refuse a package whose central directory declares more than the readers
+/// may inflate: a part past [`MAX_ENTRY_BYTES`], all parts past
+/// [`MAX_PACKAGE_BYTES`], or more than [`MAX_ENTRIES`] parts. Only the
+/// directory and local headers are read. A package the zip reader can't
+/// open, or a part it can't find, passes: the readers that follow fail on
+/// it with their own error.
+pub(super) fn check_declared_sizes<R: Read + Seek>(reader: R) -> Result<(), String> {
+    let Ok(mut zip) = zip::ZipArchive::new(reader) else {
+        return Ok(());
+    };
+    if zip.len() > MAX_ENTRIES {
+        return Err(format!(
+            "it has {} parts, and at most {MAX_ENTRIES} are read",
+            zip.len()
+        ));
+    }
+    let mut total = 0u64;
+    for i in 0..zip.len() {
+        let Ok(entry) = zip.by_index_raw(i) else {
+            continue;
+        };
+        let size = entry.size();
+        if size > MAX_ENTRY_BYTES {
+            return Err(format!(
+                "part '{}' would unpack to {} MB, and parts are read up to {} MB",
+                entry.name(),
+                size >> 20,
+                MAX_ENTRY_BYTES >> 20
+            ));
+        }
+        total = total.saturating_add(size);
+        if total > MAX_PACKAGE_BYTES {
+            return Err(format!(
+                "its parts would unpack to more than {} GB",
+                MAX_PACKAGE_BYTES >> 30
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The whole of part `name`, or `None` if it is missing, unreadable or
 /// larger than [`MAX_PART_BYTES`].
 pub(super) fn read_part<R: Read + Seek>(

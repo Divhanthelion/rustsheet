@@ -49,9 +49,12 @@
 - `MOD`, `CEILING` and `FLOOR` follow Excel's sign rules.
 - `INDIRECT` and `OFFSET` work wherever a range does (`SUM(OFFSET(A1,0,0,5))`) and recalculate after every edit, as in Excel. `INDIRECT` reads A1-style references only.
 - Dynamic-array functions that spill (`FILTER`, `SORT`, `UNIQUE`, `SEQUENCE`) are not supported.
-- Array constants such as `{1,2;3,4}` work wherever a function reads a range (`SUM({1,2,3})`, `VLOOKUP(2,{1,"a";2,"b"},2)`); arithmetic on a whole array (`{1,2}*2`) is not supported.
+- Array constants such as `{1,2;3,4}` work wherever a function reads a range (`SUM({1,2,3})`, `VLOOKUP(2,{1,"a";2,"b"},2)`).
+- Operators work item by item on ranges and arrays wherever a function reads a range: `SUMPRODUCT((A1:A9="x")*B1:B9)`, `SUMPRODUCT(--(A1:A9>5))`, `SUM({1,2,3}+1)`, `INDEX(B1:B9,MATCH(1,(A1:A9="x")*(C1:C9>0),0))`. A row against a column pairs every item; other shapes that differ fill with `#N/A`, as in Excel. Whole columns and rows are read only down to the sheet's last used row (or across to its last used column), and an array holds at most 1,048,576 items (`#VALUE!` past that). In a cell by itself, an array result shows its value only when it has one item; a larger one is `#VALUE!` rather than spilling.
+- `SEARCH`, `MATCH` (type 0) and exact `VLOOKUP`/`HLOOKUP` take the `*`, `?` and `~` wildcards in text, as do the `COUNTIF`/`SUMIF` family's criteria; `FIND` reads them literally.
 - Arguments can be left empty, as in `PMT(5%/12,360,,100000)` or `IF(A1>0,,"none")`.
 - Dates follow Excel's 1900 date system, including its February 29th, 1900 (serial 60).
+- `NOW` and `TODAY` follow Windows' time zone, daylight saving time included, as in Excel. **View > Time Zone** switches them to UTC or a fixed offset from UTC-12:00 to UTC+14:00.
 - Numbers display in Excel's General format: as many decimals as fit the column, then scientific notation.
 - `TEXT` uses the same formatter as cells, so it accepts the same format codes.
 
