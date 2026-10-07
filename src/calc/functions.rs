@@ -4450,7 +4450,7 @@ impl Block<'_> {
     fn width(&self) -> u32 {
         match self {
             Block::Cells(_, range) => range.width(),
-            Block::Array(rows) => rows.first().map_or(0, |row| row.len() as u32),
+            Block::Array(rows) => rows.iter().map(|row| row.len() as u32).max().unwrap_or(0),
             Block::Computed(array) => array.cols(),
         }
     }
@@ -4462,7 +4462,11 @@ impl Block<'_> {
                 *sheet,
                 CellCoord::new(range.start.row + row, range.start.col + col),
             ),
-            Block::Array(rows) => literal(&rows[row as usize][col as usize]),
+            // A hand-built ragged array reads #N/A past a short row.
+            Block::Array(rows) => match rows.get(row as usize).and_then(|r| r.get(col as usize)) {
+                Some(item) => literal(item),
+                None => CellResult::Error(CellError::NA),
+            },
             Block::Computed(array) => array.get(row, col).clone(),
         }
     }

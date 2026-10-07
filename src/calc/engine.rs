@@ -103,6 +103,12 @@ type Key = (u32, CellCoord);
 /// records it.
 const VOLATILE_FUNCTIONS: &[&str] = &["RAND", "RANDBETWEEN", "NOW", "TODAY", "INDIRECT", "OFFSET"];
 
+/// Deepest nesting of cell evaluations reached through references the
+/// dependency graph can't see (INDIRECT, OFFSET): static chains evaluate
+/// iteratively and stay shallow, and 250 native frames fit the GUI
+/// thread's 1 MiB stack even in debug builds.
+const MAX_EVAL_DEPTH: u32 = 250;
+
 /// The calculation engine - manages formula evaluation with incremental computation
 ///
 /// Uses interior mutability (RefCell) for cache and cycle detection state to allow
@@ -137,6 +143,10 @@ pub struct CalcEngine {
     evaluating: RefCell<HashSet<Key>>,
     /// The cell whose formula is being evaluated, for ROW() and COLUMN()
     current: Cell<Option<Key>>,
+    /// Nesting of `get_value` computations, capped at [`MAX_EVAL_DEPTH`]
+    eval_depth: Cell<u32>,
+    /// A depth overflow happened below: results are provisional, not cached
+    eval_tainted: Cell<bool>,
     /// Built-in functions
     functions: BuiltinFunctions,
     /// Tab names, index-aligned with sheet keys
@@ -175,6 +185,8 @@ impl CalcEngine {
             extents: RefCell::new(None),
             evaluating: RefCell::new(HashSet::new()),
             current: Cell::new(None),
+            eval_depth: Cell::new(0),
+            eval_tainted: Cell::new(false),
             functions: BuiltinFunctions::new(),
             sheet_names: vec!["Sheet1".to_string()],
             formatting: HashMap::new(),
@@ -340,9 +352,31 @@ impl CalcEngine {
             self.evaluate_precedents(key);
         }
 
-        // Compute value
+        // Compute value. References the dependency graph can't see
+        // (INDIRECT, OFFSET) recurse natively, so cap that depth at
+        // #CALC! rather than a blown stack.
+        let depth = self.eval_depth.get();
+        if depth >= MAX_EVAL_DEPTH {
+            self.eval_tainted.set(true);
+            return CellResult::Error(CellError::Calc);
+        }
+        self.eval_depth.set(depth + 1);
         let result = self.compute(sheet, coord);
-        self.cache.borrow_mut().insert(key, result.clone());
+        self.eval_depth.set(depth);
+        self.store_result(key, result)
+    }
+
+    /// Cache `result` for `key`, unless a depth overflow below made it
+    /// provisional; the overflow is forgotten once evaluation unwinds, so
+    /// the same cells compute for real when read less deeply.
+    fn store_result(&self, key: Key, result: CellResult) -> CellResult {
+        if self.eval_tainted.get() {
+            if self.eval_depth.get() == 0 {
+                self.eval_tainted.set(false);
+            }
+        } else {
+            self.cache.borrow_mut().insert(key, result.clone());
+        }
         result
     }
 
@@ -367,7 +401,7 @@ impl CalcEngine {
             }
             if done {
                 let result = self.compute(key.0, key.1);
-                self.cache.borrow_mut().insert(key, result);
+                self.store_result(key, result);
             } else if expanded.insert(key) {
                 stack.push((key, true));
                 self.push_stale_precedents(key, &expanded, &mut stack);
@@ -736,6 +770,10 @@ impl CalcEngine {
         let mut to_invalidate: Vec<Key> = root.into_iter().collect();
         to_invalidate.extend(self.volatile.iter().filter(|k| cache.contains_key(k)));
         let mut invalidated = HashSet::new();
+        // Range readers still to scan, per sheet. A reader leaves its list
+        // once queued or invalidated, so a cascade over many readers scans
+        // each one about once, not once per invalidated cell.
+        let mut candidates: HashMap<u32, Vec<(Key, &Vec<CellRange>)>> = HashMap::new();
 
         while let Some(key) = to_invalidate.pop() {
             // Skip if already invalidated (handles cycles)
@@ -751,13 +789,22 @@ impl CalcEngine {
             if let Some(deps) = self.dependents.get(&key) {
                 to_invalidate.extend(deps.iter().filter(|d| !invalidated.contains(d)));
             }
-            if let Some(readers) = self.range_dependents.get(&key.0) {
-                for (reader, ranges) in readers {
-                    if !invalidated.contains(reader) && ranges.iter().any(|r| r.contains(key.1)) {
-                        to_invalidate.push(*reader);
-                    }
+            let readers = candidates.entry(key.0).or_insert_with(|| {
+                self.range_dependents
+                    .get(&key.0)
+                    .map(|readers| readers.iter().map(|(k, r)| (*k, r)).collect())
+                    .unwrap_or_default()
+            });
+            readers.retain(|(reader, ranges)| {
+                if invalidated.contains(reader) {
+                    return false;
                 }
-            }
+                if ranges.iter().any(|r| r.contains(key.1)) {
+                    to_invalidate.push(*reader);
+                    return false;
+                }
+                true
+            });
         }
     }
 
@@ -1463,6 +1510,57 @@ mod tests {
         assert_eq!(value(&engine, "A3"), CellResult::Error(CellError::Circular));
         formula(&mut engine, "B2", "=SUM(B:B)");
         assert_eq!(value(&engine, "B2"), CellResult::Error(CellError::Circular));
+    }
+
+    #[test]
+    fn indirect_chains_past_the_depth_cap_are_calc_errors() {
+        const N: u32 = 1_000;
+        let mut engine = CalcEngine::new();
+        engine.set_value(0, CellCoord::new(0, 0), CellValueInput::Number(1.0));
+        for row in 1..N {
+            engine
+                .set_formula(
+                    0,
+                    CellCoord::new(row, 0),
+                    &format!("=INDIRECT(\"A{row}\")+1"),
+                )
+                .unwrap();
+        }
+        // The graph can't see through INDIRECT, so this evaluates by
+        // recursion: too deep is an error, not a blown stack.
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(N - 1, 0)),
+            CellResult::Error(CellError::Calc)
+        );
+        // A provisional answer is not cached: shallower reads compute for
+        // real afterwards.
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(99, 0)),
+            CellResult::Value(100.0)
+        );
+        assert_eq!(
+            engine.get_value(0, CellCoord::new(N - 1, 0)),
+            CellResult::Error(CellError::Calc)
+        );
+    }
+
+    #[test]
+    fn hand_built_ragged_arrays_do_not_panic() {
+        // The parser rejects ragged rows; built by hand they must still
+        // evaluate, short rows reading as #N/A.
+        let engine = CalcEngine::new();
+        let array = Expr::Array(vec![
+            vec![Expr::Number(1.0), Expr::Number(2.0)],
+            vec![Expr::Number(3.0)],
+        ]);
+        let sum = Expr::Function(crate::formula::FunctionCall {
+            name: "SUM".into(),
+            args: vec![array],
+        });
+        assert_eq!(
+            engine.evaluate_expr(0, &sum),
+            CellResult::Error(CellError::NA)
+        );
     }
 
     #[test]

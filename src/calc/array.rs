@@ -25,11 +25,20 @@ impl Array {
         Self { rows, cols, items }
     }
 
-    /// An array constant's items, which the parser keeps to literals.
+    /// An array constant's items, which the parser keeps to literals. The
+    /// parser also keeps rows equal; a hand-built ragged `Expr::Array`
+    /// must still not index out of bounds, so short rows pad with #N/A.
     pub(crate) fn from_literals(rows: &[Vec<Expr>]) -> Self {
-        let cols = rows.first().map_or(0, Vec::len) as u32;
-        let items = rows.iter().flatten().map(literal).collect();
-        Self::new(rows.len() as u32, cols, items)
+        let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+        let mut items = Vec::with_capacity(rows.len() * cols);
+        for row in rows {
+            items.extend(row.iter().map(literal));
+            items.resize(
+                items.len() + cols - row.len(),
+                CellResult::Error(CellError::NA),
+            );
+        }
+        Self::new(rows.len() as u32, cols as u32, items)
     }
 
     pub(crate) fn rows(&self) -> u32 {
