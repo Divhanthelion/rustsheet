@@ -22,9 +22,6 @@ hashbrown = "0.15"
 roaring = "0.10"
 lasso = { version = "0.7", features = ["multi-threaded", "ahasher"] }
 
-# Incremental computation
-salsa = "0.25"
-
 # Formula parsing
 pest = "2.8"
 pest_derive = "2.8"
@@ -45,9 +42,6 @@ zip = { version = "4.6", optional = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-
-# Async runtime (for async formulas)
-tokio = { version = "1.0", features = ["rt-multi-thread", "sync"], optional = true }
 
 # GUI (optional)
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "accesskit"], optional = true }
@@ -81,9 +75,9 @@ wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 
-# Printing (GDI and the standard Print dialog)
+# Printing (GDI and the standard Print dialog), and the PC's time zone for NOW()
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Controls_Dialogs", "Win32_Storage_Xps", "Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.59", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Controls_Dialogs", "Win32_Storage_Xps", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Time"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
@@ -92,9 +86,9 @@ winresource = "0.1"
 criterion = "0.5"
 proptest = "1.6"
 
-# [[bench]]
-# name = "grid_benchmark"
-# harness = false
+[[bench]]
+name = "grid_benchmark"
+harness = false
 
 [profile.release]
 lto = true

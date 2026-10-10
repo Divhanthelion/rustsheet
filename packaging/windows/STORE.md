@@ -58,7 +58,7 @@ Alternatively, push a tag `vX.Y.Z` and download `RustSheet_<version>.msixbundle`
 
 > RustSheet is a lightweight spreadsheet for Windows that opens instantly and keeps your data on your PC.
 >
-> Write formulas the way you already know: more than 100 Excel-compatible functions, including SUM, AVERAGE, IF, VLOOKUP, INDEX/MATCH, SUMIF and COUNTIF with wildcards, TEXT, ROUND and date functions. Results update as you type, and RustSheet catches circular references before they cause trouble.
+> Write formulas the way you already know: more than 220 Excel-compatible functions, including SUM, AVERAGE, IF, VLOOKUP, INDEX/MATCH, SUMIF and COUNTIF with wildcards, TEXT, TEXTJOIN, ROUND, date functions like EDATE and NETWORKDAYS, and financial functions like PMT, NPV and IRR. Results update as you type, and RustSheet catches circular references before they cause trouble.
 >
 > Work across sheets with references like Sheet2!A1. Rename a sheet and every formula that uses it updates. Turn a range into a line, bar, scatter, area, pie or doughnut chart in a couple of clicks.
 >
@@ -80,7 +80,7 @@ Alternatively, push a tag `vX.Y.Z` and download `RustSheet_<version>.msixbundle`
 
 **Product features** (one per line, up to 20):
 
-- 100+ Excel-compatible functions with autocomplete and built-in help
+- 220+ Excel-compatible functions with autocomplete and built-in help
 - Opens and saves Excel .xlsx files with formulas, formatting, charts and pictures
 - PivotTables with filters, subtotals and one-click refresh
 - Conditional formatting: highlight rules, data bars and color scales

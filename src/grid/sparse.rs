@@ -114,8 +114,8 @@ impl SparseGrid {
         let max_col = self.populated_cols.max().unwrap_or(0);
 
         let bounds = CellRange::new(
-            CellCoord::new(min_row, max_row),
-            CellCoord::new(min_col, max_col),
+            CellCoord::new(min_row, min_col),
+            CellCoord::new(max_row, max_col),
         );
 
         self.cached_bounds = Some(bounds);
@@ -246,5 +246,18 @@ mod tests {
         let range = CellRange::from_a1("A1:B2").unwrap();
         let cells: Vec<_> = grid.iter_range(range).collect();
         assert_eq!(cells.len(), 2);
+    }
+
+    #[test]
+    fn bounds_keep_rows_and_columns_apart() {
+        let mut grid = SparseGrid::new();
+        grid.set(CellCoord::new(0, 5), CellValue::Number(1.0));
+        assert_eq!(grid.bounds(), Some(CellRange::single(CellCoord::new(0, 5))));
+
+        grid.set(CellCoord::new(7, 2), CellValue::Number(2.0));
+        assert_eq!(
+            grid.bounds(),
+            Some(CellRange::new(CellCoord::new(0, 2), CellCoord::new(7, 5)))
+        );
     }
 }

@@ -1,20 +1,26 @@
 // Excel Formula Grammar for pest parser
-// Supports: numbers, strings, booleans, cell references, ranges, functions, operators
+// Supports: numbers, strings, booleans, cell references, ranges, whole rows and
+// columns, functions, operators
 
-WHITESPACE = _{ " " | "\t" }
+// Excel keeps line breaks typed into a formula; they space it like blanks.
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 
-// Entry point
-formula = { "=" ~ expr }
+// Entry points. The whole input or nothing: =A1 x is an error, not A1.
+formula = { SOI ~ "=" ~ expr ~ EOI }
+bare_expr = { SOI ~ expr ~ EOI }
 
 // Expression with operator precedence (handled by PrattParser)
-expr = { prefix* ~ primary ~ (infix ~ prefix* ~ primary)* }
+expr = { prefix* ~ primary ~ postfix* ~ (infix ~ prefix* ~ primary ~ postfix*)* }
 
-// Primary expressions
+// Primary expressions. Whole rows come before literals: 1:1 is not a number.
 primary = _{
     "(" ~ expr ~ ")"
+    | array
     | function_call
     | range_ref
     | cell_ref
+    | column_range
+    | row_range
     | literal
 }
 
@@ -23,11 +29,18 @@ literal = _{ boolean | number | string | error_literal }
 
 boolean = { ^"TRUE" | ^"FALSE" }
 
+// 12, 1.5, .5, 1E+3, and as Excel takes them 007 and 1.
 number = @{
-    "-"? ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) ~ ("." ~ ASCII_DIGIT+)? ~ (^"E" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
+    "-"? ~ (ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT*)? | "." ~ ASCII_DIGIT+) ~ (^"E" ~ ("+" | "-")? ~ ASCII_DIGIT+)?
 }
 
 string = @{ "\"" ~ (!"\"" ~ ANY | "\"\"")* ~ "\"" }
+
+// Array constants: {1,2;3,4}, rows split by ";" and columns by ",". As in
+// Excel, items are literals only; numbers may be negative.
+array = { "{" ~ array_row ~ (";" ~ array_row)* ~ "}" }
+array_row = { array_item ~ ("," ~ array_item)* }
+array_item = _{ boolean | number | string | error_literal }
 
 error_literal = {
     "#NULL!" | "#DIV/0!" | "#VALUE!" | "#REF!" | "#NAME?" | "#NUM!" | "#N/A" | "#CALC!" | "#SPILL!"
@@ -46,14 +59,27 @@ sheet_prefix = {
 quoted_sheet_name = @{ "'" ~ (!"'" ~ ANY | "''")* ~ "'" }
 sheet_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ".")* }
 
+// Not a sheet name: in Sheet1!A:A, "Sheet1" is not cell SHEET1
 cell_address = @{
-    "$"? ~ ASCII_ALPHA+ ~ "$"? ~ ASCII_DIGIT+
+    "$"? ~ ASCII_ALPHA+ ~ "$"? ~ ASCII_DIGIT+ ~ !"!"
 }
 
 // Range references (A1:B2)
 range_ref = {
     cell_ref ~ ":" ~ cell_ref
 }
+
+// Whole columns (A:C, $A:$A) and whole rows (1:3, $2:$2)
+column_range = {
+    (sheet_prefix ~ "!")? ~ column_address ~ ":" ~ column_address
+}
+row_range = {
+    (sheet_prefix ~ "!")? ~ row_address ~ ":" ~ row_address
+}
+
+// Whole lines only: A:B2 and 1:2.5 are not line ranges
+column_address = @{ "$"? ~ ASCII_ALPHA+ ~ !(ASCII_DIGIT | "$") }
+row_address = @{ "$"? ~ ASCII_DIGIT+ ~ !(ASCII_ALPHA | "$" | ".") }
 
 // Function calls
 function_call = {
@@ -62,16 +88,28 @@ function_call = {
 
 function_name = @{ ASCII_ALPHA ~ (ASCII_ALPHANUMERIC | "_" | ".")* }
 
+// Any slot may be left empty, as in PMT(r,n,pv,,1) or IF(A1,,0), but a
+// lone empty slot is no argument at all: F() takes none. Each alternative
+// commits after its first slot so nested calls never parse twice.
 arg_list = {
-    expr ~ ("," ~ expr)*
+    expr ~ ("," ~ arg)*
+    | missing_arg ~ ("," ~ arg)+
 }
+
+arg = _{ expr | missing_arg }
+
+missing_arg = { &("," | ")") }
 
 // Operators (precedence handled by PrattParser)
 prefix = _{ neg | pos }
 neg = { "-" }
 pos = { "+" }
 
-infix = _{ add | sub | mul | div | pow | concat | eq | neq | lt | lte | gt | gte }
+postfix = _{ percent }
+percent = { "%" }
+
+// Two-character operators first: <= is not < followed by =
+infix = _{ add | sub | mul | div | pow | concat | lte | gte | neq | lt | gt | eq }
 
 // Arithmetic (standard precedence)
 add = { "+" }

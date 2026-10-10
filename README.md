@@ -18,7 +18,7 @@
 
 ## Features
 
-- **100+ Excel functions** across math, statistics, text, logic, lookup and dates: `SUM`, `AVERAGE`, `IF`, `VLOOKUP`, `INDEX`/`MATCH`, `SUMIF`/`COUNTIF` with wildcards, `TEXT`, `ROUND`, and more. Press **F1** for the full list with examples.
+- **220+ Excel functions** across math, statistics, finance, text, logic, lookup and reference, dates and times, and information: `SUM`, `IF`, `VLOOKUP`, `INDEX`/`MATCH`, `SUMIF`/`COUNTIF` with wildcards, `MAXIFS`, `PMT`, `NPV`/`IRR`, `XIRR`, `NETWORKDAYS`, `DATEDIF`, `TEXTJOIN`, `TEXTBEFORE`, `INDIRECT`, `OFFSET`, `PERCENTILE`, `FORECAST`, and more. Press **F1** for the full list with examples.
 - **Live recalculation** with dependency tracking and cycle detection (`#CIRC!`).
 - **Multiple sheets** with cross-sheet references (`Sheet2!A1`, `SUM(Sheet2!A1:A10)`). Double-click a tab to rename it; the formulas that use it follow.
 - **Formatting**: bold, italic, underline, strikethrough, font size and color, fills, borders, alignment, and Excel number formats (currency, percent, dates, times, fractions, custom codes like `#,##0.00_);[Red](#,##0.00)`). Resize columns and rows by dragging, or double-click a column border to fit it.
@@ -47,6 +47,16 @@
 
 - Aggregates (`AVERAGE`, `COUNT`, `PRODUCT`, `MIN`, `MAX`, `SUMIF`, `COUNTIF`) skip blanks and text, as Excel does.
 - `MOD`, `CEILING` and `FLOOR` follow Excel's sign rules.
+- `INDIRECT` and `OFFSET` work wherever a range does (`SUM(OFFSET(A1,0,0,5))`) and recalculate after every edit, as in Excel. `INDIRECT` reads A1-style references only.
+- Dynamic-array functions that spill (`FILTER`, `SORT`, `UNIQUE`, `SEQUENCE`) are not supported.
+- Array constants such as `{1,2;3,4}` work wherever a function reads a range (`SUM({1,2,3})`, `VLOOKUP(2,{1,"a";2,"b"},2)`).
+- Operators work item by item on ranges and arrays wherever a function reads a range: `SUMPRODUCT((A1:A9="x")*B1:B9)`, `SUMPRODUCT(--(A1:A9>5))`, `SUM({1,2,3}+1)`, `INDEX(B1:B9,MATCH(1,(A1:A9="x")*(C1:C9>0),0))`. A row against a column pairs every item; other shapes that differ fill with `#N/A`, as in Excel. Whole columns and rows are read only down to the sheet's last used row (or across to its last used column), and an array holds at most 1,048,576 items (`#VALUE!` past that). In a cell by itself, an array result shows its value only when it has one item; a larger one is `#VALUE!` rather than spilling.
+- `SEARCH`, `MATCH` (type 0) and exact `VLOOKUP`/`HLOOKUP` take the `*`, `?` and `~` wildcards in text, as do the `COUNTIF`/`SUMIF` family's criteria; `FIND` reads them literally.
+- Arguments can be left empty, as in `PMT(5%/12,360,,100000)` or `IF(A1>0,,"none")`.
+- Operators read whole columns down to the last used row, so `SUMPRODUCT(A:A*B:B)` is fast — and `SUMPRODUCT(--(A:A=""))` counts blanks among the used rows only, where Excel counts all 1,048,576.
+- Operators don't convert text that looks like a number: `="3"+1` is `#VALUE!`, where Excel gives 4. `VALUE`, `NUMBERVALUE` and the functions convert as Excel does.
+- Dates follow Excel's 1900 date system, including its February 29th, 1900 (serial 60).
+- `NOW` and `TODAY` follow Windows' time zone, daylight saving time included, as in Excel. **View > Time Zone** switches them to UTC or a fixed offset from UTC-12:00 to UTC+14:00.
 - Numbers display in Excel's General format: as many decimals as fit the column, then scientific notation.
 - `TEXT` uses the same formatter as cells, so it accepts the same format codes.
 

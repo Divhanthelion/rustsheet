@@ -3,8 +3,10 @@
 //! calamine reads values and formulas but not styles, so this parses
 //! `xl/styles.xml`, the theme and each worksheet's XML directly.
 
+use super::limits::{self, MAX_FORMAT_CODE_LEN};
 use crate::cell::CellCoord;
 use crate::cell::CellRange;
+use crate::cell::{MAX_COL, MAX_ROW};
 use crate::format::conditional::{
     AverageRule, CfRule, CfStyle, Cfvo, CfvoKind, ConditionalFormat, TextRule,
 };
@@ -12,11 +14,18 @@ use crate::format::validation::CompareOp;
 use crate::format::{
     AutoFilter, Borders, CellFormat, HAlign, Rgb, SheetFormatting, VAlign, builtin_number_format,
 };
+use crate::pivot::PivotTable;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek};
+use std::sync::Arc;
+
+/// Widest column Excel allows, in characters.
+const MAX_COLUMN_WIDTH: f64 = 255.0;
+/// Tallest row Excel allows, in points.
+const MAX_ROW_HEIGHT: f64 = 409.0;
 
 /// A `<col width>` from the file to UI points. The stored width includes
 /// Excel's 5px padding: the default 8.43-character column is stored as
@@ -42,29 +51,30 @@ pub fn points_to_excel_height(points: f32) -> f64 {
     points as f64 * 15.0 / 22.0
 }
 
-/// Formatting for each sheet, in workbook order, keyed by sheet name.
+/// Formatting for each sheet, in workbook order, keyed by sheet name. A
+/// damaged part (styles, a sheet's notes, a drawing) is skipped; only a
+/// package without a readable workbook part is an error.
 pub fn read_formatting<R: Read + Seek>(
     reader: R,
 ) -> Result<Vec<(String, SheetFormatting)>, String> {
+    limits::contain("The workbook's formatting", || read_all(reader))?
+}
+
+fn read_all<R: Read + Seek>(reader: R) -> Result<Vec<(String, SheetFormatting)>, String> {
     let mut zip = zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
-    let mut read_bytes = |name: &str| -> Option<Vec<u8>> {
-        let mut file = zip.by_name(name).ok()?;
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf).ok()?;
-        Some(buf)
-    };
+    let mut read_bytes = |name: &str| limits::read_part(&mut zip, name);
     let read = |read_bytes: &mut dyn FnMut(&str) -> Option<Vec<u8>>, name: &str| {
         String::from_utf8(read_bytes(name)?).ok()
     };
 
-    let workbook = read(&mut read_bytes, "xl/workbook.xml").ok_or("missing xl/workbook.xml")?;
+    let workbook =
+        read(&mut read_bytes, "xl/workbook.xml").ok_or("missing or unreadable xl/workbook.xml")?;
     let rels = read(&mut read_bytes, "xl/_rels/workbook.xml.rels").unwrap_or_default();
     let theme = read(&mut read_bytes, "xl/theme/theme1.xml")
         .map(|t| parse_theme(&t))
         .unwrap_or_else(default_theme);
     let styles = read(&mut read_bytes, "xl/styles.xml")
-        .map(|s| parse_styles(&s, &theme))
-        .transpose()?
+        .and_then(|s| parse_styles(&s, &theme).ok())
         .unwrap_or_default();
 
     let targets = parse_rels(&rels);
@@ -90,25 +100,32 @@ pub fn read_formatting<R: Read + Seek>(
             None => format!("xl/{target}"),
         };
         sheet_parts.push((name.clone(), path.clone()));
+        // Each part stands alone: one that won't parse is left out.
         let mut formatting = match read(&mut read_bytes, &path) {
             Some(xml) => {
-                let mut f = parse_sheet(&xml, &styles)?;
-                f.validations = parse_validations(&xml)?;
-                f.conditional = parse_conditional(&xml, &styles.dxfs, &theme)?;
+                let mut f = parse_sheet(&xml, &styles).unwrap_or_default();
+                f.validations = parse_validations(&xml).unwrap_or_default();
+                f.conditional = parse_conditional(&xml, &styles.dxfs, &theme).unwrap_or_default();
                 f
             }
             None => SheetFormatting::default(),
         };
         if let Some((_, xml)) = read_rel(&mut read_bytes, &path, "/comments") {
-            formatting.notes = parse_comments(&xml)?;
+            formatting.notes = parse_comments(&xml).unwrap_or_default();
         }
         if let Some((drawing, xml)) = read_rel(&mut read_bytes, &path, "/drawing") {
             let images = part_rels(&mut read_bytes, &drawing);
+            // Read each image once, however many pictures show it.
+            let mut loaded: HashMap<String, Option<Arc<[u8]>>> = HashMap::new();
             formatting.pictures = super::drawing::parse_drawing(&xml)
                 .into_iter()
                 .filter_map(|d| {
                     let (_, _, target) = images.iter().find(|(id, _, _)| *id == d.embed)?;
-                    super::drawing::to_picture(d, read_bytes(target)?)
+                    let bytes = loaded
+                        .entry(target.clone())
+                        .or_insert_with(|| read_bytes(target).map(Arc::from))
+                        .clone()?;
+                    super::drawing::to_picture(d, bytes)
                 })
                 .collect();
         }
@@ -116,17 +133,34 @@ pub fn read_formatting<R: Read + Seek>(
     }
 
     // Pivot tables: RustSheet's own definitions, or Excel's.
-    let pivots: Vec<(String, Vec<crate::pivot::PivotTable>)> =
+    let pivots: Vec<(String, Vec<PivotTable>)> =
         match read(&mut read_bytes, super::writer::PIVOTS_MANIFEST) {
             Some(json) => serde_json::from_str(&json).unwrap_or_default(),
             None => super::pivot_reader::read_excel_pivots(&mut read_bytes, &sheet_parts),
         };
     for (name, list) in pivots {
         if let Some((_, f)) = out.iter_mut().find(|(n, _)| *n == name) {
-            f.pivots = list;
+            f.pivots = list.into_iter().filter(pivot_fits).collect();
         }
     }
     Ok(out)
+}
+
+/// Whether a pivot table read from a file stays on the sheet and names only
+/// fields its source has. The manifest is JSON anyone could have edited.
+fn pivot_fits(p: &PivotTable) -> bool {
+    if !limits::fits(p.source) {
+        return false;
+    }
+    let fields = p.source.width() as usize;
+    let field_ok = |f: &usize| *f < fields;
+    limits::on_sheet(p.anchor)
+        && p.output.is_none_or(limits::fits)
+        && p.rows.iter().all(field_ok)
+        && p.columns.iter().all(field_ok)
+        && p.filters.iter().all(field_ok)
+        && p.values.iter().all(|v| field_ok(&v.field))
+        && p.hidden.keys().all(field_ok)
 }
 
 /// A part's relationships as (id, type, resolved target):
@@ -186,7 +220,7 @@ fn walk(xml: &str, mut visit: impl FnMut(&[u8], Option<&BytesStart>, bool)) -> R
     }
 }
 
-fn parse_sheet_list(workbook: &str) -> Result<Vec<(String, String)>, String> {
+pub(super) fn parse_sheet_list(workbook: &str) -> Result<Vec<(String, String)>, String> {
     let mut sheets = Vec::new();
     walk(workbook, |name, e, _| {
         if let (b"sheet", Some(e)) = (name, e) {
@@ -247,13 +281,10 @@ pub(super) fn entity_text(e: &quick_xml::events::BytesRef) -> String {
     }
 }
 
-/// A space-separated list of ranges or cells ("A1:A10 C3").
+/// A space-separated list of ranges or cells ("A1:A10 C3"). Ranges off the
+/// sheet are left out.
 pub(super) fn parse_sqref(s: &str) -> Vec<CellRange> {
-    s.split_whitespace()
-        .filter_map(|r| {
-            CellRange::from_a1(r).or_else(|| CellCoord::from_a1(r).map(CellRange::single))
-        })
-        .collect()
+    s.split_whitespace().filter_map(limits::range).collect()
 }
 
 /// `<dataValidation type sqref operator ...><formula1>...`, and the x14
@@ -592,7 +623,7 @@ fn parse_comments(xml: &str) -> Result<BTreeMap<CellCoord, crate::format::Note>,
                 }
                 b"comment" => {
                     current = attr(&e, b"ref")
-                        .and_then(|r| CellCoord::from_a1(&r))
+                        .and_then(|r| limits::cell(&r))
                         .map(|c| (c, attr_num(&e, b"authorId"), String::new()));
                 }
                 b"t" => in_text = true,
@@ -643,7 +674,7 @@ fn parse_comments(xml: &str) -> Result<BTreeMap<CellCoord, crate::format::Note>,
     Ok(notes)
 }
 
-fn parse_rels(rels: &str) -> HashMap<String, String> {
+pub(super) fn parse_rels(rels: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     let _ = walk(rels, |name, e, _| {
         if let (b"Relationship", Some(e)) = (name, e) {
@@ -725,7 +756,9 @@ fn parse_color(e: &BytesStart, theme: &Theme) -> Option<Rgb> {
         let v = *INDEXED.get(attr_num::<usize>(e, b"indexed")?)?;
         Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
     };
-    let tint: f64 = attr_num(e, b"tint").unwrap_or(0.0);
+    let tint = attr_num::<f64>(e, b"tint")
+        .filter(|t| t.is_finite())
+        .map_or(0.0, |t| t.clamp(-1.0, 1.0));
     if tint == 0.0 {
         return Some(base);
     }
@@ -801,7 +834,10 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
     walk(xml, |name, e, _| {
         match (name, e) {
             (b"numFmt", Some(e)) => {
-                if let (Some(id), Some(code)) = (attr_num(e, b"numFmtId"), attr(e, b"formatCode")) {
+                // Formatting a number walks the code; Excel caps its length.
+                let code =
+                    attr(e, b"formatCode").filter(|c| c.chars().count() <= MAX_FORMAT_CODE_LEN);
+                if let (Some(id), Some(code)) = (attr_num(e, b"numFmtId"), code) {
                     if section == Section::Dxfs {
                         dxf.number_format = Some(code.clone());
                     }
@@ -852,7 +888,9 @@ fn parse_styles(xml: &str, theme: &Theme) -> Result<StyleTable, String> {
             (b"i", Some(e)) if section == Section::Fonts => font.italic = flag(e),
             (b"u", Some(e)) if section == Section::Fonts => font.underline = flag(e),
             (b"strike", Some(e)) if section == Section::Fonts => font.strikethrough = flag(e),
-            (b"sz", Some(e)) if section == Section::Fonts => font.size = attr_num(e, b"val"),
+            (b"sz", Some(e)) if section == Section::Fonts => {
+                font.size = attr_num(e, b"val").filter(|s: &f64| s.is_finite() && *s > 0.0)
+            }
             (b"name", Some(e)) if section == Section::Fonts => font.name = attr(e, b"val"),
             (b"color", Some(e)) if section == Section::Fonts => font.color = parse_color(e, theme),
 
@@ -960,6 +998,9 @@ fn parse_sheet(xml: &str, styles: &StyleTable) -> Result<SheetFormatting, String
     // AutoFilter: <autoFilter ref><filterColumn colId><filters><filter val/>
     let mut filter: Option<AutoFilter> = None;
     let mut filter_col: Option<u32> = None;
+    // Excel's <col> spans don't overlap, so they cover each column once at
+    // most; repeated spans beyond that are skipped rather than walked.
+    let mut col_budget = 2 * (MAX_COL + 1);
 
     walk(xml, |name, e, _| match (name, e) {
         (b"col", Some(e)) => {
@@ -967,9 +1008,16 @@ fn parse_sheet(xml: &str, styles: &StyleTable) -> Result<SheetFormatting, String
             else {
                 return;
             };
-            let (first, last) = (min.max(1) - 1, max.clamp(1, crate::cell::MAX_COL + 1) - 1);
+            let (first, last) = (min.max(1) - 1, max.clamp(1, MAX_COL + 1) - 1);
+            let span = (last + 1).saturating_sub(first);
+            let Some(left) = col_budget.checked_sub(span) else {
+                return;
+            };
+            col_budget = left;
             let hidden = matches!(attr(e, b"hidden").as_deref(), Some("1" | "true"));
-            let width = attr_num::<f64>(e, b"width").map(excel_width_to_points);
+            let width = attr_num::<f64>(e, b"width")
+                .and_then(|w| limits::size(w, MAX_COLUMN_WIDTH))
+                .map(excel_width_to_points);
             let format = style(e, b"style");
             for col in first..=last {
                 if hidden {
@@ -988,10 +1036,15 @@ fn parse_sheet(xml: &str, styles: &StyleTable) -> Result<SheetFormatting, String
             }
         }
         (b"row", Some(e)) => {
-            let Some(r) = attr_num::<u32>(e, b"r").and_then(|r| r.checked_sub(1)) else {
+            let Some(r) = attr_num::<u32>(e, b"r")
+                .and_then(|r| r.checked_sub(1))
+                .filter(|&r| r <= MAX_ROW)
+            else {
                 return;
             };
-            if let Some(ht) = attr_num::<f64>(e, b"ht") {
+            if let Some(ht) =
+                attr_num::<f64>(e, b"ht").and_then(|h| limits::size(h, MAX_ROW_HEIGHT))
+            {
                 let points = excel_height_to_points(ht);
                 if (points - default_points).abs() > 0.5 {
                     formatting.row_heights.insert(r, points);
@@ -1007,7 +1060,7 @@ fn parse_sheet(xml: &str, styles: &StyleTable) -> Result<SheetFormatting, String
             }
         }
         (b"c", Some(e)) => {
-            let Some(coord) = attr(e, b"r").and_then(|r| CellCoord::from_a1(&r)) else {
+            let Some(coord) = attr(e, b"r").and_then(|r| limits::cell(&r)) else {
                 return;
             };
             if let Some(format) = style(e, b"s") {
@@ -1015,7 +1068,7 @@ fn parse_sheet(xml: &str, styles: &StyleTable) -> Result<SheetFormatting, String
             }
         }
         (b"mergeCell", Some(e)) => {
-            if let Some(range) = attr(e, b"ref").and_then(|r| CellRange::from_a1(&r)) {
+            if let Some(range) = attr(e, b"ref").and_then(|r| limits::range(&r)) {
                 if range.start != range.end {
                     formatting.merges.push(range);
                 }
@@ -1023,14 +1076,15 @@ fn parse_sheet(xml: &str, styles: &StyleTable) -> Result<SheetFormatting, String
         }
         (b"pane", Some(e)) => {
             if matches!(attr(e, b"state").as_deref(), Some("frozen" | "frozenSplit")) {
+                // `as` saturates, and NaN is 0.
                 let rows = attr_num::<f64>(e, b"ySplit").unwrap_or(0.0) as u32;
                 let cols = attr_num::<f64>(e, b"xSplit").unwrap_or(0.0) as u32;
-                formatting.frozen = (rows, cols);
+                formatting.frozen = (rows.min(MAX_ROW), cols.min(MAX_COL));
             }
         }
         (b"autoFilter", Some(e)) => {
             filter = attr(e, b"ref")
-                .and_then(|r| CellRange::from_a1(&r))
+                .and_then(|r| limits::range(&r))
                 .map(|range| AutoFilter {
                     range,
                     allowed: BTreeMap::new(),
@@ -1054,6 +1108,11 @@ fn parse_sheet(xml: &str, styles: &StyleTable) -> Result<SheetFormatting, String
         }
         _ => {}
     })?;
+    // Filter columns count from the range's first column.
+    if let Some(f) = &mut filter {
+        let width = f.range.width();
+        f.allowed.retain(|&col, _| col < width);
+    }
     formatting.filter = filter;
     let default_width = excel_width_to_points(9.140625);
     formatting

@@ -49,7 +49,9 @@ impl Rgb {
     pub fn from_hex(s: &str) -> Option<Rgb> {
         let s = s.trim_start_matches('#');
         let s = match s.len() {
-            8 => &s[2..],
+            // Lengths are in bytes; `get` keeps a non-ASCII string from
+            // being cut inside a character.
+            8 => s.get(2..)?,
             6 => s,
             _ => return None,
         };

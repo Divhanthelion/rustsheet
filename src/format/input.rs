@@ -143,7 +143,8 @@ fn parse_date(s: &str) -> Option<(f64, bool)> {
     let days_in_month = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        // Excel's calendar has a February 29th, 1900, serial 60.
+        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 || year == 1900 => 29,
         2 => 28,
         _ => return None,
     };
@@ -240,5 +241,10 @@ mod tests {
         assert_eq!(parse_typed_number("2023-02-30"), None);
         assert_eq!(parse_typed_number("1/2"), None);
         assert_eq!(parse_typed_number("25:00"), None);
+        // Excel's own February 29th, 1900, serial 60, shows as itself.
+        assert_eq!(parse_typed_number("2/29/1900").map(|p| p.0), Some(60.0));
+        assert_eq!(show("2/29/1900").as_deref(), Some("2/29/1900"));
+        assert_eq!(show("3/1/1900").as_deref(), Some("3/1/1900"));
+        assert_eq!(parse_typed_number("2/29/1901"), None);
     }
 }
