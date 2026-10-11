@@ -41,7 +41,16 @@
 - **Merged cells and wrapped text**, vertical alignment, and long text that spills into empty neighbors.
 - **Print and PDF**: print through the Windows print dialog, or export a PDF, with gridlines, fit to width, or the selection only.
 - **Crash safe**: unsaved work is autosaved every minute and offered back if RustSheet ever closes unexpectedly; saves replace files atomically.
-- **Undo/redo**, formula autocomplete, light and dark themes (or follow Windows), recent files, and screen reader support.
+- **Undo/redo**, formula autocomplete, light and dark themes (or follow Windows), a time-zone setting for `NOW` and `TODAY`, recent files, and screen reader support.
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Two mortgage offers compared with PMT, CUMIPMT and EDATE, and a line chart of the remaining balances](assets/screenshot-finance.png) | ![A PivotTable of revenue by rep and region, with data bars on the totals](assets/screenshot-pivot.png) |
+| *Financial functions: two mortgage offers compared with `PMT`, `CUMIPMT` and `EDATE`, and the balances charted* | *A PivotTable of revenue by rep and region, refreshed in one click* |
+| ![A sales list filtered to two regions, with top-five and small-order highlights](assets/screenshot-filter.png) | ![The budget workbook in dark mode](assets/screenshot-dark.png) |
+| *AutoFilter showing two regions, with top-5 revenue and small-order highlights* | *The same budget in dark mode* |
 
 ### Excel compatibility notes
 
@@ -50,7 +59,7 @@
 - `INDIRECT` and `OFFSET` work wherever a range does (`SUM(OFFSET(A1,0,0,5))`) and recalculate after every edit, as in Excel. `INDIRECT` reads A1-style references only.
 - Dynamic-array functions that spill (`FILTER`, `SORT`, `UNIQUE`, `SEQUENCE`) are not supported.
 - Array constants such as `{1,2;3,4}` work wherever a function reads a range (`SUM({1,2,3})`, `VLOOKUP(2,{1,"a";2,"b"},2)`).
-- Operators work item by item on ranges and arrays wherever a function reads a range: `SUMPRODUCT((A1:A9="x")*B1:B9)`, `SUMPRODUCT(--(A1:A9>5))`, `SUM({1,2,3}+1)`, `INDEX(B1:B9,MATCH(1,(A1:A9="x")*(C1:C9>0),0))`. A row against a column pairs every item; other shapes that differ fill with `#N/A`, as in Excel. Whole columns and rows are read only down to the sheet's last used row (or across to its last used column), and an array holds at most 1,048,576 items (`#VALUE!` past that). In a cell by itself, an array result shows its value only when it has one item; a larger one is `#VALUE!` rather than spilling.
+- Operators work item by item on ranges and arrays wherever a function reads a range: `SUMPRODUCT((A1:A9="x")*B1:B9)`, `SUMPRODUCT(--(A1:A9>5))`, `SUM({1,2,3}+1)`, `INDEX(B1:B9,MATCH(1,(A1:A9="x")*(C1:C9>0),0))`. A row against a column pairs every item; other shapes that differ fill with `#N/A`, as in Excel. An array holds at most 1,048,576 items (`#VALUE!` past that), and in a cell by itself an array result shows its value only when it has one item; a larger one is `#VALUE!` rather than spilling.
 - `SEARCH`, `MATCH` (type 0) and exact `VLOOKUP`/`HLOOKUP` take the `*`, `?` and `~` wildcards in text, as do the `COUNTIF`/`SUMIF` family's criteria; `FIND` reads them literally.
 - Arguments can be left empty, as in `PMT(5%/12,360,,100000)` or `IF(A1>0,,"none")`.
 - Operators read whole columns down to the last used row, so `SUMPRODUCT(A:A*B:B)` is fast — and `SUMPRODUCT(--(A:A=""))` counts blanks among the used rows only, where Excel counts all 1,048,576.

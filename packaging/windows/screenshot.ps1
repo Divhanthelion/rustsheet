@@ -44,6 +44,11 @@ $env:RUSTSHEET_DATA_DIR = $dataDir
 $p = Start-Process target\release\rustsheet.exe -ArgumentList "`"$(Resolve-Path $Workbook)`"" -PassThru
 try {
     Start-Sleep $Wait
+    # Park the pointer in a corner: hovering a chart draws its x/y readout.
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point(
+        5, ([System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height - 5))
+    Start-Sleep -Milliseconds 500
     $p.Refresh()
     $h = $p.MainWindowHandle
     $r = New-Object Capture+RECT
