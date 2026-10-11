@@ -111,15 +111,17 @@ Alternatively, push a tag `vX.Y.Z` and download `RustSheet_<version>.msixbundle`
 2. [assets/screenshot-dark.png](../../assets/screenshot-dark.png): the same in dark mode
 3. [assets/screenshot-filter.png](../../assets/screenshot-filter.png): a sales list filtered to two regions, with highlights
 4. [assets/screenshot-pivot.png](../../assets/screenshot-pivot.png): a PivotTable of revenue by rep and region
+5. [assets/screenshot-finance.png](../../assets/screenshot-finance.png): two mortgage offers compared with PMT, CUMIPMT and EDATE, their balances charted
 
 Regenerate them after building (`cargo build --release`):
 
 ```powershell
-cargo run --release --example demo_workbook -- target\demo.xlsx target\sales.xlsx target\pivot.xlsx
+cargo run --release --example demo_workbook -- target\demo.xlsx target\sales.xlsx target\pivot.xlsx target\loan.xlsx
 .\packaging\windows\screenshot.ps1
 .\packaging\windows\screenshot.ps1 -Theme Dark -Out assets\screenshot-dark.png
 .\packaging\windows\screenshot.ps1 -Workbook target\sales.xlsx -Out assets\screenshot-filter.png
 .\packaging\windows\screenshot.ps1 -Workbook target\pivot.xlsx -Out assets\screenshot-pivot.png
+.\packaging\windows\screenshot.ps1 -Workbook target\loan.xlsx -Out assets\screenshot-finance.png
 ```
 
 **Store logos:** use [assets/icon-1024.png](../../assets/icon-1024.png) for the 1:1 box art and app tile icon (the Store asks for 300x300 or larger; it downscales).

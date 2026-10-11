@@ -1,9 +1,10 @@
 //! Write a sample workbook for store screenshots and manual testing.
 //!
-//! cargo run --example demo_workbook -- target/demo.xlsx [target/sales.xlsx [target/pivot.xlsx]]
+//! cargo run --example demo_workbook -- target/demo.xlsx [target/sales.xlsx [target/pivot.xlsx [target/loan.xlsx]]]
 //!
-//! The optional second file is a filtered sales list, and the third a
-//! PivotTable summarizing it.
+//! The optional second file is a filtered sales list, the third a
+//! PivotTable summarizing it, and the fourth a mortgage comparison built
+//! on the financial functions.
 
 use rustsheet::cell::{Axis, CellRange};
 use rustsheet::format::AutoFilter;
@@ -193,6 +194,161 @@ fn main() {
         write_pivot(&pivot);
         println!("Wrote {pivot}");
     }
+    if let Some(loan) = std::env::args().nth(4) {
+        write_finance(&loan);
+        println!("Wrote {loan}");
+    }
+}
+
+/// Two mortgage offers side by side: PMT, CUMIPMT, EDATE, IF/TEXT/&, the
+/// `%` operator, and a line chart of the balances from FV.
+fn write_finance(path: &str) {
+    let mut e = CalcEngine::new();
+    e.set_sheet_names(vec!["Mortgage".to_string()]);
+
+    let at = |a1: &str| CellCoord::from_a1(a1).unwrap();
+    let text = |e: &mut CalcEngine, a1: &str, s: &str| {
+        e.set_value(0, at(a1), CellValueInput::Text(s.into()))
+    };
+    let num =
+        |e: &mut CalcEngine, a1: &str, n: f64| e.set_value(0, at(a1), CellValueInput::Number(n));
+    let formula = |e: &mut CalcEngine, a1: &str, f: &str| e.set_formula(0, at(a1), f).unwrap();
+    let style = |e: &mut CalcEngine, cells: &str, f: &dyn Fn(&mut CellFormat)| {
+        let r = CellRange::from_a1(cells).unwrap();
+        for row in r.start.row..=r.end.row {
+            for col in r.start.col..=r.end.col {
+                let coord = CellCoord::new(row, col);
+                let mut format = e.cell_format(0, coord).cloned().unwrap_or_default();
+                f(&mut format);
+                e.set_cell_format(0, coord, format);
+            }
+        }
+    };
+
+    text(&mut e, "A1", "Compare two mortgage offers");
+    text(&mut e, "A3", "Home price");
+    num(&mut e, "B3", 420_000.0);
+    text(&mut e, "A4", "Down payment");
+    formula(&mut e, "B4", "=B3*20%");
+    text(&mut e, "A5", "Loan amount");
+    formula(&mut e, "B5", "=B3-B4");
+
+    text(&mut e, "B7", "Offer A");
+    text(&mut e, "C7", "Offer B");
+    let rows: [(&str, Option<&str>); 6] = [
+        ("Rate", None),
+        ("Years", None),
+        ("Monthly payment", Some("=PMT({c}8/12,{c}9*12,-$B$5)")),
+        ("Total interest", Some("={c}10*{c}9*12-$B$5")),
+        (
+            "Interest, first year",
+            Some("=-CUMIPMT({c}8/12,{c}9*12,$B$5,1,12,0)"),
+        ),
+        ("Paid off", Some("=EDATE(DATE(2026,12,1),{c}9*12)")),
+    ];
+    num(&mut e, "B8", 0.0549);
+    num(&mut e, "C8", 0.0615);
+    num(&mut e, "B9", 30.0);
+    num(&mut e, "C9", 15.0);
+    for (i, (label, f)) in rows.iter().enumerate() {
+        let row = i + 8;
+        text(&mut e, &format!("A{row}"), label);
+        if let Some(f) = f {
+            for col in ["B", "C"] {
+                formula(&mut e, &format!("{col}{row}"), &f.replace("{c}", col));
+            }
+        }
+    }
+    formula(
+        &mut e,
+        "A15",
+        "=IF(B11<C11,\"Offer A\",\"Offer B\")&\" pays \"&TEXT(ABS(B11-C11),\"$#,##0\")&\" less interest over the life of the loan\"",
+    );
+
+    // Balance by year, for the chart: FV of the loan after k years of
+    // payments, floored at paid off.
+    text(&mut e, "A18", "Year");
+    text(&mut e, "B18", "Offer A");
+    text(&mut e, "C18", "Offer B");
+    for year in 0..=30u32 {
+        let row = year + 19;
+        num(&mut e, &format!("A{row}"), year as f64);
+        for col in ["B", "C"] {
+            formula(
+                &mut e,
+                &format!("{col}{row}"),
+                &format!("=MAX(0,-FV({col}$8/12,A{row}*12,-{col}$10,$B$5))"),
+            );
+        }
+    }
+
+    style(&mut e, "A1", &|f| {
+        f.bold = true;
+        f.font_size = Some(16);
+        f.font_name = Some("Georgia".into());
+        f.h_align = HAlign::Center;
+        f.v_align = rustsheet::format::VAlign::Center;
+    });
+    style(&mut e, "B7:C7", &|f| {
+        f.bold = true;
+        f.fill = Some(Rgb(0x1F, 0x4E, 0x79));
+        f.font_color = Some(Rgb::WHITE);
+        f.h_align = HAlign::Right;
+    });
+    style(&mut e, "B3:C5", &|f| {
+        f.number_format = Some("$#,##0".into())
+    });
+    style(&mut e, "B8:C8", &|f| f.number_format = Some("0.00%".into()));
+    style(&mut e, "B10:C11", &|f| {
+        f.number_format = Some("$#,##0".into())
+    });
+    style(&mut e, "B12:C12", &|f| {
+        f.number_format = Some("$#,##0".into())
+    });
+    style(&mut e, "B10:C10", &|f| f.bold = true);
+    style(&mut e, "B13:C13", &|f| {
+        f.number_format = Some("mmm yyyy".into());
+        f.h_align = HAlign::Right;
+    });
+    style(&mut e, "A15", &|f| {
+        f.italic = true;
+        f.font_color = Some(Rgb(0x59, 0x59, 0x59));
+    });
+    style(&mut e, "A18:C18", &|f| f.bold = true);
+    style(&mut e, "B19:C49", &|f| {
+        f.number_format = Some("$#,##0".into())
+    });
+    {
+        let f = e.formatting_mut(0);
+        f.merges.push(CellRange::from_a1("A1:F1").unwrap());
+        f.merges.push(CellRange::from_a1("A15:E15").unwrap());
+        f.row_heights.insert(0, 34.0);
+        f.column_widths.insert(0, 150.0);
+    }
+
+    let range = |a1: &str| CellRange::from_a1(a1).unwrap();
+    let chart = ChartDefinition::new(ChartKind::Line)
+        .with_title("Balance remaining")
+        .with_series(
+            ChartSeries::new(range("B19:B49"))
+                .with_name("Offer A, 30 years")
+                .with_x_range(range("A19:A49"))
+                .with_color(46, 125, 70, 255),
+        )
+        .with_series(
+            ChartSeries::new(range("C19:C49"))
+                .with_name("Offer B, 15 years")
+                .with_x_range(range("A19:A49"))
+                .with_color(217, 83, 43, 255),
+        )
+        .with_overlay_area(ChartOverlayArea::new(2, 5, 520.0, 320.0));
+    let charts = [chart];
+
+    let mut writer = XlsxWriter::new();
+    writer
+        .add_engine_sheet_with_charts("Mortgage", &e, 0, &charts)
+        .unwrap();
+    writer.save_with_charts(path, &charts).unwrap();
 }
 
 /// Forty orders on `sheet`, with a styled header and a frozen top row.
